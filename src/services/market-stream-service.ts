@@ -20,6 +20,7 @@ export type MarketStreamStatus = {
 export interface PaperMarketRuntime {
   getStatus(): MarketStreamStatus;
   refreshSubscriptions(): void;
+  isTokenReady(tokenId: string): boolean;
 }
 
 export class MarketStreamService implements PaperMarketRuntime {
@@ -109,6 +110,10 @@ export class MarketStreamService implements PaperMarketRuntime {
       ...this.processor.getStatus(),
       lastError: this.lastError,
     };
+  }
+
+  public isTokenReady(tokenId: string): boolean {
+    return this.connected && this.processor.isTokenReady(tokenId);
   }
 
   private requestRestart(): void {

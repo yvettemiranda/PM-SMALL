@@ -69,6 +69,9 @@ export type PaperOrder = {
   conditionId: string;
   eventId: string;
   marketId: string;
+  gameStartsAt: string | null;
+  marketOpenedAt: string | null;
+  marketEndsAt: string | null;
   side: PaperOrderSide;
   priceMicros: number;
   targetSellPriceMicros: number | null;

@@ -9,6 +9,7 @@ import type { PaperDatabase, StrategyState } from "./infrastructure/db/database.
 import type { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
+import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -16,6 +17,7 @@ export type AppDependencies = {
   candidates: CandidateService;
   liveExecutor: LiveExecutorDisabled;
   marketStream?: PaperMarketRuntime;
+  paperAutomation?: PaperAutomationRuntime;
 };
 
 function publicConfig(config: AppConfig) {
@@ -88,7 +90,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   app.get("/api/health", async () => ({ status: "ok", mode: "PAPER" }));
 
   app.get("/api/status", async () => ({
-    version: "0.2.0",
+    version: "0.3.0",
     executionMode: "PAPER",
     liveExecutionEnabled: dependencies.liveExecutor.enabled,
     strategy: serializeState(dependencies.database.getStrategyState()),
@@ -104,10 +106,20 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       ignoredTradeEvents: 0,
       lastError: null,
     },
+    paperAutomation: dependencies.paperAutomation?.getStatus() ?? {
+      running: false,
+      lastRunAt: null,
+      lastError: null,
+      placedBuyCount: 0,
+      cancelledStartedBuyCount: 0,
+      cancelledProgressedBuyCount: 0,
+      recovery: null,
+    },
   }));
 
   app.post("/api/paper/start", async () => {
     const strategy = dependencies.database.setStrategyStatus("RUNNING");
+    dependencies.paperAutomation?.requestRun();
     dependencies.marketStream?.refreshSubscriptions();
     return { strategy: serializeState(strategy) };
   });

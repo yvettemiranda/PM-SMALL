@@ -17,6 +17,7 @@ const configSchema = z.object({
   MAX_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.03),
   SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
   MARKET_STREAM_RECONNECT_MS: z.coerce.number().int().min(250).default(2_000),
+  PAPER_SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(250).default(1_000),
   SCAN_EVENT_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(50),
   MAX_SCANNED_TOKENS: z.coerce.number().int().min(1).max(500).default(120),
 });
@@ -35,6 +36,7 @@ export type AppConfig = {
   maxBuyPriceMicros: number;
   scanIntervalMs: number;
   marketStreamReconnectMs: number;
+  paperSchedulerIntervalMs: number;
   scanEventPageSize: number;
   maxScannedTokens: number;
 };
@@ -80,6 +82,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     maxBuyPriceMicros: toMicros(parsed.MAX_BUY_PRICE),
     scanIntervalMs: parsed.SCAN_INTERVAL_MS,
     marketStreamReconnectMs: parsed.MARKET_STREAM_RECONNECT_MS,
+    paperSchedulerIntervalMs: parsed.PAPER_SCHEDULER_INTERVAL_MS,
     scanEventPageSize: parsed.SCAN_EVENT_PAGE_SIZE,
     maxScannedTokens: parsed.MAX_SCANNED_TOKENS,
   };

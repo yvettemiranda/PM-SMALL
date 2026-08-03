@@ -30,7 +30,8 @@ function renderStatus(status) {
   const streamState = stream.connected
     ? `行情 ${stream.dataCompleteTokenCount}/${stream.subscribedTokenCount}`
     : "行情未连接";
-  $("#system-state").textContent = `${strategy.status} · PAPER · ${streamState}`;
+  const automationState = status.paperAutomation.running ? "自动调度" : "调度停止";
+  $("#system-state").textContent = `${strategy.status} · PAPER · ${automationState} · ${streamState}`;
   $("#system-state").dataset.status = strategy.status;
   $("#stats").innerHTML = [
     ["可用资金", money(strategy.availableCash)],
