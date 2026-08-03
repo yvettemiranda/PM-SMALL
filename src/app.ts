@@ -8,12 +8,14 @@ import type { PaperOrder, TradeCandidate } from "./domain/types.js";
 import type { PaperDatabase, StrategyState } from "./infrastructure/db/database.js";
 import type { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
+import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 
 export type AppDependencies = {
   config: AppConfig;
   database: PaperDatabase;
   candidates: CandidateService;
   liveExecutor: LiveExecutorDisabled;
+  marketStream?: PaperMarketRuntime;
 };
 
 function publicConfig(config: AppConfig) {
@@ -45,6 +47,10 @@ function serializeOrder(order: PaperOrder) {
   return {
     ...order,
     price: microsToDecimalString(order.priceMicros),
+    targetSellPrice:
+      order.targetSellPriceMicros === null
+        ? null
+        : microsToDecimalString(order.targetSellPriceMicros),
     originalSize: microsToDecimalString(order.originalSizeMicros),
     filledSize: microsToDecimalString(order.filledSizeMicros),
     queueAheadSize: microsToDecimalString(order.queueAheadSizeMicros),
@@ -82,17 +88,29 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   app.get("/api/health", async () => ({ status: "ok", mode: "PAPER" }));
 
   app.get("/api/status", async () => ({
-    version: "0.1.0",
+    version: "0.2.0",
     executionMode: "PAPER",
     liveExecutionEnabled: dependencies.liveExecutor.enabled,
     strategy: serializeState(dependencies.database.getStrategyState()),
     configuration: publicConfig(dependencies.config),
     marketScan: serializeSnapshot(dependencies.candidates.getSnapshot()),
+    marketStream: dependencies.marketStream?.getStatus() ?? {
+      running: false,
+      connected: false,
+      subscribedTokenCount: 0,
+      dataCompleteTokenCount: 0,
+      lastEventAt: null,
+      processedTradeEvents: 0,
+      ignoredTradeEvents: 0,
+      lastError: null,
+    },
   }));
 
-  app.post("/api/paper/start", async () => ({
-    strategy: serializeState(dependencies.database.setStrategyStatus("RUNNING")),
-  }));
+  app.post("/api/paper/start", async () => {
+    const strategy = dependencies.database.setStrategyStatus("RUNNING");
+    dependencies.marketStream?.refreshSubscriptions();
+    return { strategy: serializeState(strategy) };
+  });
 
   app.post("/api/paper/pause", async () => ({
     strategy: serializeState(dependencies.database.setStrategyStatus("PAUSED")),
@@ -128,6 +146,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       candidate,
       dependencies.config.totalBudgetMicros,
     );
+    dependencies.marketStream?.refreshSubscriptions();
     return reply.code(201).send({ order: serializeOrder(order) });
   });
 

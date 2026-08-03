@@ -1,5 +1,6 @@
 export type PaperFillInput = {
   queueAheadSizeMicros: number;
+  baselineFilledSizeMicros?: number;
   observedTradeSizeMicros: number;
   originalSizeMicros: number;
   filledSizeMicros: number;
@@ -23,7 +24,7 @@ export function calculateConservativePaperFill(
   );
   const nextFilledSizeMicros = Math.min(
     input.originalSizeMicros,
-    volumeAfterQueue,
+    (input.baselineFilledSizeMicros ?? 0) + volumeAfterQueue,
   );
 
   return {
