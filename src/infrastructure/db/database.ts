@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { calculateConservativePaperFill } from "../../domain/paper-fill-model.js";
 import { calculateOrderCostMicros } from "../../domain/price.js";
 import type {
+  BookLevel,
   PaperOrder,
   PaperOrderStatus,
   TradeCandidate,
@@ -26,6 +27,7 @@ export type StrategyState = {
 
 export type AppliedPaperTrade = {
   order: PaperOrder;
+  createdSellOrder: PaperOrder | null;
   duplicate: boolean;
   incrementalFillSizeMicros: number;
 };
@@ -38,9 +40,12 @@ type PaperOrderRow = {
   market_id: string;
   side: "BUY" | "SELL";
   price_micros: number;
+  target_sell_price_micros: number | null;
+  linked_buy_order_id: string | null;
   original_size_micros: number;
   filled_size_micros: number;
   queue_ahead_size_micros: number;
+  queue_baseline_filled_size_micros: number;
   observed_trade_size_micros: number;
   status: PaperOrderStatus;
   created_at: string;
@@ -56,9 +61,12 @@ function rowToPaperOrder(row: PaperOrderRow): PaperOrder {
     marketId: row.market_id,
     side: row.side,
     priceMicros: row.price_micros,
+    targetSellPriceMicros: row.target_sell_price_micros,
+    linkedBuyOrderId: row.linked_buy_order_id,
     originalSizeMicros: row.original_size_micros,
     filledSizeMicros: row.filled_size_micros,
     queueAheadSizeMicros: row.queue_ahead_size_micros,
+    queueBaselineFilledSizeMicros: row.queue_baseline_filled_size_micros,
     observedTradeSizeMicros: row.observed_trade_size_micros,
     status: row.status,
     createdAt: row.created_at,
@@ -84,16 +92,37 @@ export class PaperDatabase {
   }
 
   private applyMigrations(): void {
-    const migrationPath = fileURLToPath(
-      new URL("./migrations/001_initial.sql", import.meta.url),
+    this.database.exec(
+      `CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );`,
     );
-    const sql = readFileSync(migrationPath, "utf8");
-    this.database.exec(sql);
-    this.database
-      .prepare(
-        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-      )
-      .run(1, new Date().toISOString());
+    const migrations = [
+      { version: 1, file: "001_initial.sql" },
+      { version: 2, file: "002_queue_rebase.sql" },
+    ];
+
+    for (const migration of migrations) {
+      const applied = this.database
+        .prepare(
+          "SELECT 1 FROM schema_migrations WHERE version = ?",
+        )
+        .get(migration.version);
+      if (applied !== undefined) {
+        continue;
+      }
+
+      const migrationPath = fileURLToPath(
+        new URL(`./migrations/${migration.file}`, import.meta.url),
+      );
+      this.database.exec(readFileSync(migrationPath, "utf8"));
+      this.database
+        .prepare(
+          "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+        )
+        .run(migration.version, new Date().toISOString());
+    }
   }
 
   private ensureStrategyState(initialCapitalMicros: number): void {
@@ -177,13 +206,72 @@ export class PaperDatabase {
     const rows = this.database
       .prepare(
         `SELECT id, token_id, condition_id, event_id, market_id, side,
-          price_micros, original_size_micros, filled_size_micros,
-          queue_ahead_size_micros, observed_trade_size_micros, status,
+          price_micros, target_sell_price_micros, linked_buy_order_id,
+          original_size_micros, filled_size_micros,
+          queue_ahead_size_micros, queue_baseline_filled_size_micros,
+          observed_trade_size_micros, status,
           created_at, updated_at
         FROM paper_orders ORDER BY created_at DESC LIMIT ?`,
       )
       .all(limit) as unknown as PaperOrderRow[];
     return rows.map(rowToPaperOrder);
+  }
+
+  public listActivePaperOrders(tokenId?: string): PaperOrder[] {
+    const filter = tokenId === undefined ? "" : "AND token_id = ?";
+    const rows = this.database
+      .prepare(
+        `SELECT id, token_id, condition_id, event_id, market_id, side,
+          price_micros, target_sell_price_micros, linked_buy_order_id,
+          original_size_micros, filled_size_micros,
+          queue_ahead_size_micros, queue_baseline_filled_size_micros,
+          observed_trade_size_micros, status,
+          created_at, updated_at
+        FROM paper_orders
+        WHERE status IN ('OPEN', 'PARTIALLY_FILLED') ${filter}
+        ORDER BY created_at, id`,
+      )
+      .all(...(tokenId === undefined ? [] : [tokenId])) as unknown as PaperOrderRow[];
+    return rows.map(rowToPaperOrder);
+  }
+
+  public rebaseActivePaperOrderQueues(
+    tokenId: string,
+    bids: BookLevel[],
+    asks: BookLevel[],
+  ): PaperOrder[] {
+    return this.transaction(() => {
+      const orders = this.listActivePaperOrders(tokenId);
+      const virtualAhead = new Map<string, number>();
+      const now = new Date().toISOString();
+
+      for (const order of orders) {
+        const levels = order.side === "BUY" ? bids : asks;
+        const key = `${order.side}:${order.priceMicros}`;
+        const realQueue = levels
+          .filter((level) => level.priceMicros === order.priceMicros)
+          .reduce((sum, level) => sum + level.sizeMicros, 0);
+        const queueAhead = realQueue + (virtualAhead.get(key) ?? 0);
+        const remainingSize = order.originalSizeMicros - order.filledSizeMicros;
+
+        this.database
+          .prepare(
+            `UPDATE paper_orders
+            SET queue_ahead_size_micros = ?,
+                queue_baseline_filled_size_micros = ?,
+                observed_trade_size_micros = 0, updated_at = ? WHERE id = ?`,
+          )
+          .run(queueAhead, order.filledSizeMicros, now, order.id);
+        virtualAhead.set(key, (virtualAhead.get(key) ?? 0) + remainingSize);
+      }
+
+      if (orders.length > 0) {
+        this.writeAudit("PAPER_QUEUES_REBASED", "market_token", tokenId, {
+          orderCount: orders.length,
+        });
+      }
+      return this.listActivePaperOrders(tokenId);
+    });
   }
 
   public placePaperBuy(
@@ -276,11 +364,17 @@ export class PaperDatabase {
     tradePriceMicros: number;
     tradeSizeMicros: number;
     dataComplete: boolean;
+    sellRealQueueAheadSizeMicros?: number;
   }): AppliedPaperTrade {
     return this.transaction(() => {
       const order = this.getPaperOrder(input.orderId);
       if (!input.dataComplete || !["OPEN", "PARTIALLY_FILLED"].includes(order.status)) {
-        return { order, duplicate: false, incrementalFillSizeMicros: 0 };
+        return {
+          order,
+          createdSellOrder: null,
+          duplicate: false,
+          incrementalFillSizeMicros: 0,
+        };
       }
 
       const duplicate = this.database
@@ -289,11 +383,21 @@ export class PaperDatabase {
         )
         .get(order.id, input.sourceTradeId);
       if (duplicate !== undefined) {
-        return { order, duplicate: true, incrementalFillSizeMicros: 0 };
+        return {
+          order,
+          createdSellOrder: null,
+          duplicate: true,
+          incrementalFillSizeMicros: 0,
+        };
       }
 
       if (input.tradePriceMicros !== order.priceMicros) {
-        return { order, duplicate: false, incrementalFillSizeMicros: 0 };
+        return {
+          order,
+          createdSellOrder: null,
+          duplicate: false,
+          incrementalFillSizeMicros: 0,
+        };
       }
 
       const now = new Date().toISOString();
@@ -306,6 +410,7 @@ export class PaperDatabase {
 
       const fill = calculateConservativePaperFill({
         queueAheadSizeMicros: order.queueAheadSizeMicros,
+        baselineFilledSizeMicros: order.queueBaselineFilledSizeMicros,
         observedTradeSizeMicros: order.observedTradeSizeMicros,
         originalSizeMicros: order.originalSizeMicros,
         filledSizeMicros: order.filledSizeMicros,
@@ -332,6 +437,7 @@ export class PaperDatabase {
           order.id,
         );
 
+      let createdSellOrder: PaperOrder | null = null;
       if (fill.incrementalFillSizeMicros > 0) {
         const fillId = randomUUID();
         this.database
@@ -351,6 +457,12 @@ export class PaperDatabase {
 
         if (order.side === "BUY") {
           this.applyBuyFill(order, fill.incrementalFillSizeMicros, now);
+          createdSellOrder = this.createPaperSellForBuyFill(
+            order,
+            fill.incrementalFillSizeMicros,
+            input.sellRealQueueAheadSizeMicros ?? 0,
+            now,
+          );
         } else {
           this.applySellFill(order, fill.incrementalFillSizeMicros, now);
         }
@@ -364,10 +476,62 @@ export class PaperDatabase {
 
       return {
         order: this.getPaperOrder(order.id),
+        createdSellOrder,
         duplicate: false,
         incrementalFillSizeMicros: fill.incrementalFillSizeMicros,
       };
     });
+  }
+
+  private createPaperSellForBuyFill(
+    buyOrder: PaperOrder,
+    sizeMicros: number,
+    realQueueAheadSizeMicros: number,
+    now: string,
+  ): PaperOrder {
+    if (buyOrder.targetSellPriceMicros === null) {
+      throw new Error("Paper buy order is missing its target sell price");
+    }
+
+    const existingVirtualQueue = this.listActivePaperOrders(buyOrder.tokenId)
+      .filter(
+        (order) =>
+          order.side === "SELL" &&
+          order.priceMicros === buyOrder.targetSellPriceMicros,
+      )
+      .reduce(
+        (sum, order) =>
+          sum + order.originalSizeMicros - order.filledSizeMicros,
+        0,
+      );
+    const id = randomUUID();
+    this.database
+      .prepare(
+        `INSERT INTO paper_orders(
+          id, token_id, condition_id, event_id, market_id, side,
+          price_micros, target_sell_price_micros, linked_buy_order_id,
+          original_size_micros, filled_size_micros, queue_ahead_size_micros,
+          observed_trade_size_micros, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'SELL', ?, NULL, ?, ?, 0, ?, 0, 'OPEN', ?, ?)`,
+      )
+      .run(
+        id,
+        buyOrder.tokenId,
+        buyOrder.conditionId,
+        buyOrder.eventId,
+        buyOrder.marketId,
+        buyOrder.targetSellPriceMicros,
+        buyOrder.id,
+        sizeMicros,
+        realQueueAheadSizeMicros + existingVirtualQueue,
+        now,
+        now,
+      );
+    this.writeAudit("PAPER_SELL_PLACED", "paper_order", id, {
+      linkedBuyOrderId: buyOrder.id,
+      sizeMicros,
+    });
+    return this.getPaperOrder(id);
   }
 
   private applyBuyFill(order: PaperOrder, sizeMicros: number, now: string): void {
@@ -486,8 +650,10 @@ export class PaperDatabase {
     const row = this.database
       .prepare(
         `SELECT id, token_id, condition_id, event_id, market_id, side,
-          price_micros, original_size_micros, filled_size_micros,
-          queue_ahead_size_micros, observed_trade_size_micros, status,
+          price_micros, target_sell_price_micros, linked_buy_order_id,
+          original_size_micros, filled_size_micros,
+          queue_ahead_size_micros, queue_baseline_filled_size_micros,
+          observed_trade_size_micros, status,
           created_at, updated_at FROM paper_orders WHERE id = ?`,
       )
       .get(id) as PaperOrderRow | undefined;

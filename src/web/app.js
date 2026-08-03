@@ -26,7 +26,11 @@ function showMessage(message, error = false) {
 
 function renderStatus(status) {
   const strategy = status.strategy;
-  $("#system-state").textContent = `${strategy.status} · PAPER`;
+  const stream = status.marketStream;
+  const streamState = stream.connected
+    ? `行情 ${stream.dataCompleteTokenCount}/${stream.subscribedTokenCount}`
+    : "行情未连接";
+  $("#system-state").textContent = `${strategy.status} · PAPER · ${streamState}`;
   $("#system-state").dataset.status = strategy.status;
   $("#stats").innerHTML = [
     ["可用资金", money(strategy.availableCash)],

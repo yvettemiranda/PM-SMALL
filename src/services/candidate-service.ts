@@ -14,6 +14,7 @@ export class CandidateService {
   private lastError: string | null = null;
   private activeScan: Promise<CandidateSnapshot> | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private readonly listeners = new Set<(snapshot: CandidateSnapshot) => void>();
 
   public constructor(
     private readonly scanner: CandidateScanner,
@@ -53,6 +54,12 @@ export class CandidateService {
     );
   }
 
+  public subscribe(listener: (snapshot: CandidateSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    listener(this.getSnapshot());
+    return () => this.listeners.delete(listener);
+  }
+
   public refresh(): Promise<CandidateSnapshot> {
     if (this.activeScan !== null) {
       return this.activeScan;
@@ -72,8 +79,16 @@ export class CandidateService {
       })
       .finally(() => {
         this.activeScan = null;
+        this.notifyListeners();
       });
 
     return this.activeScan;
+  }
+
+  private notifyListeners(): void {
+    const snapshot = this.getSnapshot();
+    for (const listener of this.listeners) {
+      listener(snapshot);
+    }
   }
 }

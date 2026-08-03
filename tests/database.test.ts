@@ -51,5 +51,78 @@ describe("PaperDatabase", () => {
     });
     expect(duplicate.duplicate).toBe(true);
     expect(database.getStrategyState().positionCostMicros).toBe(40_000);
+    expect(
+      database.listPaperOrders().filter((paperOrder) => paperOrder.side === "SELL"),
+    ).toHaveLength(1);
+  });
+
+  it("creates a sell for each buy fill and closes buys after the first sell", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    const buyFill = database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "buy-trade",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+      sellRealQueueAheadSizeMicros: 4_000_000,
+    });
+
+    expect(buyFill.incrementalFillSizeMicros).toBe(2_000_000);
+    expect(buyFill.createdSellOrder).toMatchObject({
+      side: "SELL",
+      priceMicros: 30_000,
+      originalSizeMicros: 2_000_000,
+      queueAheadSizeMicros: 4_000_000,
+      linkedBuyOrderId: buy.id,
+    });
+
+    const sell = buyFill.createdSellOrder;
+    if (sell === null) throw new Error("Expected an automatic paper sell");
+    database.rebaseActivePaperOrderQueues("yes-token", [], []);
+    const sellFill = database.applyPaperTrade({
+      orderId: sell.id,
+      sourceTradeId: "sell-trade",
+      tradePriceMicros: 30_000,
+      tradeSizeMicros: 2_000_000,
+      dataComplete: true,
+    });
+
+    expect(sellFill.order.status).toBe("FILLED");
+    expect(database.listActivePaperOrders("yes-token")).toHaveLength(0);
+    expect(database.getStrategyState()).toMatchObject({
+      availableCashMicros: 100_020_000,
+      reservedCashMicros: 0,
+      realizedPnlMicros: 20_000,
+      positionCostMicros: 0,
+    });
+    expect(() =>
+      database.placePaperBuy(makeCandidate(), 100_000_000),
+    ).toThrow(/first sell/);
+  });
+
+  it("continues a partial fill conservatively after queue rebasing", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "before-gap",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+    });
+    database.rebaseActivePaperOrderQueues(
+      "yes-token",
+      [{ priceMicros: 20_000, sizeMicros: 5_000_000 }],
+      [],
+    );
+    const afterGap = database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "after-gap",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 7_000_000,
+      dataComplete: true,
+    });
+
+    expect(afterGap.incrementalFillSizeMicros).toBe(2_000_000);
+    expect(afterGap.order.filledSizeMicros).toBe(4_000_000);
   });
 });

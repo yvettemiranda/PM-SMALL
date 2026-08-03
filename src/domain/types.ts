@@ -71,11 +71,46 @@ export type PaperOrder = {
   marketId: string;
   side: PaperOrderSide;
   priceMicros: number;
+  targetSellPriceMicros: number | null;
+  linkedBuyOrderId: string | null;
   originalSizeMicros: number;
   filledSizeMicros: number;
   queueAheadSizeMicros: number;
+  queueBaselineFilledSizeMicros: number;
   observedTradeSizeMicros: number;
   status: PaperOrderStatus;
   createdAt: string;
   updatedAt: string;
 };
+
+export type MarketBookSnapshot = {
+  type: "book";
+  tokenId: string;
+  bids: BookLevel[];
+  asks: BookLevel[];
+  timestampMs: number | null;
+};
+
+export type MarketPriceChange = {
+  type: "price_change";
+  tokenId: string;
+  side: PaperOrderSide;
+  priceMicros: number;
+  sizeMicros: number;
+  timestampMs: number | null;
+};
+
+export type MarketTrade = {
+  type: "trade";
+  sourceTradeId: string;
+  tokenId: string;
+  takerSide: PaperOrderSide;
+  priceMicros: number;
+  sizeMicros: number;
+  timestampMs: number | null;
+};
+
+export type MarketStreamEvent =
+  | MarketBookSnapshot
+  | MarketPriceChange
+  | MarketTrade;
