@@ -32,12 +32,23 @@ export type AppliedPaperTrade = {
   incrementalFillSizeMicros: number;
 };
 
+export type PaperRecoveryResult = {
+  passed: boolean;
+  errors: string[];
+  activeOrderCount: number;
+  cancelledBuyCount: number;
+  recoveredAt: string;
+};
+
 type PaperOrderRow = {
   id: string;
   token_id: string;
   condition_id: string;
   event_id: string;
   market_id: string;
+  game_starts_at: string | null;
+  market_opened_at: string | null;
+  market_ends_at: string | null;
   side: "BUY" | "SELL";
   price_micros: number;
   target_sell_price_micros: number | null;
@@ -59,6 +70,9 @@ function rowToPaperOrder(row: PaperOrderRow): PaperOrder {
     conditionId: row.condition_id,
     eventId: row.event_id,
     marketId: row.market_id,
+    gameStartsAt: row.game_starts_at,
+    marketOpenedAt: row.market_opened_at,
+    marketEndsAt: row.market_ends_at,
     side: row.side,
     priceMicros: row.price_micros,
     targetSellPriceMicros: row.target_sell_price_micros,
@@ -101,6 +115,7 @@ export class PaperDatabase {
     const migrations = [
       { version: 1, file: "001_initial.sql" },
       { version: 2, file: "002_queue_rebase.sql" },
+      { version: 3, file: "003_game_start.sql" },
     ];
 
     for (const migration of migrations) {
@@ -154,12 +169,21 @@ export class PaperDatabase {
   }
 
   public setStrategyStatus(status: StrategyStatus): StrategyState {
-    const now = new Date().toISOString();
-    this.database
-      .prepare("UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1")
-      .run(status, now);
-    this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
-    return this.getStrategyState();
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      this.database
+        .prepare("UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1")
+        .run(status, now);
+      if (status !== "RUNNING") {
+        for (const order of this.listActivePaperOrders().filter(
+          (paperOrder) => paperOrder.side === "BUY",
+        )) {
+          this.cancelPaperBuy(order, now, `STRATEGY_${status}`);
+        }
+      }
+      this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
+      return this.getStrategyState();
+    });
   }
 
   public getStrategyState(): StrategyState {
@@ -205,7 +229,8 @@ export class PaperDatabase {
   public listPaperOrders(limit = 100): PaperOrder[] {
     const rows = this.database
       .prepare(
-        `SELECT id, token_id, condition_id, event_id, market_id, side,
+        `SELECT id, token_id, condition_id, event_id, market_id, game_starts_at,
+          market_opened_at, market_ends_at, side,
           price_micros, target_sell_price_micros, linked_buy_order_id,
           original_size_micros, filled_size_micros,
           queue_ahead_size_micros, queue_baseline_filled_size_micros,
@@ -221,7 +246,8 @@ export class PaperDatabase {
     const filter = tokenId === undefined ? "" : "AND token_id = ?";
     const rows = this.database
       .prepare(
-        `SELECT id, token_id, condition_id, event_id, market_id, side,
+        `SELECT id, token_id, condition_id, event_id, market_id, game_starts_at,
+          market_opened_at, market_ends_at, side,
           price_micros, target_sell_price_micros, linked_buy_order_id,
           original_size_micros, filled_size_micros,
           queue_ahead_size_micros, queue_baseline_filled_size_micros,
@@ -274,6 +300,162 @@ export class PaperDatabase {
     });
   }
 
+  public cancelStartedGameBuys(now: Date = new Date()): number {
+    return this.transaction(() => {
+      const nowIso = now.toISOString();
+      const orders = this.listActivePaperOrders().filter(
+        (order) =>
+          order.side === "BUY" &&
+          order.gameStartsAt !== null &&
+          Date.parse(order.gameStartsAt) <= now.getTime(),
+      );
+      for (const order of orders) {
+        this.cancelPaperBuy(order, nowIso, "GAME_STARTED");
+      }
+      return orders.length;
+    });
+  }
+
+  public cancelProgressedMarketBuys(
+    stopProgressPercent: number,
+    now: Date = new Date(),
+  ): number {
+    return this.transaction(() => {
+      const nowIso = now.toISOString();
+      const orders = this.listActivePaperOrders().filter((order) => {
+        if (
+          order.side !== "BUY" ||
+          order.marketOpenedAt === null ||
+          order.marketEndsAt === null
+        ) {
+          return false;
+        }
+        const openedAt = Date.parse(order.marketOpenedAt);
+        const endsAt = Date.parse(order.marketEndsAt);
+        if (
+          !Number.isFinite(openedAt) ||
+          !Number.isFinite(endsAt) ||
+          endsAt <= openedAt
+        ) {
+          return true;
+        }
+        const progressPercent =
+          ((now.getTime() - openedAt) / (endsAt - openedAt)) * 100;
+        return progressPercent >= stopProgressPercent;
+      });
+      for (const order of orders) {
+        this.cancelPaperBuy(order, nowIso, "MARKET_PROGRESS_LIMIT");
+      }
+      return orders.length;
+    });
+  }
+
+  public recoverPaperState(): PaperRecoveryResult {
+    return this.transaction(() => {
+      const recoveredAt = new Date().toISOString();
+      const closedTokens = this.database
+        .prepare(
+          "SELECT token_id FROM paper_positions WHERE first_sell_at IS NOT NULL",
+        )
+        .all() as unknown as Array<{ token_id: string }>;
+      let cancelledBuyCount = 0;
+      for (const row of closedTokens) {
+        cancelledBuyCount += this.cancelActiveBuysForToken(
+          row.token_id,
+          recoveredAt,
+          "RECOVERY_FIRST_SELL",
+        );
+      }
+
+      const activeOrders = this.listActivePaperOrders();
+      const state = this.getStrategyState();
+      const expectedReservedCash = activeOrders
+        .filter((order) => order.side === "BUY")
+        .reduce(
+          (sum, order) =>
+            sum +
+            calculateOrderCostMicros(
+              order.priceMicros,
+              order.originalSizeMicros - order.filledSizeMicros,
+            ),
+          0,
+        );
+      const positionRows = this.database
+        .prepare(
+          "SELECT token_id, quantity_micros FROM paper_positions WHERE quantity_micros > 0",
+        )
+        .all() as unknown as Array<{
+        token_id: string;
+        quantity_micros: number;
+      }>;
+      const activeSellByToken = new Map<string, number>();
+      for (const order of activeOrders.filter((order) => order.side === "SELL")) {
+        activeSellByToken.set(
+          order.tokenId,
+          (activeSellByToken.get(order.tokenId) ?? 0) +
+            order.originalSizeMicros -
+            order.filledSizeMicros,
+        );
+      }
+
+      const errors: string[] = [];
+      if (state.reservedCashMicros !== expectedReservedCash) {
+        errors.push("Reserved paper cash does not match active buy orders");
+      }
+      if (
+        state.availableCashMicros < 0 ||
+        state.reservedCashMicros < 0 ||
+        state.positionCostMicros < 0
+      ) {
+        errors.push("Paper balances contain a negative value");
+      }
+      if (
+        state.availableCashMicros +
+          state.reservedCashMicros +
+          state.positionCostMicros !==
+        state.initialCapitalMicros + state.realizedPnlMicros
+      ) {
+        errors.push("Paper balance conservation check failed");
+      }
+      for (const position of positionRows) {
+        if (
+          (activeSellByToken.get(position.token_id) ?? 0) !==
+          position.quantity_micros
+        ) {
+          errors.push(
+            `Active paper sells do not cover position: ${position.token_id}`,
+          );
+        }
+        activeSellByToken.delete(position.token_id);
+      }
+      if (activeSellByToken.size > 0) {
+        errors.push("Active paper sells exist without matching positions");
+      }
+
+      if (errors.length > 0) {
+        this.database
+          .prepare(
+            "UPDATE strategy_state SET status = 'PAUSED', updated_at = ? WHERE id = 1",
+          )
+          .run(recoveredAt);
+      }
+      const result: PaperRecoveryResult = {
+        passed: errors.length === 0,
+        errors,
+        activeOrderCount: activeOrders.length,
+        cancelledBuyCount,
+        recoveredAt,
+      };
+      this.writeAudit(
+        result.passed ? "PAPER_RECOVERY_COMPLETED" : "PAPER_RECOVERY_FAILED",
+        "strategy",
+        "1",
+        result,
+      );
+      return result;
+    });
+  }
+
   public placePaperBuy(
     candidate: TradeCandidate,
     totalBudgetMicros: number,
@@ -282,6 +464,12 @@ export class PaperDatabase {
       const state = this.getStrategyState();
       if (state.status !== "RUNNING") {
         throw new Error("Paper strategy must be running before placing orders");
+      }
+      if (
+        candidate.gameStartsAt !== null &&
+        Date.parse(candidate.gameStartsAt) <= Date.now()
+      ) {
+        throw new Error("Paper buy is blocked because the game has started");
       }
 
       const closedCycle = this.database
@@ -322,11 +510,12 @@ export class PaperDatabase {
       this.database
         .prepare(
           `INSERT INTO paper_orders(
-            id, token_id, condition_id, event_id, market_id, side,
+            id, token_id, condition_id, event_id, market_id, game_starts_at,
+            market_opened_at, market_ends_at, side,
             price_micros, target_sell_price_micros, linked_buy_order_id,
             original_size_micros, filled_size_micros, queue_ahead_size_micros,
             observed_trade_size_micros, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, 'BUY', ?, ?, NULL, ?, 0, ?, 0, 'OPEN', ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BUY', ?, ?, NULL, ?, 0, ?, 0, 'OPEN', ?, ?)`,
         )
         .run(
           id,
@@ -334,6 +523,9 @@ export class PaperDatabase {
           candidate.conditionId,
           candidate.eventId,
           candidate.marketId,
+          candidate.gameStartsAt,
+          candidate.openedAt,
+          candidate.endsAt,
           candidate.makerBuyPriceMicros,
           candidate.fixedSellPriceMicros,
           candidate.orderSizeMicros,
@@ -508,11 +700,12 @@ export class PaperDatabase {
     this.database
       .prepare(
         `INSERT INTO paper_orders(
-          id, token_id, condition_id, event_id, market_id, side,
+          id, token_id, condition_id, event_id, market_id, game_starts_at,
+          market_opened_at, market_ends_at, side,
           price_micros, target_sell_price_micros, linked_buy_order_id,
           original_size_micros, filled_size_micros, queue_ahead_size_micros,
           observed_trade_size_micros, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'SELL', ?, NULL, ?, ?, 0, ?, 0, 'OPEN', ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, NULL, ?, ?, 0, ?, 0, 'OPEN', ?, ?)`,
       )
       .run(
         id,
@@ -520,6 +713,9 @@ export class PaperDatabase {
         buyOrder.conditionId,
         buyOrder.eventId,
         buyOrder.marketId,
+        buyOrder.gameStartsAt,
+        buyOrder.marketOpenedAt,
+        buyOrder.marketEndsAt,
         buyOrder.targetSellPriceMicros,
         buyOrder.id,
         sizeMicros,
@@ -610,46 +806,53 @@ export class PaperDatabase {
             updated_at = ? WHERE id = 1`,
       )
       .run(proceedsMicros, realizedPnlMicros, now);
-    this.cancelActiveBuysForToken(order.tokenId, now);
+    this.cancelActiveBuysForToken(order.tokenId, now, "FIRST_SELL");
   }
 
-  private cancelActiveBuysForToken(tokenId: string, now: string): void {
-    const orders = this.database
-      .prepare(
-        `SELECT id, price_micros, original_size_micros, filled_size_micros
-        FROM paper_orders WHERE token_id = ? AND side = 'BUY'
-          AND status IN ('OPEN', 'PARTIALLY_FILLED')`,
-      )
-      .all(tokenId) as unknown as Array<{
-      id: string;
-      price_micros: number;
-      original_size_micros: number;
-      filled_size_micros: number;
-    }>;
-
-    for (const buy of orders) {
-      const remainingSize = buy.original_size_micros - buy.filled_size_micros;
-      const releasedCash = calculateOrderCostMicros(buy.price_micros, remainingSize);
-      this.database
-        .prepare(
-          "UPDATE paper_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
-        )
-        .run(now, buy.id);
-      this.database
-        .prepare(
-          `UPDATE strategy_state
-          SET available_cash_micros = available_cash_micros + ?,
-              reserved_cash_micros = reserved_cash_micros - ?,
-              updated_at = ? WHERE id = 1`,
-        )
-        .run(releasedCash, releasedCash, now);
+  private cancelActiveBuysForToken(
+    tokenId: string,
+    now: string,
+    reason: string,
+  ): number {
+    const orders = this.listActivePaperOrders(tokenId).filter(
+      (order) => order.side === "BUY",
+    );
+    for (const order of orders) {
+      this.cancelPaperBuy(order, now, reason);
     }
+    return orders.length;
+  }
+
+  private cancelPaperBuy(order: PaperOrder, now: string, reason: string): void {
+    const remainingSize = order.originalSizeMicros - order.filledSizeMicros;
+    const releasedCash = calculateOrderCostMicros(
+      order.priceMicros,
+      remainingSize,
+    );
+    this.database
+      .prepare(
+        "UPDATE paper_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+      )
+      .run(now, order.id);
+    this.database
+      .prepare(
+        `UPDATE strategy_state
+        SET available_cash_micros = available_cash_micros + ?,
+            reserved_cash_micros = reserved_cash_micros - ?,
+            updated_at = ? WHERE id = 1`,
+      )
+      .run(releasedCash, releasedCash, now);
+    this.writeAudit("PAPER_BUY_CANCELLED", "paper_order", order.id, {
+      reason,
+      releasedCash,
+    });
   }
 
   private getPaperOrder(id: string): PaperOrder {
     const row = this.database
       .prepare(
-        `SELECT id, token_id, condition_id, event_id, market_id, side,
+        `SELECT id, token_id, condition_id, event_id, market_id, game_starts_at,
+          market_opened_at, market_ends_at, side,
           price_micros, target_sell_price_micros, linked_buy_order_id,
           original_size_micros, filled_size_micros,
           queue_ahead_size_micros, queue_baseline_filled_size_micros,

@@ -20,6 +20,103 @@ describe("PaperDatabase", () => {
     expect(state.reservedCashMicros).toBe(1_000_000);
   });
 
+  it("blocks buys after a sports game starts", () => {
+    expect(() =>
+      database.placePaperBuy(
+        makeCandidate({ gameStartsAt: "2020-01-01T00:00:00.000Z" }),
+        100_000_000,
+      ),
+    ).toThrow(/game has started/);
+    expect(database.listPaperOrders()).toHaveLength(0);
+    expect(database.getStrategyState()).toMatchObject({
+      availableCashMicros: 100_000_000,
+      reservedCashMicros: 0,
+    });
+  });
+
+  it("cancels in-flight buys when a sports game starts", () => {
+    const gameStartsAt = "2099-01-01T00:00:00.000Z";
+    const buy = database.placePaperBuy(
+      makeCandidate({ gameStartsAt }),
+      100_000_000,
+    );
+
+    expect(database.cancelStartedGameBuys(new Date(gameStartsAt))).toBe(1);
+    expect(database.listPaperOrders()).toContainEqual(
+      expect.objectContaining({ id: buy.id, status: "CANCELLED" }),
+    );
+    expect(database.getStrategyState()).toMatchObject({
+      availableCashMicros: 100_000_000,
+      reservedCashMicros: 0,
+    });
+  });
+
+  it("cancels in-flight buys at the configured market progress limit", () => {
+    const buy = database.placePaperBuy(
+      makeCandidate({
+        openedAt: "2099-01-01T00:00:00.000Z",
+        endsAt: "2099-01-11T00:00:00.000Z",
+      }),
+      100_000_000,
+    );
+
+    expect(
+      database.cancelProgressedMarketBuys(
+        90,
+        new Date("2099-01-10T00:00:00.000Z"),
+      ),
+    ).toBe(1);
+    expect(database.listPaperOrders()).toContainEqual(
+      expect.objectContaining({ id: buy.id, status: "CANCELLED" }),
+    );
+    expect(database.getStrategyState()).toMatchObject({
+      availableCashMicros: 100_000_000,
+      reservedCashMicros: 0,
+    });
+  });
+
+  it("cancels only the unfilled part of buys when paused", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "partial-before-pause",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+    });
+
+    database.setStrategyStatus("PAUSED");
+
+    expect(database.listPaperOrders()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: buy.id,
+          status: "CANCELLED",
+          filledSizeMicros: 2_000_000,
+        }),
+        expect.objectContaining({ side: "SELL", status: "OPEN" }),
+      ]),
+    );
+    expect(database.getStrategyState()).toMatchObject({
+      status: "PAUSED",
+      availableCashMicros: 99_960_000,
+      reservedCashMicros: 0,
+      positionCostMicros: 40_000,
+    });
+  });
+
+  it("checks paper balances and active orders during recovery", () => {
+    database.placePaperBuy(makeCandidate(), 100_000_000);
+
+    expect(database.recoverPaperState()).toMatchObject({
+      passed: true,
+      errors: [],
+      activeOrderCount: 1,
+      cancelledBuyCount: 0,
+    });
+    expect(database.getStrategyState().status).toBe("RUNNING");
+  });
+
   it("applies queue-aware partial fills and deduplicates trades", () => {
     const order = database.placePaperBuy(makeCandidate(), 100_000_000);
 

@@ -16,6 +16,7 @@ export const testConfig: AppConfig = {
   maxBuyPriceMicros: 30_000,
   scanIntervalMs: 15_000,
   marketStreamReconnectMs: 2_000,
+  paperSchedulerIntervalMs: 1_000,
   scanEventPageSize: 50,
   maxScannedTokens: 120,
 };

@@ -52,6 +52,10 @@ export class PaperMarketProcessor {
     }
   }
 
+  public isTokenReady(tokenId: string): boolean {
+    return this.readyTokens.has(tokenId);
+  }
+
   public getStatus(): PaperMarketProcessorStatus {
     return {
       dataCompleteTokenCount: this.readyTokens.size,

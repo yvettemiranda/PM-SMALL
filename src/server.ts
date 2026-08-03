@@ -8,6 +8,7 @@ import { PolymarketMarketStreamSource } from "./infrastructure/polymarket/market
 import { CandidateService } from "./services/candidate-service.js";
 import { MarketStreamService } from "./services/market-stream-service.js";
 import { PaperMarketProcessor } from "./services/paper-market-processor.js";
+import { PaperAutomationService } from "./services/paper-automation-service.js";
 
 const config = loadConfig();
 const database = new PaperDatabase(
@@ -26,18 +27,27 @@ const marketStream = new MarketStreamService(
   config.marketStreamReconnectMs,
 );
 const liveExecutor = new LiveExecutorDisabled();
+const paperAutomation = new PaperAutomationService(
+  candidates,
+  database,
+  marketStream,
+  config,
+);
 const app = buildApp({
   config,
   database,
   candidates,
   liveExecutor,
   marketStream,
+  paperAutomation,
 });
 
 candidates.start();
 marketStream.start();
+paperAutomation.start();
 
 const shutdown = async () => {
+  await paperAutomation.stop();
   await marketStream.stop();
   candidates.stop();
   await app.close();
