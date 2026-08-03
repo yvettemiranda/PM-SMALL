@@ -30,6 +30,11 @@ describe("HTTP app", () => {
     const status = await app.inject({ method: "GET", url: "/api/status" });
     expect(status.statusCode).toBe(200);
     expect(status.json().liveExecutionEnabled).toBe(false);
+    expect(status.json().version).toBe("0.4.0");
+    expect(status.json().paperSettlement).toMatchObject({
+      running: false,
+      settledMarketCount: 0,
+    });
 
     await app.inject({ method: "POST", url: "/api/paper/start" });
     await app.inject({ method: "GET", url: "/api/candidates?refresh=true" });
@@ -40,5 +45,18 @@ describe("HTTP app", () => {
     });
     expect(orderResponse.statusCode).toBe(201);
     expect(orderResponse.json().order.status).toBe("OPEN");
+
+    const positions = await app.inject({
+      method: "GET",
+      url: "/api/paper/positions",
+    });
+    const settlements = await app.inject({
+      method: "GET",
+      url: "/api/paper/settlements",
+    });
+    expect(positions.statusCode).toBe(200);
+    expect(settlements.statusCode).toBe(200);
+    expect(positions.json().positions).toEqual([]);
+    expect(settlements.json().settlements).toEqual([]);
   });
 });

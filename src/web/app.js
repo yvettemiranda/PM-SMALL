@@ -14,8 +14,22 @@ function money(value) {
   return `${Number(value).toFixed(2)}U`;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return entities[character];
+  });
+}
+
 function shortToken(value) {
-  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+  const text = String(value);
+  return `${escapeHtml(text.slice(0, 8))}…${escapeHtml(text.slice(-6))}`;
 }
 
 function showMessage(message, error = false) {
@@ -55,14 +69,14 @@ function renderCandidates(snapshot) {
     ? snapshot.candidates
         .map(
           (candidate) => `<tr>
-            <td><strong>${candidate.eventTitle}</strong><small>${candidate.marketQuestion}</small></td>
-            <td>${candidate.direction}</td>
+            <td><strong>${escapeHtml(candidate.eventTitle)}</strong><small>${escapeHtml(candidate.marketQuestion)}</small></td>
+            <td>${escapeHtml(candidate.direction)}</td>
             <td>${candidate.progressPercent.toFixed(1)}%</td>
             <td>${candidate.bestBid}</td>
             <td>${candidate.makerBuyPrice}</td>
             <td>${candidate.fixedSellPrice}</td>
             <td>${Number(candidate.orderSize).toFixed(2)}</td>
-            <td><button class="small" data-buy="${candidate.candidateId}">虚拟买入</button></td>
+            <td><button class="small" data-buy="${escapeHtml(candidate.candidateId)}">虚拟买入</button></td>
           </tr>`,
         )
         .join("")
@@ -74,27 +88,66 @@ function renderOrders(orders) {
     ? orders
         .map(
           (order) => `<tr>
-            <td title="${order.tokenId}">${shortToken(order.tokenId)}</td>
-            <td>${order.side}</td>
+            <td title="${escapeHtml(order.tokenId)}">${shortToken(order.tokenId)}</td>
+            <td>${escapeHtml(order.side)}</td>
             <td>${order.price}</td>
             <td>${Number(order.originalSize).toFixed(2)}</td>
             <td>${Number(order.filledSize).toFixed(2)}</td>
-            <td>${order.status}</td>
+            <td>${escapeHtml(order.status)}</td>
           </tr>`,
         )
         .join("")
     : '<tr><td colspan="6" class="empty">暂无测试订单</td></tr>';
 }
 
+function renderPositions(positions) {
+  const body = $("#positions");
+  body.innerHTML = positions.length
+    ? positions
+        .map(
+          (position) => `<tr>
+            <td title="${escapeHtml(position.tokenId)}">${shortToken(position.tokenId)}<small>${shortToken(position.conditionId)}</small></td>
+            <td>${Number(position.quantity).toFixed(2)}</td>
+            <td>${Number(position.cost).toFixed(2)}</td>
+            <td>${Number(position.realizedPnl).toFixed(2)}</td>
+            <td>${position.cycleClosedAt ? "已关闭" : "持有中"}</td>
+          </tr>`,
+        )
+        .join("")
+    : '<tr><td colspan="5" class="empty">暂无纸面持仓</td></tr>';
+}
+
+function renderSettlements(settlements) {
+  const body = $("#settlements");
+  body.innerHTML = settlements.length
+    ? settlements
+        .map(
+          (settlement) => `<tr>
+            <td title="${escapeHtml(settlement.conditionId)}">${shortToken(settlement.conditionId)}<small>${escapeHtml(settlement.marketId)}</small></td>
+            <td>${escapeHtml(settlement.status)}<small>${escapeHtml(settlement.winningOutcome || "等待正式结果")}</small></td>
+            <td>${escapeHtml(settlement.outcome || "-")}</td>
+            <td>${Number(settlement.payout).toFixed(2)}</td>
+            <td>${Number(settlement.realizedPnl).toFixed(2)}</td>
+            <td>${escapeHtml(settlement.redemptionStatus)}</td>
+          </tr>`,
+        )
+        .join("")
+    : '<tr><td colspan="6" class="empty">暂无待结算市场</td></tr>';
+}
+
 async function loadAll(refresh = false) {
-  const [status, candidates, orders] = await Promise.all([
+  const [status, candidates, orders, positions, settlements] = await Promise.all([
     api("/api/status"),
     api(`/api/candidates${refresh ? "?refresh=true" : ""}`),
     api("/api/paper/orders"),
+    api("/api/paper/positions"),
+    api("/api/paper/settlements"),
   ]);
   renderStatus(status);
   renderCandidates(candidates);
   renderOrders(orders.orders);
+  renderPositions(positions.positions);
+  renderSettlements(settlements.settlements);
 }
 
 document.addEventListener("click", async (event) => {

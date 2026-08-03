@@ -5,11 +5,17 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { microsToDecimalString } from "./domain/price.js";
 import type { PaperOrder, TradeCandidate } from "./domain/types.js";
-import type { PaperDatabase, StrategyState } from "./infrastructure/db/database.js";
+import type {
+  PaperDatabase,
+  PaperPosition,
+  PaperSettlement,
+  StrategyState,
+} from "./infrastructure/db/database.js";
 import type { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
+import type { PaperSettlementRuntime } from "./services/paper-settlement-service.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -18,6 +24,7 @@ export type AppDependencies = {
   liveExecutor: LiveExecutorDisabled;
   marketStream?: PaperMarketRuntime;
   paperAutomation?: PaperAutomationRuntime;
+  paperSettlement?: PaperSettlementRuntime;
 };
 
 function publicConfig(config: AppConfig) {
@@ -31,6 +38,7 @@ function publicConfig(config: AppConfig) {
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(config.maxBuyPriceMicros),
     scanIntervalMs: config.scanIntervalMs,
+    paperSettlementIntervalMs: config.paperSettlementIntervalMs,
   };
 }
 
@@ -57,6 +65,24 @@ function serializeOrder(order: PaperOrder) {
     filledSize: microsToDecimalString(order.filledSizeMicros),
     queueAheadSize: microsToDecimalString(order.queueAheadSizeMicros),
     observedTradeSize: microsToDecimalString(order.observedTradeSizeMicros),
+  };
+}
+
+function serializePosition(position: PaperPosition) {
+  return {
+    ...position,
+    quantity: microsToDecimalString(position.quantityMicros),
+    cost: microsToDecimalString(position.costMicros),
+    realizedPnl: microsToDecimalString(position.realizedPnlMicros),
+  };
+}
+
+function serializeSettlement(settlement: PaperSettlement) {
+  return {
+    ...settlement,
+    positionCost: microsToDecimalString(settlement.positionCostMicros),
+    payout: microsToDecimalString(settlement.payoutMicros),
+    realizedPnl: microsToDecimalString(settlement.realizedPnlMicros),
   };
 }
 
@@ -90,7 +116,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   app.get("/api/health", async () => ({ status: "ok", mode: "PAPER" }));
 
   app.get("/api/status", async () => ({
-    version: "0.3.0",
+    version: "0.4.0",
     executionMode: "PAPER",
     liveExecutionEnabled: dependencies.liveExecutor.enabled,
     strategy: serializeState(dependencies.database.getStrategyState()),
@@ -115,11 +141,20 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       cancelledProgressedBuyCount: 0,
       recovery: null,
     },
+    paperSettlement: dependencies.paperSettlement?.getStatus() ?? {
+      running: false,
+      lastRunAt: null,
+      lastError: null,
+      checkedMarketCount: 0,
+      waitingMarketCount: 0,
+      settledMarketCount: 0,
+    },
   }));
 
   app.post("/api/paper/start", async () => {
     const strategy = dependencies.database.setStrategyStatus("RUNNING");
     dependencies.paperAutomation?.requestRun();
+    dependencies.paperSettlement?.requestRun();
     dependencies.marketStream?.refreshSubscriptions();
     return { strategy: serializeState(strategy) };
   });
@@ -145,6 +180,16 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/api/paper/orders", async () => ({
     orders: dependencies.database.listPaperOrders().map(serializeOrder),
+  }));
+
+  app.get("/api/paper/positions", async () => ({
+    positions: dependencies.database.listPaperPositions().map(serializePosition),
+  }));
+
+  app.get("/api/paper/settlements", async () => ({
+    settlements: dependencies.database
+      .listPaperSettlements()
+      .map(serializeSettlement),
   }));
 
   app.post("/api/paper/orders/buy", async (request, reply) => {

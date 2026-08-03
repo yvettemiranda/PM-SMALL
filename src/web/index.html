@@ -82,6 +82,53 @@
         </div>
       </section>
 
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>纸面持仓</h2>
+            <p>未卖出的持仓会在市场正式结算后模拟赎回。</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Token／Condition</th>
+                <th>数量</th>
+                <th>持仓成本</th>
+                <th>已实现收益</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="positions"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <h2>结算与纸面赎回</h2>
+            <p>仅接受 Polymarket 正式结算结果；钱包和链上操作保持禁用。</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Condition／市场</th>
+                <th>状态／结果</th>
+                <th>盈亏类型</th>
+                <th>回收金额</th>
+                <th>结算收益</th>
+                <th>赎回状态</th>
+              </tr>
+            </thead>
+            <tbody id="settlements"></tbody>
+          </table>
+        </div>
+      </section>
+
       <p id="message" role="status"></p>
     </main>
     <script type="module" src="/app.js"></script>
