@@ -45,6 +45,17 @@ describe("HTTP app", () => {
       lastResult: null,
     });
 
+    const compactStatus = await app.inject({
+      method: "GET",
+      url: "/api/status?compact=true",
+    });
+    expect(compactStatus.statusCode).toBe(200);
+    expect(compactStatus.json().marketScan).toMatchObject({
+      candidateCount: 0,
+      lastScanAt: null,
+    });
+    expect(compactStatus.json().marketScan).not.toHaveProperty("candidates");
+
     const validation = await app.inject({
       method: "GET",
       url: "/api/paper/validation",

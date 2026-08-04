@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "node scripts/build.mjs",
     "start": "node dist/server.js",
+    "paper:soak": "tsx src/cli/paper-soak.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

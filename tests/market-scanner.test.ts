@@ -29,10 +29,21 @@ describe("MarketScanner", () => {
         ],
       }),
     );
+    let requestedWindow: unknown;
+    let eventsProgress: unknown;
+    let booksProgress: unknown;
+    let scanner: MarketScanner;
     const source: MarketDataSource = {
-      listOpenEvents: async () => events,
-      fetchOrderBooks: async (tokenIds) =>
-        tokenIds.map((tokenId) => {
+      listOpenEvents: async (request, reportProgress) => {
+        requestedWindow = request;
+        reportProgress?.({ pageCount: 3, eventCount: events.length });
+        eventsProgress = scanner.getLastDiagnostics();
+        return events;
+      },
+      fetchOrderBooks: async (tokenIds, reportProgress) => {
+        reportProgress?.({ batchCount: 5, orderBookCount: tokenIds.length });
+        booksProgress = scanner.getLastDiagnostics();
+        return tokenIds.map((tokenId) => {
           const isYes = tokenId.startsWith("yes-");
           return {
             tokenId,
@@ -46,16 +57,66 @@ describe("MarketScanner", () => {
             negRisk: false,
             hash: "hash",
           } as unknown as OrderBook;
-        }),
+        });
+      },
     };
 
-    const candidates = await new MarketScanner(source, testConfig).scan(
+    scanner = new MarketScanner(source, testConfig);
+    const candidates = await scanner.scan(
       new Date("2026-01-02T00:00:00.000Z"),
     );
 
     expect(candidates).toHaveLength(121);
     expect(candidates[0]?.tokenId).toBe("yes-token-0");
     expect(candidates.at(-1)?.tokenId).toBe("yes-token-120");
+    expect(requestedWindow).toEqual({
+      pageSize: 50,
+      startDateMin: "2025-12-03T00:00:00.000Z",
+      startDateMax: "2026-01-02T00:00:00.000Z",
+      endDateMin: "2026-01-02T00:00:00.000Z",
+      endDateMax: "2026-02-01T00:00:00.000Z",
+    });
+    expect(eventsProgress).toMatchObject({
+      phase: "EVENTS",
+      completedAt: null,
+      eventPageCount: 3,
+      eventCount: 121,
+    });
+    expect(booksProgress).toMatchObject({
+      phase: "ORDER_BOOKS",
+      completedAt: null,
+      orderBookBatchCount: 5,
+      orderBookCount: 242,
+    });
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      phase: "COMPLETE",
+      eventPageCount: 3,
+      orderBookBatchCount: 5,
+      eventCount: 121,
+      eligibleTokenCount: 242,
+      orderBookCount: 242,
+      candidateCount: 121,
+      durationMs: expect.any(Number),
+    });
+  });
+
+  it("retains failed-scan diagnostics", async () => {
+    const source: MarketDataSource = {
+      listOpenEvents: async (_request, reportProgress) => {
+        reportProgress?.({ pageCount: 2, eventCount: 100 });
+        throw new Error("temporary Gamma failure");
+      },
+      fetchOrderBooks: async () => [],
+    };
+    const scanner = new MarketScanner(source, testConfig);
+
+    await expect(scanner.scan()).rejects.toThrow("temporary Gamma failure");
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      phase: "FAILED",
+      completedAt: expect.any(String),
+      eventPageCount: 2,
+      eventCount: 100,
+    });
   });
 
   it("builds low-price YES candidates from official data shapes", async () => {

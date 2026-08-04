@@ -1,4 +1,7 @@
-import type { CandidateScanner } from "../domain/market-scanner.js";
+import type {
+  CandidateScanner,
+  MarketScanDiagnostics,
+} from "../domain/market-scanner.js";
 import type { TradeCandidate } from "../domain/types.js";
 
 export type CandidateSnapshot = {
@@ -6,12 +9,14 @@ export type CandidateSnapshot = {
   lastScanAt: string | null;
   lastError: string | null;
   scanning: boolean;
+  diagnostics: MarketScanDiagnostics | null;
 };
 
 export class CandidateService {
   private candidates: TradeCandidate[] = [];
   private lastScanAt: string | null = null;
   private lastError: string | null = null;
+  private diagnostics: MarketScanDiagnostics | null = null;
   private activeScan: Promise<CandidateSnapshot> | null = null;
   private timer: NodeJS.Timeout | null = null;
   private readonly listeners = new Set<(snapshot: CandidateSnapshot) => void>();
@@ -39,11 +44,15 @@ export class CandidateService {
   }
 
   public getSnapshot(): CandidateSnapshot {
+    const currentDiagnostics =
+      this.scanner.getLastDiagnostics?.() ?? this.diagnostics;
     return {
       candidates: this.candidates,
       lastScanAt: this.lastScanAt,
       lastError: this.lastError,
       scanning: this.activeScan !== null,
+      diagnostics:
+        currentDiagnostics === null ? null : { ...currentDiagnostics },
     };
   }
 
@@ -71,6 +80,7 @@ export class CandidateService {
         this.candidates = candidates;
         this.lastScanAt = new Date().toISOString();
         this.lastError = null;
+        this.diagnostics = this.scanner.getLastDiagnostics?.() ?? null;
         return this.getSnapshot();
       })
       .catch((error: unknown) => {

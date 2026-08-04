@@ -20,7 +20,7 @@ const configSchema = z.object({
   PAPER_SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(250).default(1_000),
   PAPER_SETTLEMENT_INTERVAL_MS: z.coerce.number().int().min(1_000).default(30_000),
   PAPER_VALIDATION_INTERVAL_MS: z.coerce.number().int().min(1_000).default(60_000),
-  SCAN_EVENT_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(50),
+  SCAN_EVENT_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(100),
 });
 
 export type AppConfig = {

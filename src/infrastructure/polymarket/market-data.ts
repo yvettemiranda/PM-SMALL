@@ -8,10 +8,34 @@ import { decimalStringToMicros } from "../../domain/price.js";
 import type { PaperMarketResolution } from "../../domain/paper-settlement.js";
 
 export interface MarketDataSource {
-  /** Returns every page of currently open events; filtering happens downstream. */
-  listOpenEvents(pageSize: number): Promise<Event[]>;
-  fetchOrderBooks(tokenIds: string[]): Promise<OrderBook[]>;
+  /** Returns every page inside a scan window; exact filtering happens downstream. */
+  listOpenEvents(
+    request: OpenEventScanRequest,
+    reportProgress?: (progress: OpenEventScanProgress) => void,
+  ): Promise<Event[]>;
+  fetchOrderBooks(
+    tokenIds: string[],
+    reportProgress?: (progress: OrderBookFetchProgress) => void,
+  ): Promise<OrderBook[]>;
 }
+
+export type OpenEventScanRequest = {
+  pageSize: number;
+  startDateMin: string;
+  startDateMax: string;
+  endDateMin: string;
+  endDateMax: string;
+};
+
+export type OpenEventScanProgress = {
+  pageCount: number;
+  eventCount: number;
+};
+
+export type OrderBookFetchProgress = {
+  batchCount: number;
+  orderBookCount: number;
+};
 
 export interface MarketResolutionSource {
   fetchMarketResolution(marketId: string): Promise<PaperMarketResolution>;
@@ -26,24 +50,34 @@ export class PolymarketMarketDataSource
     this.client = client;
   }
 
-  public async listOpenEvents(pageSize: number): Promise<Event[]> {
-    // Do not impose a local page or token cap: the configured duration/progress
-    // filters decide eligibility after the complete public event set is read.
+  public async listOpenEvents(
+    request: OpenEventScanRequest,
+    reportProgress?: (progress: OpenEventScanProgress) => void,
+  ): Promise<Event[]> {
+    // Do not impose a local page or token cap. The date bounds are a safe
+    // superset of the configured duration rule; exact checks remain downstream.
     const events: Event[] = [];
     const pages = this.client.listEvents({
       closed: false,
-      pageSize,
+      ...request,
     });
 
+    let pageCount = 0;
     for await (const page of pages) {
       events.push(...page.items);
+      pageCount += 1;
+      reportProgress?.({ pageCount, eventCount: events.length });
     }
 
     return events;
   }
 
-  public async fetchOrderBooks(tokenIds: string[]): Promise<OrderBook[]> {
+  public async fetchOrderBooks(
+    tokenIds: string[],
+    reportProgress?: (progress: OrderBookFetchProgress) => void,
+  ): Promise<OrderBook[]> {
     const books: OrderBook[] = [];
+    let batchCount = 0;
 
     for (let offset = 0; offset < tokenIds.length; offset += 50) {
       const batch = tokenIds.slice(offset, offset + 50);
@@ -51,6 +85,8 @@ export class PolymarketMarketDataSource
         batch.map((tokenId) => ({ tokenId })),
       );
       books.push(...result);
+      batchCount += 1;
+      reportProgress?.({ batchCount, orderBookCount: books.length });
     }
 
     return books;

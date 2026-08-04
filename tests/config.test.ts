@@ -9,6 +9,7 @@ describe("loadConfig", () => {
     expect(config.minBuyPriceMicros).toBe(10_000);
     expect(config.maxBuyPriceMicros).toBe(30_000);
     expect(config.paperValidationIntervalMs).toBe(60_000);
+    expect(config.scanEventPageSize).toBe(100);
   });
 
   it("rejects a per-token budget above the total budget", () => {

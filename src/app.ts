@@ -106,11 +106,15 @@ function serializeCandidate(candidate: TradeCandidate) {
   };
 }
 
-function serializeSnapshot(snapshot: CandidateSnapshot) {
-  return {
-    ...snapshot,
-    candidates: snapshot.candidates.map(serializeCandidate),
-  };
+function serializeSnapshot(
+  snapshot: CandidateSnapshot,
+  includeCandidates = true,
+) {
+  const { candidates, ...status } = snapshot;
+  const summary = { ...status, candidateCount: candidates.length };
+  return includeCandidates
+    ? { ...summary, candidates: candidates.map(serializeCandidate) }
+    : summary;
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -118,49 +122,57 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/api/health", async () => ({ status: "ok", mode: "PAPER" }));
 
-  app.get("/api/status", async () => ({
-    version: "0.4.0",
-    executionMode: "PAPER",
-    liveExecutionEnabled: dependencies.liveExecutor.enabled,
-    strategy: serializeState(dependencies.database.getStrategyState()),
-    configuration: publicConfig(dependencies.config),
-    marketScan: serializeSnapshot(dependencies.candidates.getSnapshot()),
-    marketStream: dependencies.marketStream?.getStatus() ?? {
-      running: false,
-      connected: false,
-      subscribedTokenCount: 0,
-      dataCompleteTokenCount: 0,
-      lastEventAt: null,
-      processedTradeEvents: 0,
-      ignoredTradeEvents: 0,
-      lastError: null,
-    },
-    paperAutomation: dependencies.paperAutomation?.getStatus() ?? {
-      running: false,
-      lastRunAt: null,
-      lastError: null,
-      placedBuyCount: 0,
-      cancelledStartedBuyCount: 0,
-      cancelledProgressedBuyCount: 0,
-      recovery: null,
-    },
-    paperSettlement: dependencies.paperSettlement?.getStatus() ?? {
-      running: false,
-      lastRunAt: null,
-      lastError: null,
-      checkedMarketCount: 0,
-      waitingMarketCount: 0,
-      settledMarketCount: 0,
-    },
-    paperValidation: dependencies.paperValidation?.getStatus() ?? {
-      running: false,
-      validationCount: 0,
-      failedValidationCount: 0,
-      lastRunAt: null,
-      lastError: null,
-      lastResult: null,
-    },
-  }));
+  app.get("/api/status", async (request) => {
+    const query = z
+      .object({ compact: z.enum(["true", "false"]).optional() })
+      .parse(request.query);
+    return {
+      version: "0.4.0",
+      executionMode: "PAPER",
+      liveExecutionEnabled: dependencies.liveExecutor.enabled,
+      strategy: serializeState(dependencies.database.getStrategyState()),
+      configuration: publicConfig(dependencies.config),
+      marketScan: serializeSnapshot(
+        dependencies.candidates.getSnapshot(),
+        query.compact !== "true",
+      ),
+      marketStream: dependencies.marketStream?.getStatus() ?? {
+        running: false,
+        connected: false,
+        subscribedTokenCount: 0,
+        dataCompleteTokenCount: 0,
+        lastEventAt: null,
+        processedTradeEvents: 0,
+        ignoredTradeEvents: 0,
+        lastError: null,
+      },
+      paperAutomation: dependencies.paperAutomation?.getStatus() ?? {
+        running: false,
+        lastRunAt: null,
+        lastError: null,
+        placedBuyCount: 0,
+        cancelledStartedBuyCount: 0,
+        cancelledProgressedBuyCount: 0,
+        recovery: null,
+      },
+      paperSettlement: dependencies.paperSettlement?.getStatus() ?? {
+        running: false,
+        lastRunAt: null,
+        lastError: null,
+        checkedMarketCount: 0,
+        waitingMarketCount: 0,
+        settledMarketCount: 0,
+      },
+      paperValidation: dependencies.paperValidation?.getStatus() ?? {
+        running: false,
+        validationCount: 0,
+        failedValidationCount: 0,
+        lastRunAt: null,
+        lastError: null,
+        lastResult: null,
+      },
+    };
+  });
 
   app.get("/api/paper/validation", async (_request, reply) => {
     // Keep GET side-effect free. The periodic service owns pause and audit.

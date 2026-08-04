@@ -5,6 +5,21 @@ import { extractEligibleTokens, filterEligibleEvent } from "./event-filter.js";
 import { buildTradeCandidate, decimalStringToMicros } from "./price.js";
 import type { TokenOrderBook, TradeCandidate } from "./types.js";
 
+const DAY_MS = 86_400_000;
+
+export type MarketScanDiagnostics = {
+  phase: "EVENTS" | "ORDER_BOOKS" | "COMPLETE" | "FAILED";
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number;
+  eventPageCount: number;
+  eventCount: number;
+  eligibleTokenCount: number;
+  orderBookBatchCount: number;
+  orderBookCount: number;
+  candidateCount: number;
+};
+
 function normalizeOrderBook(book: OrderBook): TokenOrderBook {
   return {
     tokenId: String(book.tokenId),
@@ -25,56 +40,152 @@ function normalizeOrderBook(book: OrderBook): TokenOrderBook {
 
 export interface CandidateScanner {
   scan(now?: Date): Promise<TradeCandidate[]>;
+  getLastDiagnostics?(): MarketScanDiagnostics | null;
 }
 
 export class MarketScanner implements CandidateScanner {
+  private lastDiagnostics: MarketScanDiagnostics | null = null;
+  private activeScanStartedAtMs: number | null = null;
+
   public constructor(
     private readonly marketData: MarketDataSource,
     private readonly config: AppConfig,
   ) {}
 
+  public getLastDiagnostics(): MarketScanDiagnostics | null {
+    if (this.lastDiagnostics === null) {
+      return null;
+    }
+    return {
+      ...this.lastDiagnostics,
+      durationMs:
+        this.activeScanStartedAtMs === null
+          ? this.lastDiagnostics.durationMs
+          : Math.max(0, Date.now() - this.activeScanStartedAtMs),
+    };
+  }
+
   public async scan(now: Date = new Date()): Promise<TradeCandidate[]> {
-    // The data source has already traversed every open-event page. Keep all
-    // eligible tokens here; only domain filters and order-book rules may reject.
-    const events = await this.marketData.listOpenEvents(
-      this.config.scanEventPageSize,
-    );
-    const tokens = events
-      .flatMap((event) => {
+    const startedAt = new Date();
+    const startedAtMs = Date.now();
+    this.activeScanStartedAtMs = startedAtMs;
+    this.lastDiagnostics = {
+      phase: "EVENTS",
+      startedAt: startedAt.toISOString(),
+      completedAt: null,
+      durationMs: 0,
+      eventPageCount: 0,
+      eventCount: 0,
+      eligibleTokenCount: 0,
+      orderBookBatchCount: 0,
+      orderBookCount: 0,
+      candidateCount: 0,
+    };
+    // The time window is only a safe upstream reduction. Every page inside it
+    // is traversed, then the exact domain and order-book rules run locally.
+    try {
+      const scanWindowMs = this.config.maxMarketDurationDays * DAY_MS;
+      const nowMs = now.getTime();
+      const events = await this.marketData.listOpenEvents(
+        {
+          pageSize: this.config.scanEventPageSize,
+          startDateMin: new Date(nowMs - scanWindowMs).toISOString(),
+          startDateMax: now.toISOString(),
+          endDateMin: now.toISOString(),
+          endDateMax: new Date(nowMs + scanWindowMs).toISOString(),
+        },
+        ({ pageCount, eventCount }) => {
+          this.updateDiagnostics({
+            phase: "EVENTS",
+            eventPageCount: pageCount,
+            eventCount,
+          });
+        },
+      );
+      const tokens = events.flatMap((event) => {
         const eligibleEvent = filterEligibleEvent(event, this.config, now);
         return eligibleEvent === null
           ? []
           : extractEligibleTokens(event, eligibleEvent, now);
       });
 
-    if (tokens.length === 0) {
-      return [];
-    }
-
-    const books = await this.marketData.fetchOrderBooks(
-      tokens.map((token) => token.tokenId),
-    );
-    const bookByToken = new Map(
-      books.map((book) => {
-        const normalized = normalizeOrderBook(book);
-        return [normalized.tokenId, normalized] as const;
-      }),
-    );
-
-    return tokens.flatMap((token) => {
-      const book = bookByToken.get(token.tokenId);
-      if (book === undefined || book.isNegativeRisk !== token.isNegativeRisk) {
-        return [];
-      }
-
-      const candidate = buildTradeCandidate(
-        token,
-        book,
-        this.config.orderBudgetMicros,
-        this.config.minBuyPriceMicros,
-        this.config.maxBuyPriceMicros,
+      this.updateDiagnostics({
+        phase: "ORDER_BOOKS",
+        eventCount: events.length,
+        eligibleTokenCount: tokens.length,
+      });
+      const books =
+        tokens.length === 0
+          ? []
+          : await this.marketData.fetchOrderBooks(
+              tokens.map((token) => token.tokenId),
+              ({ batchCount, orderBookCount }) => {
+                this.updateDiagnostics({
+                  phase: "ORDER_BOOKS",
+                  orderBookBatchCount: batchCount,
+                  orderBookCount,
+                });
+              },
+            );
+      const bookByToken = new Map(
+        books.map((book) => {
+          const normalized = normalizeOrderBook(book);
+          return [normalized.tokenId, normalized] as const;
+        }),
       );
-      return candidate === null ? [] : [candidate];
+
+      const candidates = tokens.flatMap((token) => {
+        const book = bookByToken.get(token.tokenId);
+        if (book === undefined || book.isNegativeRisk !== token.isNegativeRisk) {
+          return [];
+        }
+
+        const candidate = buildTradeCandidate(
+          token,
+          book,
+          this.config.orderBudgetMicros,
+          this.config.minBuyPriceMicros,
+          this.config.maxBuyPriceMicros,
+        );
+        return candidate === null ? [] : [candidate];
+      });
+      this.finishDiagnostics("COMPLETE", {
+        eventCount: events.length,
+        eligibleTokenCount: tokens.length,
+        orderBookCount: books.length,
+        candidateCount: candidates.length,
+      });
+      return candidates;
+    } catch (error) {
+      this.finishDiagnostics("FAILED");
+      throw error;
+    }
+  }
+
+  private updateDiagnostics(update: Partial<MarketScanDiagnostics>): void {
+    if (this.lastDiagnostics === null) {
+      return;
+    }
+    this.lastDiagnostics = {
+      ...this.lastDiagnostics,
+      ...update,
+      durationMs: Math.max(
+        0,
+        Date.now() - (this.activeScanStartedAtMs ?? Date.now()),
+      ),
+    };
+  }
+
+  private finishDiagnostics(
+    phase: "COMPLETE" | "FAILED",
+    update: Partial<MarketScanDiagnostics> = {},
+  ): void {
+    const completedAt = new Date();
+    this.updateDiagnostics({
+      ...update,
+      phase,
+      completedAt: completedAt.toISOString(),
     });
+    this.activeScanStartedAtMs = null;
   }
 }

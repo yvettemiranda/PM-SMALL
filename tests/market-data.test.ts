@@ -20,12 +20,24 @@ describe("PolymarketMarketDataSource", () => {
         return paginator;
       },
     } as unknown as PublicClient);
+    const progress: unknown[] = [];
 
-    await expect(source.listOpenEvents(1)).resolves.toEqual([
-      firstEvent,
-      secondEvent,
+    const scanWindow = {
+      pageSize: 100,
+      startDateMin: "2026-01-01T00:00:00.000Z",
+      startDateMax: "2026-01-31T00:00:00.000Z",
+      endDateMin: "2026-01-31T00:00:00.000Z",
+      endDateMax: "2026-03-02T00:00:00.000Z",
+    };
+
+    await expect(
+      source.listOpenEvents(scanWindow, (update) => progress.push(update)),
+    ).resolves.toEqual([firstEvent, secondEvent]);
+    expect(requests).toEqual([{ closed: false, ...scanWindow }]);
+    expect(progress).toEqual([
+      { pageCount: 1, eventCount: 1 },
+      { pageCount: 2, eventCount: 2 },
     ]);
-    expect(requests).toEqual([{ closed: false, pageSize: 1 }]);
   });
 
   it("normalizes the official market resolution fields without a wallet", async () => {
