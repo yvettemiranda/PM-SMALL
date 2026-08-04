@@ -5,6 +5,26 @@ import type { MarketDataSource } from "../src/infrastructure/polymarket/market-d
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
 describe("MarketScanner", () => {
+  it("passes the cancellation signal through both scan stages", async () => {
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | undefined> = [];
+    const source: MarketDataSource = {
+      listOpenEvents: async (_request, _reportProgress, signal) => {
+        signals.push(signal);
+        return [makeEvent()];
+      },
+      fetchOrderBooks: async (_tokenIds, _reportProgress, signal) => {
+        signals.push(signal);
+        return [];
+      },
+    };
+    const scanner = new MarketScanner(source, testConfig);
+
+    await scanner.scan(new Date("2026-01-02T00:00:00.000Z"), controller.signal);
+
+    expect(signals).toEqual([controller.signal, controller.signal]);
+  });
+
   it("returns candidates from every eligible token", async () => {
     const events = Array.from({ length: 121 }, (_, index) =>
       makeEvent({

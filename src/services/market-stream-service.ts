@@ -42,6 +42,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     private readonly database: PaperDatabase,
     private readonly processor: PaperMarketProcessor,
     private readonly reconnectDelayMs: number,
+    private readonly shutdownWaitMs: number = 1_000,
   ) {}
 
   public start(): void {
@@ -73,8 +74,14 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.currentTokenIds = [];
     this.connected = false;
     this.processor.markDisconnected(tokenIds);
-    await handle?.close();
-    await this.restartLoop;
+    await Promise.all([
+      handle === null
+        ? Promise.resolve()
+        : this.closeHandle(handle, "active stream close"),
+      this.restartLoop === null
+        ? Promise.resolve()
+        : this.waitBounded(this.restartLoop, "stream restart loop"),
+    ]);
   }
 
   public refreshSubscriptions(): void {
@@ -147,10 +154,8 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.connected = false;
     this.processor.markDisconnected(previousTokenIds);
 
-    try {
-      await previousHandle?.close();
-    } catch (error) {
-      this.lastError = errorMessage(error);
+    if (previousHandle !== null) {
+      await this.closeHandle(previousHandle, "previous stream close");
     }
 
     const tokenIds = [...this.desiredTokenIds];
@@ -161,7 +166,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     try {
       const handle = await this.source.subscribe(tokenIds);
       if (!this.started || generation !== this.generation) {
-        await handle.close();
+        await this.closeHandle(handle, "stale stream close");
         return;
       }
       this.handle = handle;
@@ -211,6 +216,45 @@ export class MarketStreamService implements PaperMarketRuntime {
       this.requestRestart();
     }, this.reconnectDelayMs);
     this.reconnectTimer.unref();
+  }
+
+  private closeHandle(
+    handle: MarketStreamHandle,
+    operation: string,
+  ): Promise<void> {
+    return this.waitBounded(
+      Promise.resolve().then(() => handle.close()),
+      operation,
+    );
+  }
+
+  private async waitBounded(
+    task: Promise<unknown>,
+    operation: string,
+  ): Promise<void> {
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        task,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `${operation} timed out after ${this.shutdownWaitMs}ms`,
+                ),
+              ),
+            this.shutdownWaitMs,
+          );
+        }),
+      ]);
+    } catch (error) {
+      this.lastError = errorMessage(error);
+    } finally {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    }
   }
 }
 

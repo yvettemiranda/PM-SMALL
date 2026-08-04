@@ -39,7 +39,7 @@ function normalizeOrderBook(book: OrderBook): TokenOrderBook {
 }
 
 export interface CandidateScanner {
-  scan(now?: Date): Promise<TradeCandidate[]>;
+  scan(now?: Date, signal?: AbortSignal): Promise<TradeCandidate[]>;
   getLastDiagnostics?(): MarketScanDiagnostics | null;
 }
 
@@ -65,7 +65,10 @@ export class MarketScanner implements CandidateScanner {
     };
   }
 
-  public async scan(now: Date = new Date()): Promise<TradeCandidate[]> {
+  public async scan(
+    now: Date = new Date(),
+    signal?: AbortSignal,
+  ): Promise<TradeCandidate[]> {
     const startedAt = new Date();
     const startedAtMs = Date.now();
     this.activeScanStartedAtMs = startedAtMs;
@@ -84,6 +87,7 @@ export class MarketScanner implements CandidateScanner {
     // The time window is only a safe upstream reduction. Every page inside it
     // is traversed, then the exact domain and order-book rules run locally.
     try {
+      signal?.throwIfAborted();
       const scanWindowMs = this.config.maxMarketDurationDays * DAY_MS;
       const nowMs = now.getTime();
       const events = await this.marketData.listOpenEvents(
@@ -101,7 +105,9 @@ export class MarketScanner implements CandidateScanner {
             eventCount,
           });
         },
+        signal,
       );
+      signal?.throwIfAborted();
       const tokens = events.flatMap((event) => {
         const eligibleEvent = filterEligibleEvent(event, this.config, now);
         return eligibleEvent === null
@@ -126,7 +132,9 @@ export class MarketScanner implements CandidateScanner {
                   orderBookCount,
                 });
               },
+              signal,
             );
+      signal?.throwIfAborted();
       const bookByToken = new Map(
         books.map((book) => {
           const normalized = normalizeOrderBook(book);

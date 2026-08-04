@@ -40,6 +40,56 @@ describe("PolymarketMarketDataSource", () => {
     ]);
   });
 
+  it("stops waiting for an event page when the scan is aborted", async () => {
+    let iteratorReturned = false;
+    const paginator = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: () => new Promise<IteratorResult<never>>(() => {}),
+      return: async () => {
+        iteratorReturned = true;
+        return { done: true as const, value: undefined };
+      },
+    };
+    const source = new PolymarketMarketDataSource({
+      listEvents: () => paginator,
+    } as unknown as PublicClient);
+    const controller = new AbortController();
+    const pending = source.listOpenEvents(
+      {
+        pageSize: 100,
+        startDateMin: "2026-01-01T00:00:00.000Z",
+        startDateMax: "2026-01-31T00:00:00.000Z",
+        endDateMin: "2026-01-31T00:00:00.000Z",
+        endDateMax: "2026-03-02T00:00:00.000Z",
+      },
+      undefined,
+      controller.signal,
+    );
+
+    controller.abort(new Error("scan stopped"));
+
+    await expect(pending).rejects.toThrow("scan stopped");
+    expect(iteratorReturned).toBe(true);
+  });
+
+  it("stops waiting for an order-book batch when the scan is aborted", async () => {
+    const source = new PolymarketMarketDataSource({
+      fetchOrderBooks: () => new Promise(() => {}),
+    } as unknown as PublicClient);
+    const controller = new AbortController();
+    const pending = source.fetchOrderBooks(
+      ["token-1"],
+      undefined,
+      controller.signal,
+    );
+
+    controller.abort(new Error("scan stopped"));
+
+    await expect(pending).rejects.toThrow("scan stopped");
+  });
+
   it("normalizes the official market resolution fields without a wallet", async () => {
     const source = new PolymarketMarketDataSource({
       fetchMarket: async () =>

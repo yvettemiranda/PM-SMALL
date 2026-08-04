@@ -72,6 +72,8 @@ npm run paper:soak -- --duration-seconds 86400 --interval-seconds 60
 
 扫描尚未完成时，`diagnostics.phase`会显示`EVENTS`或`ORDER_BOOKS`，并持续更新已读取的分页、事件、订单簿批次和耗时；`COMPLETE`才表示本轮全部分页及订单簿处理完成，`FAILED`表示本轮失败。
 
+Market频道订阅会显式请求初始盘口。连接建立后，`dataCompleteTokenCount`应逐步达到`subscribedTokenCount`；长期不增长或持续不足属于容量/恢复告警，不能把`connected=true`单独当成行情就绪。
+
 ## v0.5验收边界
 
 - 工具正常结束只表示本次观察窗口完成，不自动把v0.5标记为完成；

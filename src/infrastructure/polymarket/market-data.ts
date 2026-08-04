@@ -12,10 +12,12 @@ export interface MarketDataSource {
   listOpenEvents(
     request: OpenEventScanRequest,
     reportProgress?: (progress: OpenEventScanProgress) => void,
+    signal?: AbortSignal,
   ): Promise<Event[]>;
   fetchOrderBooks(
     tokenIds: string[],
     reportProgress?: (progress: OrderBookFetchProgress) => void,
+    signal?: AbortSignal,
   ): Promise<OrderBook[]>;
 }
 
@@ -53,6 +55,7 @@ export class PolymarketMarketDataSource
   public async listOpenEvents(
     request: OpenEventScanRequest,
     reportProgress?: (progress: OpenEventScanProgress) => void,
+    signal?: AbortSignal,
   ): Promise<Event[]> {
     // Do not impose a local page or token cap. The date bounds are a safe
     // superset of the configured duration rule; exact checks remain downstream.
@@ -62,11 +65,28 @@ export class PolymarketMarketDataSource
       ...request,
     });
 
+    const iterator = pages[Symbol.asyncIterator]();
     let pageCount = 0;
-    for await (const page of pages) {
-      events.push(...page.items);
-      pageCount += 1;
-      reportProgress?.({ pageCount, eventCount: events.length });
+    let completed = false;
+    try {
+      while (true) {
+        const result = await withAbort(iterator.next(), signal);
+        if (result.done) {
+          completed = true;
+          break;
+        }
+        events.push(...result.value.items);
+        pageCount += 1;
+        reportProgress?.({ pageCount, eventCount: events.length });
+      }
+    } finally {
+      if (!completed) {
+        try {
+          void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        } catch {
+          // Cancellation already won; iterator cleanup remains best effort.
+        }
+      }
     }
 
     return events;
@@ -75,14 +95,19 @@ export class PolymarketMarketDataSource
   public async fetchOrderBooks(
     tokenIds: string[],
     reportProgress?: (progress: OrderBookFetchProgress) => void,
+    signal?: AbortSignal,
   ): Promise<OrderBook[]> {
     const books: OrderBook[] = [];
     let batchCount = 0;
 
     for (let offset = 0; offset < tokenIds.length; offset += 50) {
+      signal?.throwIfAborted();
       const batch = tokenIds.slice(offset, offset + 50);
-      const result = await this.client.fetchOrderBooks(
-        batch.map((tokenId) => ({ tokenId })),
+      const result = await withAbort(
+        this.client.fetchOrderBooks(
+          batch.map((tokenId) => ({ tokenId })),
+        ),
+        signal,
       );
       books.push(...result);
       batchCount += 1;
@@ -132,4 +157,43 @@ function normalizeResolutionPrice(value: string | null): number | null {
     return null;
   }
   return micros;
+}
+
+function withAbort<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal === undefined) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(abortReason(signal));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) {
+    return signal.reason;
+  }
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  return error;
 }

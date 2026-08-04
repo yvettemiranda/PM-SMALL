@@ -36,6 +36,31 @@ class ReconnectingSource implements MarketStreamSource {
   }
 }
 
+class HangingCloseSource implements MarketStreamSource {
+  public closeStarted = false;
+  private releaseClose: () => void = () => {};
+  private readonly closed = new Promise<void>((resolve) => {
+    this.releaseClose = resolve;
+  });
+
+  public async subscribe(): Promise<MarketStreamHandle> {
+    const source = this;
+    return {
+      close: async () => {
+        source.closeStarted = true;
+        await source.closed;
+      },
+      async *[Symbol.asyncIterator]() {
+        await source.closed;
+      },
+    };
+  }
+
+  public release(): void {
+    this.releaseClose();
+  }
+}
+
 describe("MarketStreamService", () => {
   const resources: Array<{ close?: () => void; stop?: () => Promise<void> }> = [];
 
@@ -72,6 +97,43 @@ describe("MarketStreamService", () => {
       connected: true,
       subscribedTokenCount: 1,
     });
+  });
+
+  it("stops within a bounded time when the stream handle does not close", async () => {
+    const candidates = new CandidateService(
+      { scan: async () => [makeCandidate()] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const source = new HangingCloseSource();
+    const service = new MarketStreamService(
+      source,
+      candidates,
+      database,
+      new PaperMarketProcessor(database),
+      5,
+      10,
+    );
+    resources.push(database);
+
+    service.start();
+    await waitFor(() => service.getStatus().connected);
+
+    const stopPromise = service.stop();
+    const outcome = await Promise.race([
+      stopPromise.then(() => "stopped" as const),
+      new Promise<"timed-out">((resolve) =>
+        setTimeout(() => resolve("timed-out"), 50),
+      ),
+    ]);
+
+    source.release();
+    await stopPromise;
+
+    expect(source.closeStarted).toBe(true);
+    expect(outcome).toBe("stopped");
+    expect(service.getStatus().lastError).toContain("timed out after 10ms");
   });
 });
 

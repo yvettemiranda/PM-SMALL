@@ -18,6 +18,7 @@ export class CandidateService {
   private lastError: string | null = null;
   private diagnostics: MarketScanDiagnostics | null = null;
   private activeScan: Promise<CandidateSnapshot> | null = null;
+  private activeScanController: AbortController | null = null;
   private timer: NodeJS.Timeout | null = null;
   private readonly listeners = new Set<(snapshot: CandidateSnapshot) => void>();
 
@@ -41,6 +42,9 @@ export class CandidateService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.activeScanController?.abort(
+      new Error("Candidate market scan stopped"),
+    );
   }
 
   public getSnapshot(): CandidateSnapshot {
@@ -74,8 +78,10 @@ export class CandidateService {
       return this.activeScan;
     }
 
+    const controller = new AbortController();
+    this.activeScanController = controller;
     this.activeScan = this.scanner
-      .scan()
+      .scan(undefined, controller.signal)
       .then((candidates) => {
         this.candidates = candidates;
         this.lastScanAt = new Date().toISOString();
@@ -84,10 +90,15 @@ export class CandidateService {
         return this.getSnapshot();
       })
       .catch((error: unknown) => {
-        this.lastError = error instanceof Error ? error.message : String(error);
+        if (!controller.signal.aborted) {
+          this.lastError = error instanceof Error ? error.message : String(error);
+        }
         return this.getSnapshot();
       })
       .finally(() => {
+        if (this.activeScanController === controller) {
+          this.activeScanController = null;
+        }
         this.activeScan = null;
         this.notifyListeners();
       });
