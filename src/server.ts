@@ -10,6 +10,7 @@ import { MarketStreamService } from "./services/market-stream-service.js";
 import { PaperMarketProcessor } from "./services/paper-market-processor.js";
 import { PaperAutomationService } from "./services/paper-automation-service.js";
 import { PaperSettlementService } from "./services/paper-settlement-service.js";
+import { PaperValidationService } from "./services/paper-validation-service.js";
 
 const config = loadConfig();
 const database = new PaperDatabase(
@@ -40,6 +41,10 @@ const paperSettlement = new PaperSettlementService(
   config.paperSettlementIntervalMs,
   () => marketStream.refreshSubscriptions(),
 );
+const paperValidation = new PaperValidationService(
+  database,
+  config.paperValidationIntervalMs,
+);
 const app = buildApp({
   config,
   database,
@@ -48,14 +53,17 @@ const app = buildApp({
   marketStream,
   paperAutomation,
   paperSettlement,
+  paperValidation,
 });
 
 candidates.start();
 marketStream.start();
 paperAutomation.start();
 paperSettlement.start();
+paperValidation.start();
 
 const shutdown = async () => {
+  await paperValidation.stop();
   await paperSettlement.stop();
   await paperAutomation.stop();
   await marketStream.stop();

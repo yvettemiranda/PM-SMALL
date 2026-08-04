@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { CandidateScanner } from "../src/domain/market-scanner.js";
@@ -35,6 +39,21 @@ describe("HTTP app", () => {
       running: false,
       settledMarketCount: 0,
     });
+    expect(status.json().paperValidation).toMatchObject({
+      running: false,
+      validationCount: 0,
+      lastResult: null,
+    });
+
+    const validation = await app.inject({
+      method: "GET",
+      url: "/api/paper/validation",
+    });
+    expect(validation.statusCode).toBe(200);
+    expect(validation.json().validation).toMatchObject({
+      passed: true,
+      sqliteIntegrity: "ok",
+    });
 
     await app.inject({ method: "POST", url: "/api/paper/start" });
     await app.inject({ method: "GET", url: "/api/candidates?refresh=true" });
@@ -58,5 +77,47 @@ describe("HTTP app", () => {
     expect(settlements.statusCode).toBe(200);
     expect(positions.json().positions).toEqual([]);
     expect(settlements.json().settlements).toEqual([]);
+  });
+
+  it("reports an unhealthy ledger without mutating it during a GET check", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-api-"));
+    const databasePath = join(directory, "paper.db");
+    const scanner: CandidateScanner = { scan: async () => [] };
+    const candidates = new CandidateService(scanner, 15_000);
+    const database = new PaperDatabase(databasePath, 100_000_000);
+    const app = buildApp({
+      config: { ...testConfig, databasePath },
+      database,
+      candidates,
+      liveExecutor: new LiveExecutorDisabled(),
+    });
+    resources.push(app, database, {
+      close: () => rmSync(directory, { recursive: true, force: true }),
+    });
+
+    database.setStrategyStatus("RUNNING");
+    database.placePaperBuy(makeCandidate(), 100_000_000);
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase
+        .prepare("UPDATE strategy_state SET reserved_cash_micros = 0 WHERE id = 1")
+        .run();
+    } finally {
+      rawDatabase.close();
+    }
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/paper/validation",
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().validation).toMatchObject({
+      passed: false,
+      errors: expect.arrayContaining([
+        "Reserved paper cash does not match active buy orders",
+      ]),
+    });
+    expect(database.getStrategyState().status).toBe("RUNNING");
   });
 });

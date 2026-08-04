@@ -113,6 +113,31 @@ describe("PaperMarketProcessor", () => {
     ).toBe(2_000_000);
   });
 
+  it("does not fill an existing buy after validation pauses the strategy", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    database.pausePaperStrategyForValidationFailure(["Injected validation fault"]);
+    processor.handle({
+      type: "book",
+      tokenId: "yes-token",
+      bids: [{ priceMicros: 20_000, sizeMicros: 0 }],
+      asks: [],
+      timestampMs: 100,
+    });
+    processor.handle({
+      type: "trade",
+      sourceTradeId: "paused-buy-trade",
+      tokenId: "yes-token",
+      takerSide: "SELL",
+      priceMicros: 20_000,
+      sizeMicros: 10_000_000,
+      timestampMs: 101,
+    });
+
+    expect(
+      database.listPaperOrders().find((order) => order.id === buy.id)?.filledSizeMicros,
+    ).toBe(0);
+  });
+
   it("only counts trades from the opposing taker side", () => {
     const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
     processor.handle({

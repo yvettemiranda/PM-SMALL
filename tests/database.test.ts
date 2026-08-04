@@ -105,6 +105,54 @@ describe("PaperDatabase", () => {
     });
   });
 
+  it("allows sells to reduce exposure and cancels frozen buys before resume", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    const buyFill = database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "buy-before-validation-pause",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+    });
+    const sell = buyFill.createdSellOrder;
+    if (sell === null) throw new Error("Expected an automatic paper sell");
+
+    database.pausePaperStrategyForValidationFailure(["Injected validation fault"]);
+    database.rebaseActivePaperOrderQueues("yes-token", [], []);
+    const sellFill = database.applyPaperTrade({
+      orderId: sell.id,
+      sourceTradeId: "sell-during-validation-pause",
+      tradePriceMicros: 30_000,
+      tradeSizeMicros: 2_000_000,
+      dataComplete: true,
+    });
+
+    expect(sellFill.order.status).toBe("FILLED");
+    expect(database.listPaperOrders()).toContainEqual(
+      expect.objectContaining({
+        id: buy.id,
+        status: "PARTIALLY_FILLED",
+        filledSizeMicros: 2_000_000,
+      }),
+    );
+    expect(database.getStrategyState().status).toBe("PAUSED");
+
+    database.setStrategyStatus("RUNNING");
+    const staleFill = database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "stale-buy-after-resume",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+    });
+
+    expect(staleFill.incrementalFillSizeMicros).toBe(0);
+    expect(staleFill.order.status).toBe("CANCELLED");
+    expect(() =>
+      database.placePaperBuy(makeCandidate(), 100_000_000),
+    ).toThrow(/first sell/);
+  });
+
   it("checks paper balances and active orders during recovery", () => {
     database.placePaperBuy(makeCandidate(), 100_000_000);
 
@@ -115,6 +163,23 @@ describe("PaperDatabase", () => {
       cancelledBuyCount: 0,
     });
     expect(database.getStrategyState().status).toBe("RUNNING");
+  });
+
+  it("validates a healthy paper ledger without mutating it", () => {
+    database.placePaperBuy(makeCandidate(), 100_000_000);
+    const stateBeforeValidation = database.getStrategyState();
+
+    const result = database.validatePaperState();
+
+    expect(result).toMatchObject({
+      passed: true,
+      errors: [],
+      sqliteIntegrity: "ok",
+      activeOrderCount: 1,
+      openPositionCount: 0,
+      pendingSettlementCount: 0,
+    });
+    expect(database.getStrategyState()).toEqual(stateBeforeValidation);
   });
 
   it("applies queue-aware partial fills and deduplicates trades", () => {

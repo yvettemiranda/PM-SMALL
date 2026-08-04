@@ -44,6 +44,16 @@ export type PaperRecoveryResult = {
   recoveredAt: string;
 };
 
+export type PaperValidationResult = {
+  passed: boolean;
+  errors: string[];
+  sqliteIntegrity: string;
+  activeOrderCount: number;
+  openPositionCount: number;
+  pendingSettlementCount: number;
+  checkedAt: string;
+};
+
 export type PaperSettlementStatus = "PENDING" | "SETTLED";
 export type PaperRedemptionStatus = "PENDING" | "SIMULATED" | "NOT_APPLICABLE";
 export type PaperSettlementOutcome = "WIN" | "LOSS" | "MIXED" | "NO_POSITION";
@@ -221,6 +231,7 @@ function rowToPaperPosition(row: PaperPositionRow): PaperPosition {
 
 export class PaperDatabase {
   private readonly database: Database.Database;
+  private paperValidationBlocked = false;
 
   public constructor(
     databasePath: string,
@@ -296,26 +307,62 @@ export class PaperDatabase {
     }
   }
 
+  private assertPaperAccountingMutationAllowed(): void {
+    if (this.paperValidationBlocked) {
+      throw new Error("Paper mutation is blocked by failed validation");
+    }
+  }
+
   public close(): void {
     this.database.close();
   }
 
   public setStrategyStatus(status: StrategyStatus): StrategyState {
-    return this.transaction(() => {
-      const now = new Date().toISOString();
-      this.database
-        .prepare("UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1")
-        .run(status, now);
-      if (status !== "RUNNING") {
-        for (const order of this.listActivePaperOrders().filter(
-          (paperOrder) => paperOrder.side === "BUY",
-        )) {
-          this.cancelPaperBuy(order, now, `STRATEGY_${status}`);
+    if (status === "RUNNING") {
+      const validation = this.validatePaperState();
+      if (!validation.passed) {
+        try {
+          this.pausePaperStrategyForValidationFailure(validation.errors);
+        } catch {
+          // The pause method raises the in-memory block before writing, so
+          // preserve the validation error even if PAUSED cannot be persisted.
         }
+        throw new Error(
+          `Paper validation failed: ${validation.errors.join("; ")}`,
+        );
       }
-      this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
-      return this.getStrategyState();
-    });
+      // The synchronous transition below is the only place that may lift the
+      // block. It first clears buys from tokens whose first sell already ran.
+      this.paperValidationBlocked = false;
+    }
+
+    try {
+      return this.transaction(() => {
+        const now = new Date().toISOString();
+        if (status === "RUNNING") {
+          this.cancelClosedCycleBuys(now, "STRATEGY_RESUME_FIRST_SELL");
+        }
+        this.database
+          .prepare(
+            "UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1",
+          )
+          .run(status, now);
+        if (status !== "RUNNING" && !this.paperValidationBlocked) {
+          for (const order of this.listActivePaperOrders().filter(
+            (paperOrder) => paperOrder.side === "BUY",
+          )) {
+            this.cancelPaperBuy(order, now, `STRATEGY_${status}`);
+          }
+        }
+        this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
+        return this.getStrategyState();
+      });
+    } catch (error) {
+      if (status === "RUNNING") {
+        this.paperValidationBlocked = true;
+      }
+      throw error;
+    }
   }
 
   public getStrategyState(): StrategyState {
@@ -430,6 +477,7 @@ export class PaperDatabase {
     target: PaperSettlementTarget,
     now: Date = new Date(),
   ): PaperSettlement {
+    this.assertPaperAccountingMutationAllowed();
     return this.transaction(() => {
       const existing = this.getPaperSettlementRow(target.conditionId);
       if (existing !== undefined) {
@@ -471,6 +519,7 @@ export class PaperDatabase {
     error?: string | null;
     now?: Date;
   }): PaperSettlement {
+    this.assertPaperAccountingMutationAllowed();
     return this.transaction(() => {
       const current = this.getPaperSettlementRow(input.target.conditionId);
       if (current === undefined) {
@@ -514,6 +563,7 @@ export class PaperDatabase {
     payouts?: readonly PaperSettlementPayout[];
     now?: Date;
   }): AppliedPaperSettlement {
+    this.assertPaperAccountingMutationAllowed();
     if (!input.closed) {
       throw new PaperResolutionValidationError(
         "Paper settlement requires a closed market",
@@ -816,7 +866,9 @@ export class PaperDatabase {
     asks: BookLevel[],
   ): PaperOrder[] {
     return this.transaction(() => {
-      const orders = this.listActivePaperOrders(tokenId);
+      const orders = this.listActivePaperOrders(tokenId).filter(
+        (order) => !this.paperValidationBlocked || order.side === "SELL",
+      );
       const virtualAhead = new Map<string, number>();
       const now = new Date().toISOString();
 
@@ -850,6 +902,9 @@ export class PaperDatabase {
   }
 
   public cancelStartedGameBuys(now: Date = new Date()): number {
+    if (this.paperValidationBlocked) {
+      return 0;
+    }
     return this.transaction(() => {
       const nowIso = now.toISOString();
       const orders = this.listActivePaperOrders().filter(
@@ -869,6 +924,9 @@ export class PaperDatabase {
     stopProgressPercent: number,
     now: Date = new Date(),
   ): number {
+    if (this.paperValidationBlocked) {
+      return 0;
+    }
     return this.transaction(() => {
       const nowIso = now.toISOString();
       const orders = this.listActivePaperOrders().filter((order) => {
@@ -900,6 +958,9 @@ export class PaperDatabase {
   }
 
   public cancelEndedPaperBuys(now: Date = new Date()): number {
+    if (this.paperValidationBlocked) {
+      return 0;
+    }
     return this.transaction(() => {
       const nowIso = now.toISOString();
       const orders = this.listActivePaperOrders().filter(
@@ -915,119 +976,226 @@ export class PaperDatabase {
     });
   }
 
+  public validatePaperState(): PaperValidationResult {
+    const checkedAt = new Date().toISOString();
+    const sqliteIntegrity = String(
+      this.database.pragma("quick_check", { simple: true }),
+    );
+    const errors = sqliteIntegrity === "ok"
+      ? []
+      : [`SQLite quick check failed: ${sqliteIntegrity}`];
+    const activeOrders = this.listActivePaperOrders();
+    errors.push(
+      ...this.collectPaperStateErrors(activeOrders, this.getStrategyState()),
+    );
+    const openPositionCount = (
+      this.database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM paper_positions WHERE quantity_micros != 0 OR cost_micros != 0",
+        )
+        .get() as { count: number }
+    ).count;
+    const pendingSettlementCount = (
+      this.database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM paper_settlements WHERE status = 'PENDING'",
+        )
+        .get() as { count: number }
+    ).count;
+
+    return {
+      passed: errors.length === 0,
+      errors,
+      sqliteIntegrity,
+      activeOrderCount: activeOrders.length,
+      openPositionCount,
+      pendingSettlementCount,
+      checkedAt,
+    };
+  }
+
+  private collectPaperStateErrors(
+    activeOrders: readonly PaperOrder[],
+    state: StrategyState,
+  ): string[] {
+    const errors: string[] = [];
+    const invalidOrderRows = this.database
+      .prepare(
+        `SELECT id FROM paper_orders
+        WHERE original_size_micros <= 0
+          OR filled_size_micros < 0
+          OR filled_size_micros > original_size_micros
+          OR (status = 'OPEN' AND filled_size_micros != 0)
+          OR (
+            status = 'PARTIALLY_FILLED'
+            AND (filled_size_micros <= 0 OR filled_size_micros >= original_size_micros)
+          )
+          OR (status = 'FILLED' AND filled_size_micros != original_size_micros)`,
+      )
+      .all() as unknown as Array<{ id: string }>;
+    for (const order of invalidOrderRows) {
+      errors.push(`Paper order has an invalid fill range: ${order.id}`);
+    }
+
+    const expectedReservedCash = activeOrders
+      .filter((order) => order.side === "BUY")
+      .reduce(
+        (sum, order) =>
+          sum +
+          calculateOrderCostMicros(
+            order.priceMicros,
+            order.originalSizeMicros - order.filledSizeMicros,
+          ),
+        0,
+      );
+    if (state.reservedCashMicros !== expectedReservedCash) {
+      errors.push("Reserved paper cash does not match active buy orders");
+    }
+    if (
+      state.availableCashMicros < 0 ||
+      state.reservedCashMicros < 0 ||
+      state.positionCostMicros < 0
+    ) {
+      errors.push("Paper balances contain a negative value");
+    }
+    if (
+      state.availableCashMicros +
+        state.reservedCashMicros +
+        state.positionCostMicros !==
+      state.initialCapitalMicros + state.realizedPnlMicros
+    ) {
+      errors.push("Paper balance conservation check failed");
+    }
+
+    const positionRows = this.database
+      .prepare(
+        `SELECT token_id, quantity_micros, cost_micros
+        FROM paper_positions
+        WHERE quantity_micros != 0 OR cost_micros != 0`,
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      quantity_micros: number;
+      cost_micros: number;
+    }>;
+    const activeSellByToken = new Map<string, number>();
+    for (const order of activeOrders.filter((order) => order.side === "SELL")) {
+      activeSellByToken.set(
+        order.tokenId,
+        (activeSellByToken.get(order.tokenId) ?? 0) +
+          order.originalSizeMicros -
+          order.filledSizeMicros,
+      );
+    }
+    for (const position of positionRows) {
+      if (position.quantity_micros <= 0 || position.cost_micros <= 0) {
+        errors.push(
+          `Paper position has invalid quantity or cost: ${position.token_id}`,
+        );
+      }
+      if (position.quantity_micros <= 0) {
+        continue;
+      }
+      if (
+        (activeSellByToken.get(position.token_id) ?? 0) !==
+        position.quantity_micros
+      ) {
+        errors.push(
+          `Active paper sells do not cover position: ${position.token_id}`,
+        );
+      }
+      activeSellByToken.delete(position.token_id);
+    }
+    if (activeSellByToken.size > 0) {
+      errors.push("Active paper sells exist without matching positions");
+    }
+
+    const settledConditions = this.database
+      .prepare(
+        "SELECT condition_id FROM paper_settlements WHERE status = 'SETTLED'",
+      )
+      .all() as unknown as Array<{ condition_id: string }>;
+    for (const settlement of settledConditions) {
+      if (
+        activeOrders.some(
+          (order) => order.conditionId === settlement.condition_id,
+        )
+      ) {
+        errors.push(
+          `Settled market still has active paper orders: ${settlement.condition_id}`,
+        );
+      }
+      const openPosition = this.database
+        .prepare(
+          `SELECT 1 FROM paper_positions
+          WHERE condition_id = ? AND (quantity_micros != 0 OR cost_micros != 0)
+          LIMIT 1`,
+        )
+        .get(settlement.condition_id);
+      if (openPosition !== undefined) {
+        errors.push(
+          `Settled market still has an open paper position: ${settlement.condition_id}`,
+        );
+      }
+    }
+    return errors;
+  }
+
+  public pausePaperStrategyForValidationFailure(
+    errors: readonly string[],
+  ): StrategyState {
+    if (errors.length === 0) {
+      throw new Error("Paper validation pause requires at least one error");
+    }
+    this.paperValidationBlocked = true;
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      // Do not rebalance or cancel from an inconsistent ledger. Preserve the
+      // evidence and stop new placements until validation passes again.
+      this.database
+        .prepare(
+          "UPDATE strategy_state SET status = 'PAUSED', updated_at = ? WHERE id = 1",
+        )
+        .run(now);
+      this.writeAudit("PAPER_VALIDATION_FAILED", "strategy", "1", {
+        errors: [...errors],
+      });
+      return this.getStrategyState();
+    });
+  }
+
   public recoverPaperState(): PaperRecoveryResult {
+    this.assertPaperAccountingMutationAllowed();
+    const validation = this.validatePaperState();
+    if (!validation.passed) {
+      try {
+        this.pausePaperStrategyForValidationFailure(validation.errors);
+      } catch {
+        // The in-memory mutation block is raised before the persistent pause.
+      }
+      return {
+        passed: false,
+        errors: validation.errors,
+        activeOrderCount: validation.activeOrderCount,
+        cancelledBuyCount: 0,
+        recoveredAt: new Date().toISOString(),
+      };
+    }
     return this.transaction(() => {
       const recoveredAt = new Date().toISOString();
-      const closedTokens = this.database
-        .prepare(
-          `SELECT token_id FROM paper_positions
-          WHERE first_sell_at IS NOT NULL OR cycle_closed_at IS NOT NULL`,
-        )
-        .all() as unknown as Array<{ token_id: string }>;
-      let cancelledBuyCount = 0;
-      for (const row of closedTokens) {
-        cancelledBuyCount += this.cancelActiveBuysForToken(
-          row.token_id,
-          recoveredAt,
-          "RECOVERY_FIRST_SELL",
-        );
-      }
+      const cancelledBuyCount = this.cancelClosedCycleBuys(
+        recoveredAt,
+        "RECOVERY_FIRST_SELL",
+      );
 
       const activeOrders = this.listActivePaperOrders();
-      const state = this.getStrategyState();
-      const expectedReservedCash = activeOrders
-        .filter((order) => order.side === "BUY")
-        .reduce(
-          (sum, order) =>
-            sum +
-            calculateOrderCostMicros(
-              order.priceMicros,
-              order.originalSizeMicros - order.filledSizeMicros,
-            ),
-          0,
-        );
-      const positionRows = this.database
-        .prepare(
-          "SELECT token_id, quantity_micros FROM paper_positions WHERE quantity_micros > 0",
-        )
-        .all() as unknown as Array<{
-        token_id: string;
-        quantity_micros: number;
-      }>;
-      const activeSellByToken = new Map<string, number>();
-      for (const order of activeOrders.filter((order) => order.side === "SELL")) {
-        activeSellByToken.set(
-          order.tokenId,
-          (activeSellByToken.get(order.tokenId) ?? 0) +
-            order.originalSizeMicros -
-            order.filledSizeMicros,
-        );
-      }
-
-      const errors: string[] = [];
-      if (state.reservedCashMicros !== expectedReservedCash) {
-        errors.push("Reserved paper cash does not match active buy orders");
-      }
-      if (
-        state.availableCashMicros < 0 ||
-        state.reservedCashMicros < 0 ||
-        state.positionCostMicros < 0
-      ) {
-        errors.push("Paper balances contain a negative value");
-      }
-      if (
-        state.availableCashMicros +
-          state.reservedCashMicros +
-          state.positionCostMicros !==
-        state.initialCapitalMicros + state.realizedPnlMicros
-      ) {
-        errors.push("Paper balance conservation check failed");
-      }
-      for (const position of positionRows) {
-        if (
-          (activeSellByToken.get(position.token_id) ?? 0) !==
-          position.quantity_micros
-        ) {
-          errors.push(
-            `Active paper sells do not cover position: ${position.token_id}`,
-          );
-        }
-        activeSellByToken.delete(position.token_id);
-      }
-      if (activeSellByToken.size > 0) {
-        errors.push("Active paper sells exist without matching positions");
-      }
-
-      const settledConditions = this.database
-        .prepare(
-          "SELECT condition_id FROM paper_settlements WHERE status = 'SETTLED'",
-        )
-        .all() as unknown as Array<{ condition_id: string }>;
-      for (const settlement of settledConditions) {
-        if (
-          activeOrders.some(
-            (order) => order.conditionId === settlement.condition_id,
-          )
-        ) {
-          errors.push(
-            `Settled market still has active paper orders: ${settlement.condition_id}`,
-          );
-        }
-        const openPosition = this.database
-          .prepare(
-            `SELECT 1 FROM paper_positions
-            WHERE condition_id = ? AND (quantity_micros > 0 OR cost_micros > 0)
-            LIMIT 1`,
-          )
-          .get(settlement.condition_id);
-        if (openPosition !== undefined) {
-          errors.push(
-            `Settled market still has an open paper position: ${settlement.condition_id}`,
-          );
-        }
-      }
+      const errors = this.collectPaperStateErrors(
+        activeOrders,
+        this.getStrategyState(),
+      );
 
       if (errors.length > 0) {
+        this.paperValidationBlocked = true;
         this.database
           .prepare(
             "UPDATE strategy_state SET status = 'PAUSED', updated_at = ? WHERE id = 1",
@@ -1055,6 +1223,7 @@ export class PaperDatabase {
     candidate: TradeCandidate,
     totalBudgetMicros: number,
   ): PaperOrder {
+    this.assertPaperAccountingMutationAllowed();
     return this.transaction(() => {
       const state = this.getStrategyState();
       if (state.status !== "RUNNING") {
@@ -1171,6 +1340,18 @@ export class PaperDatabase {
     return this.transaction(() => {
       const order = this.getPaperOrder(input.orderId);
       if (!input.dataComplete || !["OPEN", "PARTIALLY_FILLED"].includes(order.status)) {
+        return {
+          order,
+          createdSellOrder: null,
+          duplicate: false,
+          incrementalFillSizeMicros: 0,
+        };
+      }
+      if (
+        order.side === "BUY" &&
+        (this.paperValidationBlocked ||
+          this.getStrategyState().status !== "RUNNING")
+      ) {
         return {
           order,
           createdSellOrder: null,
@@ -1341,6 +1522,7 @@ export class PaperDatabase {
   }
 
   private applyBuyFill(order: PaperOrder, sizeMicros: number, now: string): void {
+    this.assertPaperAccountingMutationAllowed();
     const costMicros = calculateOrderCostMicros(order.priceMicros, sizeMicros);
     this.database
       .prepare(
@@ -1424,6 +1606,9 @@ export class PaperDatabase {
     now: string,
     reason: string,
   ): number {
+    if (this.paperValidationBlocked) {
+      return 0;
+    }
     const orders = this.listActivePaperOrders(tokenId).filter(
       (order) => order.side === "BUY",
     );
@@ -1433,7 +1618,22 @@ export class PaperDatabase {
     return orders.length;
   }
 
+  private cancelClosedCycleBuys(now: string, reason: string): number {
+    const closedTokens = this.database
+      .prepare(
+        `SELECT token_id FROM paper_positions
+        WHERE first_sell_at IS NOT NULL OR cycle_closed_at IS NOT NULL`,
+      )
+      .all() as unknown as Array<{ token_id: string }>;
+    return closedTokens.reduce(
+      (count, row) =>
+        count + this.cancelActiveBuysForToken(row.token_id, now, reason),
+      0,
+    );
+  }
+
   private cancelPaperBuy(order: PaperOrder, now: string, reason: string): void {
+    this.assertPaperAccountingMutationAllowed();
     const remainingSize = order.originalSizeMicros - order.filledSizeMicros;
     const releasedCash = calculateOrderCostMicros(
       order.priceMicros,
@@ -1459,6 +1659,7 @@ export class PaperDatabase {
   }
 
   private cancelPaperSell(order: PaperOrder, now: string, reason: string): void {
+    this.assertPaperAccountingMutationAllowed();
     this.database
       .prepare(
         "UPDATE paper_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",

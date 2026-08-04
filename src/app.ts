@@ -16,6 +16,7 @@ import type { CandidateService, CandidateSnapshot } from "./services/candidate-s
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
 import type { PaperSettlementRuntime } from "./services/paper-settlement-service.js";
+import type { PaperValidationRuntime } from "./services/paper-validation-service.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -25,6 +26,7 @@ export type AppDependencies = {
   marketStream?: PaperMarketRuntime;
   paperAutomation?: PaperAutomationRuntime;
   paperSettlement?: PaperSettlementRuntime;
+  paperValidation?: PaperValidationRuntime;
 };
 
 function publicConfig(config: AppConfig) {
@@ -39,6 +41,7 @@ function publicConfig(config: AppConfig) {
     maxBuyPrice: microsToDecimalString(config.maxBuyPriceMicros),
     scanIntervalMs: config.scanIntervalMs,
     paperSettlementIntervalMs: config.paperSettlementIntervalMs,
+    paperValidationIntervalMs: config.paperValidationIntervalMs,
   };
 }
 
@@ -149,7 +152,21 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       waitingMarketCount: 0,
       settledMarketCount: 0,
     },
+    paperValidation: dependencies.paperValidation?.getStatus() ?? {
+      running: false,
+      validationCount: 0,
+      failedValidationCount: 0,
+      lastRunAt: null,
+      lastError: null,
+      lastResult: null,
+    },
   }));
+
+  app.get("/api/paper/validation", async (_request, reply) => {
+    // Keep GET side-effect free. The periodic service owns pause and audit.
+    const validation = dependencies.database.validatePaperState();
+    return reply.code(validation.passed ? 200 : 503).send({ validation });
+  });
 
   app.post("/api/paper/start", async () => {
     const strategy = dependencies.database.setStrategyStatus("RUNNING");

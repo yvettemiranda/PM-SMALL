@@ -19,6 +19,7 @@ const configSchema = z.object({
   MARKET_STREAM_RECONNECT_MS: z.coerce.number().int().min(250).default(2_000),
   PAPER_SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(250).default(1_000),
   PAPER_SETTLEMENT_INTERVAL_MS: z.coerce.number().int().min(1_000).default(30_000),
+  PAPER_VALIDATION_INTERVAL_MS: z.coerce.number().int().min(1_000).default(60_000),
   SCAN_EVENT_PAGE_SIZE: z.coerce.number().int().min(1).max(100).default(50),
 });
 
@@ -38,6 +39,7 @@ export type AppConfig = {
   marketStreamReconnectMs: number;
   paperSchedulerIntervalMs: number;
   paperSettlementIntervalMs: number;
+  paperValidationIntervalMs: number;
   scanEventPageSize: number;
 };
 
@@ -84,6 +86,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     marketStreamReconnectMs: parsed.MARKET_STREAM_RECONNECT_MS,
     paperSchedulerIntervalMs: parsed.PAPER_SCHEDULER_INTERVAL_MS,
     paperSettlementIntervalMs: parsed.PAPER_SETTLEMENT_INTERVAL_MS,
+    paperValidationIntervalMs: parsed.PAPER_VALIDATION_INTERVAL_MS,
     scanEventPageSize: parsed.SCAN_EVENT_PAGE_SIZE,
   };
 }

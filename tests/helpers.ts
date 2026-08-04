@@ -18,6 +18,7 @@ export const testConfig: AppConfig = {
   marketStreamReconnectMs: 2_000,
   paperSchedulerIntervalMs: 1_000,
   paperSettlementIntervalMs: 30_000,
+  paperValidationIntervalMs: 60_000,
   scanEventPageSize: 50,
 };
 
