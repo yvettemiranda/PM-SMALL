@@ -8,6 +8,7 @@ import { decimalStringToMicros } from "../../domain/price.js";
 import type { PaperMarketResolution } from "../../domain/paper-settlement.js";
 
 export interface MarketDataSource {
+  /** Returns every page of currently open events; filtering happens downstream. */
   listOpenEvents(pageSize: number): Promise<Event[]>;
   fetchOrderBooks(tokenIds: string[]): Promise<OrderBook[]>;
 }
@@ -26,13 +27,19 @@ export class PolymarketMarketDataSource
   }
 
   public async listOpenEvents(pageSize: number): Promise<Event[]> {
-    const page = await this.client
-      .listEvents({
-        closed: false,
-        pageSize,
-      })
-      .firstPage();
-    return page.items;
+    // Do not impose a local page or token cap: the configured duration/progress
+    // filters decide eligibility after the complete public event set is read.
+    const events: Event[] = [];
+    const pages = this.client.listEvents({
+      closed: false,
+      pageSize,
+    });
+
+    for await (const page of pages) {
+      events.push(...page.items);
+    }
+
+    return events;
   }
 
   public async fetchOrderBooks(tokenIds: string[]): Promise<OrderBook[]> {

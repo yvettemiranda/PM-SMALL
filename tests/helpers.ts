@@ -19,7 +19,6 @@ export const testConfig: AppConfig = {
   paperSchedulerIntervalMs: 1_000,
   paperSettlementIntervalMs: 30_000,
   scanEventPageSize: 50,
-  maxScannedTokens: 120,
 };
 
 export function makeMarket(overrides: Record<string, unknown> = {}): Market {

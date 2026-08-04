@@ -39,6 +39,15 @@ describe("event filtering", () => {
     expect(eligible?.progressPercent).toBe(10);
   });
 
+  it("uses the configured maximum duration as a filter", () => {
+    const eligible = filterEligibleEvent(
+      makeEvent(),
+      { ...testConfig, maxMarketDurationDays: 5 },
+      now,
+    );
+    expect(eligible).toBeNull();
+  });
+
   it("does not return sports tokens after game start", () => {
     const event = makeEvent({
       markets: [
@@ -48,5 +57,48 @@ describe("event filtering", () => {
     const eligible = filterEligibleEvent(event, testConfig, now);
     expect(eligible).not.toBeNull();
     expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+  });
+
+  it("requires every market to be open and orderable", () => {
+    const states = [
+      {
+        active: false,
+        closed: false,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+      {
+        active: true,
+        closed: true,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+      {
+        active: true,
+        closed: false,
+        archived: true,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+      {
+        active: true,
+        closed: false,
+        acceptingOrders: false,
+        enableOrderBook: true,
+      },
+      {
+        active: true,
+        closed: false,
+        acceptingOrders: true,
+        enableOrderBook: false,
+      },
+    ];
+
+    for (const state of states) {
+      const event = makeEvent({ markets: [makeMarket({ state })] });
+      const eligible = filterEligibleEvent(event, testConfig, now);
+      expect(eligible).not.toBeNull();
+      expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+    }
   });
 });

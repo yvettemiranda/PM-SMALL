@@ -89,6 +89,7 @@ function marketIsOpen(market: Market): boolean {
   return (
     market.state.active === true &&
     market.state.closed !== true &&
+    market.state.archived !== true &&
     market.state.acceptingOrders === true &&
     market.state.enableOrderBook === true
   );

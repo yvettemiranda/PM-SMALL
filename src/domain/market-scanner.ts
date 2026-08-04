@@ -34,6 +34,8 @@ export class MarketScanner implements CandidateScanner {
   ) {}
 
   public async scan(now: Date = new Date()): Promise<TradeCandidate[]> {
+    // The data source has already traversed every open-event page. Keep all
+    // eligible tokens here; only domain filters and order-book rules may reject.
     const events = await this.marketData.listOpenEvents(
       this.config.scanEventPageSize,
     );
@@ -43,8 +45,7 @@ export class MarketScanner implements CandidateScanner {
         return eligibleEvent === null
           ? []
           : extractEligibleTokens(event, eligibleEvent, now);
-      })
-      .slice(0, this.config.maxScannedTokens);
+      });
 
     if (tokens.length === 0) {
       return [];

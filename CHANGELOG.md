@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- 开放市场扫描改为遍历 Polymarket 分页返回的全部事件，并移除候选 Token 数量截断；市场总时长继续由 `MAX_MARKET_DURATION_DAYS` 筛选（默认30天）。旧的 `MAX_SCANNED_TOKENS` 配置不再读取。
 - 计划进行长时间PAPER运行、故障注入、性能和数据一致性验证。
 
 ## [0.4.0] - 2026-08-03

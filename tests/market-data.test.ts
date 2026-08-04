@@ -1,8 +1,33 @@
 import { describe, expect, it } from "vitest";
 import type { PublicClient } from "@polymarket/client";
 import { PolymarketMarketDataSource } from "../src/infrastructure/polymarket/market-data.js";
+import { makeEvent } from "./helpers.js";
 
 describe("PolymarketMarketDataSource", () => {
+  it("walks every page of open events", async () => {
+    const firstEvent = makeEvent({ id: "event-page-1" });
+    const secondEvent = makeEvent({ id: "event-page-2" });
+    const requests: unknown[] = [];
+    const paginator = {
+      async *[Symbol.asyncIterator]() {
+        yield { items: [firstEvent], hasMore: true, nextCursor: "cursor-2" };
+        yield { items: [secondEvent], hasMore: false };
+      },
+    };
+    const source = new PolymarketMarketDataSource({
+      listEvents: (request: unknown) => {
+        requests.push(request);
+        return paginator;
+      },
+    } as unknown as PublicClient);
+
+    await expect(source.listOpenEvents(1)).resolves.toEqual([
+      firstEvent,
+      secondEvent,
+    ]);
+    expect(requests).toEqual([{ closed: false, pageSize: 1 }]);
+  });
+
   it("normalizes the official market resolution fields without a wallet", async () => {
     const source = new PolymarketMarketDataSource({
       fetchMarket: async () =>
