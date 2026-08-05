@@ -80,28 +80,28 @@ export class CandidateService {
 
     const controller = new AbortController();
     this.activeScanController = controller;
-    this.activeScan = this.scanner
+    const scan = this.scanner
       .scan(undefined, controller.signal)
       .then((candidates) => {
         this.candidates = candidates;
         this.lastScanAt = new Date().toISOString();
         this.lastError = null;
         this.diagnostics = this.scanner.getLastDiagnostics?.() ?? null;
-        return this.getSnapshot();
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           this.lastError = error instanceof Error ? error.message : String(error);
         }
-        return this.getSnapshot();
-      })
+      });
+    this.activeScan = scan
       .finally(() => {
         if (this.activeScanController === controller) {
           this.activeScanController = null;
         }
         this.activeScan = null;
         this.notifyListeners();
-      });
+      })
+      .then(() => this.getSnapshot());
 
     return this.activeScan;
   }

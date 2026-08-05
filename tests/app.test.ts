@@ -67,7 +67,16 @@ describe("HTTP app", () => {
     });
 
     await app.inject({ method: "POST", url: "/api/paper/start" });
-    await app.inject({ method: "GET", url: "/api/candidates?refresh=true" });
+    const refreshedCandidates = await app.inject({
+      method: "GET",
+      url: "/api/candidates?refresh=true",
+    });
+    expect(refreshedCandidates.statusCode).toBe(200);
+    expect(refreshedCandidates.json()).toMatchObject({
+      candidateCount: 1,
+      scanning: false,
+      lastError: null,
+    });
     const orderResponse = await app.inject({
       method: "POST",
       url: "/api/paper/orders/buy",
