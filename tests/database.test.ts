@@ -38,6 +38,14 @@ describe("PaperDatabase", () => {
       dataComplete: true,
     });
 
+    expect(database.listActivePaperBuyMarkets()).toEqual([
+      {
+        tokenId: "yes-token",
+        makerBuyPriceMicros: 20_000,
+        resultCount: 2,
+        durationDays: 10,
+      },
+    ]);
     expect(database.listPaperPositionViews()).toEqual([
       expect.objectContaining({
         tokenId: "yes-token",
@@ -53,6 +61,131 @@ describe("PaperDatabase", () => {
         costMicros: 40_000,
       }),
     ]);
+  });
+
+  it("starts a new TEST cycle by unlocking a fully sold token without clearing PnL", () => {
+    const candidate = makeCandidate({ queueAheadSizeMicros: 0 });
+    const buy = database.placePaperBuy(candidate, 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "new-cycle-buy-fill",
+      tradePriceMicros: candidate.makerBuyPriceMicros,
+      tradeSizeMicros: candidate.orderSizeMicros,
+      dataComplete: true,
+    });
+    const sell = database
+      .listActivePaperOrders(candidate.tokenId)
+      .find((order) => order.side === "SELL");
+    expect(sell).toBeDefined();
+    database.applyPaperTrade({
+      orderId: sell?.id ?? "missing-sell",
+      sourceTradeId: "new-cycle-sell-fill",
+      tradePriceMicros: candidate.fixedSellPriceMicros,
+      tradeSizeMicros: candidate.orderSizeMicros,
+      dataComplete: true,
+    });
+    const realizedPnlBeforeReset = database.getStrategyState().realizedPnlMicros;
+    expect(() => database.placePaperBuy(candidate, 100_000_000)).toThrow(
+      /first sell|already been settled/,
+    );
+    database.setStrategyStatus("PAUSED");
+
+    const cycle = database.startNewPaperCycle();
+
+    expect(cycle).toMatchObject({
+      resetTokenCount: 1,
+      strategy: { status: "RUNNING", realizedPnlMicros: realizedPnlBeforeReset },
+    });
+    expect(database.placePaperBuy(candidate, 100_000_000)).toMatchObject({
+      tokenId: candidate.tokenId,
+      status: "OPEN",
+    });
+  });
+
+  it("keeps an unfinished position locked when starting a new TEST cycle", () => {
+    const candidate = makeCandidate({ queueAheadSizeMicros: 0 });
+    const buy = database.placePaperBuy(candidate, 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "unfinished-cycle-buy-fill",
+      tradePriceMicros: candidate.makerBuyPriceMicros,
+      tradeSizeMicros: candidate.orderSizeMicros,
+      dataComplete: true,
+    });
+    const sell = database
+      .listActivePaperOrders(candidate.tokenId)
+      .find((order) => order.side === "SELL");
+    database.applyPaperTrade({
+      orderId: sell?.id ?? "missing-sell",
+      sourceTradeId: "unfinished-cycle-sell-fill",
+      tradePriceMicros: candidate.fixedSellPriceMicros,
+      tradeSizeMicros: 10_000_000,
+      dataComplete: true,
+    });
+    database.setStrategyStatus("PAUSED");
+    const stateBeforeCycle = database.getStrategyState();
+
+    const cycle = database.startNewPaperCycle();
+
+    expect(cycle.resetTokenCount).toBe(0);
+    expect(cycle.strategy).toMatchObject({
+      availableCashMicros: stateBeforeCycle.availableCashMicros,
+      reservedCashMicros: stateBeforeCycle.reservedCashMicros,
+      realizedPnlMicros: stateBeforeCycle.realizedPnlMicros,
+      positionCostMicros: stateBeforeCycle.positionCostMicros,
+    });
+    expect(database.listPaperPositions()[0]).toMatchObject({
+      quantityMicros: 40_000_000,
+      firstSellAt: expect.any(String),
+    });
+    expect(database.listActivePaperOrders(candidate.tokenId)).toContainEqual(
+      expect.objectContaining({ side: "SELL", status: "PARTIALLY_FILLED" }),
+    );
+    expect(() => database.placePaperBuy(candidate, 100_000_000)).toThrow(
+      /first sell/,
+    );
+  });
+
+  it("never unlocks a formally settled token for a new TEST cycle", () => {
+    const candidate = makeCandidate({ queueAheadSizeMicros: 0 });
+    const buy = database.placePaperBuy(candidate, 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "settled-cycle-buy-fill",
+      tradePriceMicros: candidate.makerBuyPriceMicros,
+      tradeSizeMicros: candidate.orderSizeMicros,
+      dataComplete: true,
+    });
+    const sell = database
+      .listActivePaperOrders(candidate.tokenId)
+      .find((order) => order.side === "SELL");
+    database.applyPaperTrade({
+      orderId: sell?.id ?? "missing-sell",
+      sourceTradeId: "settled-cycle-sell-fill",
+      tradePriceMicros: candidate.fixedSellPriceMicros,
+      tradeSizeMicros: candidate.orderSizeMicros,
+      dataComplete: true,
+    });
+    const target = {
+      conditionId: candidate.conditionId,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+    };
+    database.applyPaperSettlement({
+      target,
+      closed: true,
+      resolutionStatus: "resolved",
+      winningTokenId: candidate.tokenId,
+      winningOutcome: "Yes",
+    });
+    database.setStrategyStatus("PAUSED");
+
+    const cycle = database.startNewPaperCycle();
+
+    expect(cycle.resetTokenCount).toBe(0);
+    expect(() => database.placePaperBuy(candidate, 100_000_000)).toThrow(
+      /already been settled|first sell/,
+    );
   });
 
   it("returns every current PAPER position without a history limit", () => {
@@ -103,7 +236,7 @@ describe("PaperDatabase", () => {
     const rawDatabase = new Database(databasePath);
     try {
       rawDatabase.exec(
-        "DROP TABLE paper_market_metadata; DELETE FROM schema_migrations WHERE version = 6;",
+        "DROP TABLE paper_market_metadata; DELETE FROM schema_migrations WHERE version >= 6;",
       );
     } finally {
       rawDatabase.close();

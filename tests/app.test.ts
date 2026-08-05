@@ -213,6 +213,7 @@ describe("HTTP app", () => {
       maxBuyPriceCents: 3,
       maxMarketDurationDays: 60,
     });
+    expect(updated.json().cancelledBuyCount).toBe(0);
 
     const cleared = await app.inject({
       method: "PUT",
@@ -254,6 +255,49 @@ describe("HTTP app", () => {
       payload: { action: "set", tokenId: "unknown-token", selected: false },
     });
     expect(unknownSelection.statusCode).toBe(404);
+  });
+
+  it("exposes explicit TEST run controls and a guarded new-cycle action", async () => {
+    const candidates = new CandidateService(
+      { scan: async () => [] },
+      15_000,
+    );
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
+    const app = buildApp({
+      config: testConfig,
+      database,
+      candidates,
+      tradingPreferences,
+      liveExecutor: new LiveExecutorDisabled(),
+    });
+    resources.push(app, database);
+
+    const cycle = await app.inject({
+      method: "POST",
+      url: "/api/paper/cycle/start",
+    });
+    expect(cycle.statusCode).toBe(200);
+    expect(cycle.json()).toMatchObject({
+      resetTokenCount: 0,
+      strategy: { status: "RUNNING" },
+    });
+
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/api/paper/cycle/start",
+    });
+    expect(repeated.statusCode).toBe(409);
+
+    const paused = await app.inject({ method: "POST", url: "/api/paper/pause" });
+    expect(paused.json().strategy.status).toBe("PAUSED");
+
+    const page = await app.inject({ method: "GET", url: "/" });
+    expect(page.body).toContain('id="run-toggle"');
+    expect(page.body).toContain('id="new-cycle"');
   });
 
   it("serves position display data, mark-to-market PnL, and the compact TEST UI", async () => {

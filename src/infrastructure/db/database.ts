@@ -29,6 +29,11 @@ export type StrategyState = {
   updatedAt: string;
 };
 
+export type PaperNewCycleResult = {
+  strategy: StrategyState;
+  resetTokenCount: number;
+};
+
 export type AppliedPaperTrade = {
   order: PaperOrder;
   createdSellOrder: PaperOrder | null;
@@ -118,6 +123,18 @@ export type PaperTradingPreferences = {
   maxMarketDurationDays: number;
   candidatesSelectedByDefault: boolean;
   updatedAt: string;
+};
+
+export type PaperTradingPreferencesUpdate = {
+  preferences: PaperTradingPreferences;
+  cancelledBuyCount: number;
+};
+
+export type ActivePaperBuyMarket = {
+  tokenId: string;
+  makerBuyPriceMicros: number;
+  resultCount: 2 | 3 | null;
+  durationDays: number | null;
 };
 
 export type PaperCandidateSelectionOverride = {
@@ -330,6 +347,7 @@ export class PaperDatabase {
       { version: 4, file: "004_paper_settlement.sql" },
       { version: 5, file: "005_paper_trading_preferences.sql" },
       { version: 6, file: "006_paper_market_metadata.sql" },
+      { version: 7, file: "007_paper_market_filter_metadata.sql" },
     ];
 
     for (const migration of migrations) {
@@ -384,56 +402,105 @@ export class PaperDatabase {
     }
   }
 
+  private enterRunningState<T>(action: (now: string) => T): T {
+    const validation = this.validatePaperState();
+    if (!validation.passed) {
+      try {
+        this.pausePaperStrategyForValidationFailure(validation.errors);
+      } catch {
+        // The pause method raises the in-memory block before writing, so
+        // preserve the validation error even if PAUSED cannot be persisted.
+      }
+      throw new Error(
+        `Paper validation failed: ${validation.errors.join("; ")}`,
+      );
+    }
+
+    // A validated synchronous transition is the only place that may lift the
+    // accounting block before entering RUNNING.
+    this.paperValidationBlocked = false;
+    try {
+      return this.transaction(() => action(new Date().toISOString()));
+    } catch (error) {
+      this.paperValidationBlocked = true;
+      throw error;
+    }
+  }
+
   public close(): void {
     this.database.close();
   }
 
   public setStrategyStatus(status: StrategyStatus): StrategyState {
     if (status === "RUNNING") {
-      const validation = this.validatePaperState();
-      if (!validation.passed) {
-        try {
-          this.pausePaperStrategyForValidationFailure(validation.errors);
-        } catch {
-          // The pause method raises the in-memory block before writing, so
-          // preserve the validation error even if PAUSED cannot be persisted.
-        }
-        throw new Error(
-          `Paper validation failed: ${validation.errors.join("; ")}`,
-        );
-      }
-      // The synchronous transition below is the only place that may lift the
-      // block. It first clears buys from tokens whose first sell already ran.
-      this.paperValidationBlocked = false;
-    }
-
-    try {
-      return this.transaction(() => {
-        const now = new Date().toISOString();
-        if (status === "RUNNING") {
-          this.cancelClosedCycleBuys(now, "STRATEGY_RESUME_FIRST_SELL");
-        }
+      return this.enterRunningState((now) => {
+        this.cancelClosedCycleBuys(now, "STRATEGY_RESUME_FIRST_SELL");
         this.database
           .prepare(
-            "UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1",
+            "UPDATE strategy_state SET status = 'RUNNING', updated_at = ? WHERE id = 1",
           )
-          .run(status, now);
-        if (status !== "RUNNING" && !this.paperValidationBlocked) {
-          for (const order of this.listActivePaperOrders().filter(
-            (paperOrder) => paperOrder.side === "BUY",
-          )) {
-            this.cancelPaperBuy(order, now, `STRATEGY_${status}`);
-          }
-        }
-        this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
+          .run(now);
+        this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", {
+          status: "RUNNING",
+        });
         return this.getStrategyState();
       });
-    } catch (error) {
-      if (status === "RUNNING") {
-        this.paperValidationBlocked = true;
-      }
-      throw error;
     }
+
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      this.database
+        .prepare(
+          "UPDATE strategy_state SET status = ?, updated_at = ? WHERE id = 1",
+        )
+        .run(status, now);
+      if (!this.paperValidationBlocked) {
+        for (const order of this.listActivePaperOrders().filter(
+          (paperOrder) => paperOrder.side === "BUY",
+        )) {
+          this.cancelPaperBuy(order, now, `STRATEGY_${status}`);
+        }
+      }
+      this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
+      return this.getStrategyState();
+    });
+  }
+
+  public startNewPaperCycle(): PaperNewCycleResult {
+    if (this.getStrategyState().status === "RUNNING") {
+      throw new Error("Pause TEST before starting a new paper cycle");
+    }
+    return this.enterRunningState((now) => {
+      this.cancelClosedCycleBuys(now, "NEW_CYCLE_STARTED");
+      const resetTokenCount = this.database
+        .prepare(
+          `UPDATE paper_positions
+          SET first_sell_at = NULL, cycle_closed_at = NULL, updated_at = ?
+          WHERE quantity_micros = 0 AND cost_micros = 0
+            AND (first_sell_at IS NOT NULL OR cycle_closed_at IS NOT NULL)
+            AND NOT EXISTS (
+              SELECT 1 FROM paper_settlements ps
+              WHERE ps.condition_id = paper_positions.condition_id
+                AND ps.status = 'SETTLED'
+            )`,
+        )
+        .run(now).changes;
+      this.database
+        .prepare(
+          "UPDATE strategy_state SET status = 'RUNNING', updated_at = ? WHERE id = 1",
+        )
+        .run(now);
+      this.writeAudit("PAPER_NEW_CYCLE_STARTED", "strategy", "1", {
+        resetTokenCount,
+      });
+      this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", {
+        status: "RUNNING",
+      });
+      return {
+        strategy: this.getStrategyState(),
+        resetTokenCount,
+      };
+    });
   }
 
   public getStrategyState(): StrategyState {
@@ -511,7 +578,20 @@ export class PaperDatabase {
 
   public updatePaperTradingPreferences(
     preferences: Omit<PaperTradingPreferences, "updatedAt">,
-  ): PaperTradingPreferences {
+    cancelBuyTokenIds: readonly string[] = [],
+  ): PaperTradingPreferencesUpdate {
+    const requestedTokenIds = new Set(cancelBuyTokenIds);
+    const activeBuyTokenIds = new Set(
+      this.listActivePaperOrders()
+        .filter(
+          (order) =>
+            order.side === "BUY" && requestedTokenIds.has(order.tokenId),
+        )
+        .map((order) => order.tokenId),
+    );
+    if (activeBuyTokenIds.size > 0) {
+      this.assertPaperAccountingMutationAllowed();
+    }
     return this.transaction(() => {
       const now = new Date().toISOString();
       this.database
@@ -530,13 +610,48 @@ export class PaperDatabase {
           preferences.candidatesSelectedByDefault ? 1 : 0,
           now,
         );
+      let cancelledBuyCount = 0;
+      for (const tokenId of activeBuyTokenIds) {
+        cancelledBuyCount += this.cancelActiveBuysForToken(
+          tokenId,
+          now,
+          "MARKET_FILTER_EXCLUDED",
+        );
+      }
       this.writeAudit("PAPER_TRADING_FILTERS_UPDATED", "strategy", "1", {
         resultCounts: preferences.resultCounts,
         maxBuyPriceMicros: preferences.maxBuyPriceMicros,
         maxMarketDurationDays: preferences.maxMarketDurationDays,
+        cancelledBuyCount,
       });
-      return this.getPaperTradingPreferences();
+      return {
+        preferences: this.getPaperTradingPreferences(),
+        cancelledBuyCount,
+      };
     });
+  }
+
+  public listActivePaperBuyMarkets(): ActivePaperBuyMarket[] {
+    const rows = this.database
+      .prepare(
+        `SELECT po.token_id, po.price_micros, pm.result_count, pm.duration_days
+        FROM paper_orders po
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = po.token_id
+        WHERE po.side = 'BUY' AND po.status IN ('OPEN', 'PARTIALLY_FILLED')
+        ORDER BY po.token_id`,
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      price_micros: number;
+      result_count: 2 | 3 | null;
+      duration_days: number | null;
+    }>;
+    return rows.map((row) => ({
+      tokenId: row.token_id,
+      makerBuyPriceMicros: row.price_micros,
+      resultCount: row.result_count,
+      durationDays: row.duration_days,
+    }));
   }
 
   public listPaperCandidateSelectionOverrides(): PaperCandidateSelectionOverride[] {
@@ -1544,8 +1659,9 @@ export class PaperDatabase {
         .prepare(
           `INSERT INTO paper_market_metadata(
             token_id, event_id, event_slug, event_title, market_id,
-            market_question, direction, opened_at, ends_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            market_question, direction, opened_at, ends_at, result_count,
+            duration_days, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(token_id) DO UPDATE SET
             event_id = excluded.event_id,
             event_slug = excluded.event_slug,
@@ -1555,6 +1671,8 @@ export class PaperDatabase {
             direction = excluded.direction,
             opened_at = excluded.opened_at,
             ends_at = excluded.ends_at,
+            result_count = excluded.result_count,
+            duration_days = excluded.duration_days,
             updated_at = excluded.updated_at`,
         )
         .run(
@@ -1567,6 +1685,8 @@ export class PaperDatabase {
           candidate.direction,
           candidate.openedAt,
           candidate.endsAt,
+          candidate.resultCount,
+          candidate.durationDays,
           now,
         );
       this.database

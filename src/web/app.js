@@ -7,18 +7,25 @@ const ui = {
   visibleCandidateCount: 20,
   durationOptions: [1, 7, 14, 30, 60, 90, 120, 180, 360, 365],
   preferences: null,
+  strategyStatus: "STOPPED",
   configDirty: false,
   messageTimer: null,
   loading: false,
+  reloadRequested: false,
+  mutationVersion: 0,
+  controlPending: false,
 };
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { "content-type": "application/json" },
     ...options,
+    headers:
+      options.body === undefined
+        ? options.headers
+        : { "content-type": "application/json", ...options.headers },
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "请求失败");
+  if (!response.ok) throw new Error(body.error || body.message || "请求失败");
   return body;
 }
 
@@ -71,6 +78,27 @@ function renderPortfolio(portfolio) {
   setMoneyValue("#total-pnl", portfolio.totalPnl, true);
   setMoneyValue("#realized-pnl", portfolio.realizedPnl, true);
   setMoneyValue("#unrealized-pnl", portfolio.unrealizedPnl, true);
+}
+
+function renderRunControls() {
+  const running = ui.strategyStatus === "RUNNING";
+  const runToggle = $("#run-toggle");
+  runToggle.textContent = running ? "暂停TEST" : "开始TEST";
+  runToggle.disabled = ui.controlPending;
+  runToggle.setAttribute(
+    "aria-label",
+    running ? "暂停TEST自动交易" : "开始TEST自动交易",
+  );
+  const newCycle = $("#new-cycle");
+  newCycle.disabled = running || ui.controlPending;
+  $("#new-cycle-note").textContent = running
+    ? "请先暂停TEST，再开始新一轮。持仓、卖单和历史盈亏不会清空。"
+    : "新一轮只解锁已完成且尚未结算的市场；持仓、卖单和历史盈亏继续保留。";
+}
+
+function recordMutation() {
+  ui.mutationVersion += 1;
+  if (ui.loading) ui.reloadRequested = true;
 }
 
 function marketTitleMarkup(item) {
@@ -190,8 +218,12 @@ function renderPreferences(preferences) {
 }
 
 async function loadAll() {
-  if (ui.loading) return;
+  if (ui.loading) {
+    ui.reloadRequested = true;
+    return;
+  }
   ui.loading = true;
+  const mutationVersion = ui.mutationVersion;
   try {
     const [status, candidates, positions, preferences] = await Promise.all([
       api("/api/status?compact=true"),
@@ -199,6 +231,9 @@ async function loadAll() {
       api("/api/paper/positions"),
       api("/api/paper/preferences"),
     ]);
+    if (mutationVersion !== ui.mutationVersion) return;
+    ui.strategyStatus = status.strategy.status;
+    renderRunControls();
     renderPortfolio(status.portfolio);
     renderPositions(positions.positions);
     ui.candidates = candidates.candidates;
@@ -214,12 +249,17 @@ async function loadAll() {
     }
   } finally {
     ui.loading = false;
+    if (ui.reloadRequested) {
+      ui.reloadRequested = false;
+      void loadAll().catch((error) => showMessage(error.message, true));
+    }
   }
 }
 
 function setConfigOpen(open) {
   $("#config-panel").hidden = !open;
   $("#config-toggle").setAttribute("aria-expanded", String(open));
+  renderRunControls();
 }
 
 $("#config-toggle").addEventListener("click", () => {
@@ -262,17 +302,72 @@ $("#config-form").addEventListener("submit", async (event) => {
         maxMarketDurationDays: ui.durationOptions[durationIndex],
       }),
     });
+    recordMutation();
     ui.preferences = response.preferences;
     ui.configDirty = false;
     renderPreferences(response.preferences);
     ui.visibleCandidateCount = 20;
     setConfigOpen(false);
-    showMessage("配置已保存，正在重新扫描市场");
+    showMessage(
+      response.cancelledBuyCount > 0
+        ? `配置已保存，已撤销${response.cancelledBuyCount}张不再合格的买单`
+        : "配置已保存，正在重新扫描市场",
+    );
     await loadAll();
   } catch (error) {
     showMessage(error.message, true);
   } finally {
     if (submit) submit.disabled = false;
+  }
+});
+
+$("#run-toggle").addEventListener("click", async () => {
+  const wasRunning = ui.strategyStatus === "RUNNING";
+  ui.controlPending = true;
+  renderRunControls();
+  try {
+    const response = await api(
+      wasRunning ? "/api/paper/pause" : "/api/paper/start",
+      { method: "POST" },
+    );
+    recordMutation();
+    ui.strategyStatus = response.strategy.status;
+    showMessage(wasRunning ? "TEST已暂停，现有持仓和卖单继续保留" : "TEST已开始");
+    await loadAll();
+  } catch (error) {
+    showMessage(error.message, true);
+  } finally {
+    ui.controlPending = false;
+    renderRunControls();
+  }
+});
+
+$("#new-cycle").addEventListener("click", async () => {
+  if (
+    !window.confirm(
+      "开始新一轮会让已完整卖出且尚未结算的Token重新参与买入。现有持仓、卖单和历史盈亏不会清空。继续吗？",
+    )
+  ) {
+    return;
+  }
+  ui.controlPending = true;
+  renderRunControls();
+  try {
+    const response = await api("/api/paper/cycle/start", { method: "POST" });
+    recordMutation();
+    ui.strategyStatus = response.strategy.status;
+    setConfigOpen(false);
+    showMessage(
+      response.resetTokenCount > 0
+        ? `新一轮已开始，已解锁${response.resetTokenCount}个已完成Token`
+        : "新一轮已开始，没有需要解锁的Token",
+    );
+    await loadAll();
+  } catch (error) {
+    showMessage(error.message, true);
+  } finally {
+    ui.controlPending = false;
+    renderRunControls();
   }
 });
 
@@ -316,6 +411,7 @@ $("#candidates").addEventListener("change", async (event) => {
         selected: input.checked,
       }),
     });
+    recordMutation();
     candidate.selected = input.checked;
     ui.selectedCandidateCount = ui.candidates.filter(
       (item) => item.selected,
@@ -334,6 +430,7 @@ async function setAllCandidates(action) {
       method: "PUT",
       body: JSON.stringify({ action }),
     });
+    recordMutation();
     const selected = action === "all";
     ui.candidates.forEach((candidate) => {
       candidate.selected = selected;

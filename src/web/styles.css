@@ -86,6 +86,8 @@ a { color: inherit; }
   box-shadow: var(--shadow);
 }
 
+.topbar-actions { display: flex; align-items: center; gap: 6px; }
+
 .mode-switch,
 .segmented {
   display: inline-grid;
@@ -230,7 +232,19 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .duration-heading strong { color: var(--accent-strong); font-size: 14px; }
 .duration-field input { width: 100%; margin: 3px 0 1px; }
 .duration-marks { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
-.save-config { width: 100%; margin-top: 13px; }
+.config-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.35fr);
+  gap: 8px;
+  margin-top: 13px;
+}
+.save-config { width: 100%; }
+.config-note {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
 
 .text-button {
   min-height: 32px;
@@ -392,6 +406,10 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 }
 
 @media (max-width: 340px) {
+  .mode-switch button { min-width: 52px; padding-left: 7px; padding-right: 7px; }
+  .topbar-actions { gap: 4px; }
+  .topbar-actions .button { padding-left: 8px; padding-right: 8px; }
+  .config-actions { grid-template-columns: 1fr; }
   .scan-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
   .sort-control { width: 100%; justify-content: space-between; }
   .duration-marks { font-size: 9px; }

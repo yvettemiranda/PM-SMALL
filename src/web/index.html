@@ -16,15 +16,20 @@
           <button id="test-mode" type="button" aria-pressed="true">TEST</button>
           <button id="live-mode" type="button" aria-pressed="false">LIVE</button>
         </div>
-        <button
-          id="config-toggle"
-          class="button secondary"
-          type="button"
-          aria-expanded="false"
-          aria-controls="config-panel"
-        >
-          配置
-        </button>
+        <div class="topbar-actions">
+          <button id="run-toggle" class="button primary" type="button">
+            开始TEST
+          </button>
+          <button
+            id="config-toggle"
+            class="button secondary"
+            type="button"
+            aria-expanded="false"
+            aria-controls="config-panel"
+          >
+            配置
+          </button>
+        </div>
       </header>
 
       <p id="live-lock" class="inline-note" hidden>
@@ -83,9 +88,17 @@
             </div>
           </div>
 
-          <button class="button primary save-config" type="submit">
-            保存并重新扫描
-          </button>
+          <div class="config-actions">
+            <button class="button primary save-config" type="submit">
+              保存并重新扫描
+            </button>
+            <button id="new-cycle" class="button secondary" type="button">
+              开始新一轮
+            </button>
+          </div>
+          <p id="new-cycle-note" class="config-note">
+            新一轮只解锁已完成且尚未结算的市场；持仓、卖单和历史盈亏继续保留。
+          </p>
         </form>
       </section>
 

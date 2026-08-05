@@ -387,6 +387,22 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return { strategy: serializeState(strategy) };
   });
 
+  app.post("/api/paper/cycle/start", async (_request, reply) => {
+    if (dependencies.database.getStrategyState().status === "RUNNING") {
+      return reply
+        .code(409)
+        .send({ error: "Pause TEST before starting a new cycle" });
+    }
+    const cycle = dependencies.database.startNewPaperCycle();
+    dependencies.paperAutomation?.requestRun();
+    dependencies.paperSettlement?.requestRun();
+    dependencies.marketStream?.refreshSubscriptions();
+    return {
+      strategy: serializeState(cycle.strategy),
+      resetTokenCount: cycle.resetTokenCount,
+    };
+  });
+
   app.post("/api/paper/pause", async () => ({
     strategy: serializeState(dependencies.database.setStrategyStatus("PAUSED")),
   }));
@@ -421,7 +437,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
           .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
       })
       .parse(request.body);
-    const preferences = dependencies.tradingPreferences.updateMarketFilters({
+    const update = dependencies.tradingPreferences.updateMarketFilters({
       resultCounts: body.resultCounts,
       maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
       maxMarketDurationDays: body.maxMarketDurationDays,
@@ -430,7 +446,10 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     void dependencies.candidates.refresh().then(() => {
       if (scanWasRunning) void dependencies.candidates.refresh();
     });
-    return { preferences: serializePreferences(preferences) };
+    return {
+      preferences: serializePreferences(update.preferences),
+      cancelledBuyCount: update.cancelledBuyCount,
+    };
   });
 
   app.put("/api/paper/candidate-selection", async (request, reply) => {

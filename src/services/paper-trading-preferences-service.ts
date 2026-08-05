@@ -22,6 +22,11 @@ type MarketFilterUpdate = Pick<
   "resultCounts" | "maxBuyPriceMicros" | "maxMarketDurationDays"
 >;
 
+export type PaperMarketFilterUpdateResult = {
+  preferences: PaperTradingPreferencesSnapshot;
+  cancelledBuyCount: number;
+};
+
 export class PaperTradingPreferencesService {
   private snapshot: PaperTradingPreferencesSnapshot;
   private selectionOverrides: Map<string, boolean>;
@@ -58,17 +63,32 @@ export class PaperTradingPreferencesService {
     };
   }
 
-  public updateMarketFilters(update: MarketFilterUpdate): PaperTradingPreferencesSnapshot {
+  public updateMarketFilters(
+    update: MarketFilterUpdate,
+  ): PaperMarketFilterUpdateResult {
     const resultCounts = normalizeResultCounts(update.resultCounts);
     validateMarketFilterValues(update);
 
-    this.snapshot = this.database.updatePaperTradingPreferences({
-      ...this.snapshot,
+    const normalizedUpdate = {
       resultCounts,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       maxMarketDurationDays: update.maxMarketDurationDays,
-    });
-    return this.getSnapshot();
+    };
+    const result = this.database.updatePaperTradingPreferences(
+      {
+        ...this.snapshot,
+        ...normalizedUpdate,
+      },
+      this.database
+        .listActivePaperBuyMarkets()
+        .filter((market) => !marketMatchesFilters(market, normalizedUpdate))
+        .map((market) => market.tokenId),
+    );
+    this.snapshot = result.preferences;
+    return {
+      preferences: this.getSnapshot(),
+      cancelledBuyCount: result.cancelledBuyCount,
+    };
   }
 
   public isTokenSelected(tokenId: string): boolean {
@@ -84,11 +104,7 @@ export class PaperTradingPreferencesService {
       "resultCount" | "makerBuyPriceMicros" | "durationDays"
     >,
   ): boolean {
-    return (
-      this.snapshot.resultCounts.includes(candidate.resultCount) &&
-      candidate.makerBuyPriceMicros <= this.snapshot.maxBuyPriceMicros &&
-      candidate.durationDays <= this.snapshot.maxMarketDurationDays
-    );
+    return marketMatchesFilters(candidate, this.snapshot);
   }
 
   public isCandidateEnabled(candidate: TradeCandidate): boolean {
@@ -115,6 +131,26 @@ export class PaperTradingPreferencesService {
     this.snapshot = this.database.setAllPaperCandidatesSelected(selected);
     this.selectionOverrides.clear();
   }
+}
+
+function marketMatchesFilters(
+  market: {
+    resultCount: PaperMarketResultCount | null;
+    makerBuyPriceMicros: number;
+    durationDays: number | null;
+  },
+  filters: MarketFilterUpdate,
+): boolean {
+  const resultCountMatches =
+    market.resultCount === null
+      ? filters.resultCounts.includes(2) && filters.resultCounts.includes(3)
+      : filters.resultCounts.includes(market.resultCount);
+  return (
+    resultCountMatches &&
+    market.makerBuyPriceMicros <= filters.maxBuyPriceMicros &&
+    market.durationDays !== null &&
+    market.durationDays <= filters.maxMarketDurationDays
+  );
 }
 
 function validateMarketFilterValues(
