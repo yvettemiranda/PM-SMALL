@@ -76,6 +76,17 @@ npm run paper:soak -- --duration-seconds 86400 --interval-seconds 60
 
 Market频道订阅会显式请求初始盘口。连接建立后，`dataCompleteTokenCount`应逐步达到`subscribedTokenCount`；长期不增长或持续不足属于容量/恢复告警，不能把`connected=true`单独当成行情就绪。
 
+## 行情重复断线演练
+
+重复断线只通过进程内测试包装器结束公开行情句柄，不增加HTTP调试入口，也不修改策略或账本。每轮必须按以下顺序留证：
+
+1. 断线前`connected=true`且`dataCompleteTokenCount=subscribedTokenCount`；
+2. 断线后确认`unexpectedDisconnectCount`增加、`connected=false`且完整盘口数归零，未就绪期间不得确认成交；
+3. 只有`recoveryCount`增加且所有订阅Token重新取得完整盘口后，才记录本轮恢复并开始下一轮；
+4. 最终核对连接、完整盘口、异常断线和恢复累计数，以及每轮恢复耗时、错误状态和证据哈希。
+
+2026-08-05的全市场短时演练在2,099个Token上连续完成3轮断线恢复，三轮服务统计耗时均低于6秒且最终错误为空。该结果不替代长期窗口内的持续稳定性。
+
 ## 账本不一致演练
 
 该演练是人工受控故障，不属于留证运行器的自动功能：

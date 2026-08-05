@@ -9,25 +9,17 @@ import { MarketStreamService } from "../src/services/market-stream-service.js";
 import { PaperMarketProcessor } from "../src/services/paper-market-processor.js";
 import { makeCandidate } from "./helpers.js";
 
-class ReconnectingSource implements MarketStreamSource {
+class ControllableDisconnectSource implements MarketStreamSource {
   public calls: string[][] = [];
+  private releaseCurrent: (() => void) | null = null;
 
   public async subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle> {
     this.calls.push([...tokenIds]);
-    if (this.calls.length === 1) {
-      return {
-        close: async () => undefined,
-        async *[Symbol.asyncIterator]() {
-          yield makeBookEvent(tokenIds[0]);
-          throw new Error("test disconnect");
-        },
-      };
-    }
-
     let release: () => void = () => {};
     const closed = new Promise<void>((resolve) => {
       release = resolve;
     });
+    this.releaseCurrent = release;
     return {
       close: async () => release(),
       async *[Symbol.asyncIterator]() {
@@ -35,6 +27,14 @@ class ReconnectingSource implements MarketStreamSource {
         await closed;
       },
     };
+  }
+
+  public disconnectCurrent(): void {
+    if (this.releaseCurrent === null) {
+      throw new Error("Expected an active market stream");
+    }
+    this.releaseCurrent();
+    this.releaseCurrent = null;
   }
 }
 
@@ -80,7 +80,7 @@ describe("MarketStreamService", () => {
     );
     await candidates.refresh();
     const database = new PaperDatabase(":memory:", 100_000_000);
-    const source = new ReconnectingSource();
+    const source = new ControllableDisconnectSource();
     const service = new MarketStreamService(
       source,
       candidates,
@@ -91,6 +91,8 @@ describe("MarketStreamService", () => {
     resources.push(database, service);
 
     service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+    source.disconnectCurrent();
     await waitFor(() => service.getStatus().recoveryCount === 1);
 
     expect(source.calls).toEqual([["yes-token"], ["yes-token"]]);
@@ -104,6 +106,59 @@ describe("MarketStreamService", () => {
       unexpectedDisconnectCount: 1,
       recoveryCount: 1,
       lastFullSnapshotDurationMs: expect.any(Number),
+      lastRecoveryDurationMs: expect.any(Number),
+    });
+  });
+
+  it("restores a full snapshot after each repeated disconnect", async () => {
+    const candidates = new CandidateService(
+      { scan: async () => [makeCandidate()] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const source = new ControllableDisconnectSource();
+    const service = new MarketStreamService(
+      source,
+      candidates,
+      database,
+      new PaperMarketProcessor(database),
+      25,
+    );
+    resources.push(database, service);
+
+    service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+
+    for (let disconnectCount = 1; disconnectCount <= 3; disconnectCount += 1) {
+      source.disconnectCurrent();
+      await waitFor(
+        () =>
+          service.getStatus().unexpectedDisconnectCount === disconnectCount,
+      );
+      expect(service.getStatus()).toMatchObject({
+        connected: false,
+        dataCompleteTokenCount: 0,
+      });
+      await waitFor(() => service.getStatus().recoveryCount === disconnectCount);
+      expect(service.getStatus()).toMatchObject({
+        connected: true,
+        subscribedTokenCount: 1,
+        dataCompleteTokenCount: 1,
+      });
+    }
+
+    expect(source.calls).toEqual([
+      ["yes-token"],
+      ["yes-token"],
+      ["yes-token"],
+      ["yes-token"],
+    ]);
+    expect(service.getStatus()).toMatchObject({
+      connectionCount: 4,
+      fullSnapshotCount: 4,
+      unexpectedDisconnectCount: 3,
+      recoveryCount: 3,
       lastRecoveryDurationMs: expect.any(Number),
     });
   });
