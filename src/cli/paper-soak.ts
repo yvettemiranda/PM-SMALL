@@ -26,6 +26,52 @@ type SafetyFailureRecord = {
   criticalErrors: string[];
 };
 
+type CounterWindow = {
+  first: number | null;
+  last: number | null;
+  max: number;
+};
+
+const counterReaders = {
+  ValidationCount: (sample: PaperSoakSample) =>
+    sample.periodicValidation.validationCount,
+  FailedValidationCount: (sample: PaperSoakSample) =>
+    sample.periodicValidation.failedValidationCount,
+  ConnectionCount: (sample: PaperSoakSample) =>
+    sample.marketStream.connectionCount,
+  FullSnapshotCount: (sample: PaperSoakSample) =>
+    sample.marketStream.fullSnapshotCount,
+  UnexpectedDisconnectCount: (sample: PaperSoakSample) =>
+    sample.marketStream.unexpectedDisconnectCount,
+  RecoveryCount: (sample: PaperSoakSample) =>
+    sample.marketStream.recoveryCount,
+  ProcessedTradeEvents: (sample: PaperSoakSample) =>
+    sample.marketStream.processedTradeEvents,
+  IgnoredTradeEvents: (sample: PaperSoakSample) =>
+    sample.marketStream.ignoredTradeEvents,
+  PaperBuyFillCount: (sample: PaperSoakSample) =>
+    sample.marketStream.paperBuyFillCount,
+  PaperSellFillCount: (sample: PaperSoakSample) =>
+    sample.marketStream.paperSellFillCount,
+  CreatedPaperSellCount: (sample: PaperSoakSample) =>
+    sample.marketStream.createdPaperSellCount,
+  PlacedBuyCount: (sample: PaperSoakSample) =>
+    sample.paperAutomation.placedBuyCount,
+  CancelledStartedBuyCount: (sample: PaperSoakSample) =>
+    sample.paperAutomation.cancelledStartedBuyCount,
+  CancelledProgressedBuyCount: (sample: PaperSoakSample) =>
+    sample.paperAutomation.cancelledProgressedBuyCount,
+  CheckedMarketCount: (sample: PaperSoakSample) =>
+    sample.paperSettlement.checkedMarketCount,
+  WaitingMarketCount: (sample: PaperSoakSample) =>
+    sample.paperSettlement.waitingMarketCount,
+  SettledMarketCount: (sample: PaperSoakSample) =>
+    sample.paperSettlement.settledMarketCount,
+} as const;
+
+type CounterName = keyof typeof counterReaders;
+type CounterWindows = Record<CounterName, CounterWindow>;
+
 type RunStatistics = {
   sampleCount: number;
   warningSampleCount: number;
@@ -38,40 +84,9 @@ type RunStatistics = {
   maxOrderBookBatchCount: number;
   maxScanDurationMs: number;
   maxSubscribedTokenCount: number;
-  firstValidationCount: number | null;
-  lastValidationCount: number | null;
-  firstConnectionCount: number | null;
-  lastConnectionCount: number | null;
-  maxConnectionCount: number;
-  firstFullSnapshotCount: number | null;
-  lastFullSnapshotCount: number | null;
-  maxFullSnapshotCount: number;
-  firstUnexpectedDisconnectCount: number | null;
-  lastUnexpectedDisconnectCount: number | null;
-  maxUnexpectedDisconnectCount: number;
-  firstRecoveryCount: number | null;
-  lastRecoveryCount: number | null;
-  maxRecoveryCount: number;
   maxFullSnapshotDurationMs: number;
   maxRecoveryDurationMs: number;
-  firstProcessedTradeEvents: number | null;
-  lastProcessedTradeEvents: number | null;
-  maxProcessedTradeEvents: number;
-  firstIgnoredTradeEvents: number | null;
-  lastIgnoredTradeEvents: number | null;
-  maxIgnoredTradeEvents: number;
-  firstPaperBuyFillCount: number | null;
-  lastPaperBuyFillCount: number | null;
-  maxPaperBuyFillCount: number;
-  firstPaperSellFillCount: number | null;
-  lastPaperSellFillCount: number | null;
-  maxPaperSellFillCount: number;
-  firstCreatedPaperSellCount: number | null;
-  lastCreatedPaperSellCount: number | null;
-  maxCreatedPaperSellCount: number;
-  firstPlacedBuyCount: number | null;
-  lastPlacedBuyCount: number | null;
-  maxPlacedBuyCount: number;
+  counterWindows: CounterWindows;
   criticalErrors: string[];
 };
 
@@ -140,40 +155,9 @@ async function run(): Promise<void> {
     maxOrderBookBatchCount: 0,
     maxScanDurationMs: 0,
     maxSubscribedTokenCount: 0,
-    firstValidationCount: null,
-    lastValidationCount: null,
-    firstConnectionCount: null,
-    lastConnectionCount: null,
-    maxConnectionCount: 0,
-    firstFullSnapshotCount: null,
-    lastFullSnapshotCount: null,
-    maxFullSnapshotCount: 0,
-    firstUnexpectedDisconnectCount: null,
-    lastUnexpectedDisconnectCount: null,
-    maxUnexpectedDisconnectCount: 0,
-    firstRecoveryCount: null,
-    lastRecoveryCount: null,
-    maxRecoveryCount: 0,
     maxFullSnapshotDurationMs: 0,
     maxRecoveryDurationMs: 0,
-    firstProcessedTradeEvents: null,
-    lastProcessedTradeEvents: null,
-    maxProcessedTradeEvents: 0,
-    firstIgnoredTradeEvents: null,
-    lastIgnoredTradeEvents: null,
-    maxIgnoredTradeEvents: 0,
-    firstPaperBuyFillCount: null,
-    lastPaperBuyFillCount: null,
-    maxPaperBuyFillCount: 0,
-    firstPaperSellFillCount: null,
-    lastPaperSellFillCount: null,
-    maxPaperSellFillCount: 0,
-    firstCreatedPaperSellCount: null,
-    lastCreatedPaperSellCount: null,
-    maxCreatedPaperSellCount: 0,
-    firstPlacedBuyCount: null,
-    lastPlacedBuyCount: null,
-    maxPlacedBuyCount: 0,
+    counterWindows: createCounterWindows(),
     criticalErrors: [],
   };
   let consecutiveTransportErrors = 0;
@@ -356,6 +340,7 @@ async function run(): Promise<void> {
     statistics.criticalErrors = ["No valid PAPER soak sample was recorded"];
   }
   const finishedAtDate = new Date();
+  const { counterWindows, ...summaryStatistics } = statistics;
   const summary = {
     type: "summary" as const,
     result,
@@ -368,7 +353,8 @@ async function run(): Promise<void> {
     intervalSeconds,
     requireRunning,
     baseUrl,
-    ...statistics,
+    ...summaryStatistics,
+    ...serializeCounterWindows(counterWindows),
   };
   await appendRecord(summary);
   console.log(JSON.stringify(summary));
@@ -427,36 +413,7 @@ function updateStatistics(
     statistics.maxSubscribedTokenCount,
     sample.marketStream.subscribedTokenCount,
   );
-  statistics.firstValidationCount ??=
-    sample.periodicValidation.validationCount;
-  statistics.lastValidationCount = sample.periodicValidation.validationCount;
-  statistics.firstConnectionCount ??= sample.marketStream.connectionCount;
-  statistics.lastConnectionCount = sample.marketStream.connectionCount;
-  statistics.maxConnectionCount = Math.max(
-    statistics.maxConnectionCount,
-    sample.marketStream.connectionCount,
-  );
-  statistics.firstFullSnapshotCount ??=
-    sample.marketStream.fullSnapshotCount;
-  statistics.lastFullSnapshotCount = sample.marketStream.fullSnapshotCount;
-  statistics.maxFullSnapshotCount = Math.max(
-    statistics.maxFullSnapshotCount,
-    sample.marketStream.fullSnapshotCount,
-  );
-  statistics.firstUnexpectedDisconnectCount ??=
-    sample.marketStream.unexpectedDisconnectCount;
-  statistics.lastUnexpectedDisconnectCount =
-    sample.marketStream.unexpectedDisconnectCount;
-  statistics.maxUnexpectedDisconnectCount = Math.max(
-    statistics.maxUnexpectedDisconnectCount,
-    sample.marketStream.unexpectedDisconnectCount,
-  );
-  statistics.firstRecoveryCount ??= sample.marketStream.recoveryCount;
-  statistics.lastRecoveryCount = sample.marketStream.recoveryCount;
-  statistics.maxRecoveryCount = Math.max(
-    statistics.maxRecoveryCount,
-    sample.marketStream.recoveryCount,
-  );
+  updateCounterWindows(statistics.counterWindows, sample);
   statistics.maxFullSnapshotDurationMs = Math.max(
     statistics.maxFullSnapshotDurationMs,
     sample.marketStream.lastFullSnapshotDurationMs ?? 0,
@@ -465,49 +422,40 @@ function updateStatistics(
     statistics.maxRecoveryDurationMs,
     sample.marketStream.lastRecoveryDurationMs ?? 0,
   );
-  statistics.firstProcessedTradeEvents ??=
-    sample.marketStream.processedTradeEvents;
-  statistics.lastProcessedTradeEvents =
-    sample.marketStream.processedTradeEvents;
-  statistics.maxProcessedTradeEvents = Math.max(
-    statistics.maxProcessedTradeEvents,
-    sample.marketStream.processedTradeEvents,
-  );
-  statistics.firstIgnoredTradeEvents ??=
-    sample.marketStream.ignoredTradeEvents;
-  statistics.lastIgnoredTradeEvents = sample.marketStream.ignoredTradeEvents;
-  statistics.maxIgnoredTradeEvents = Math.max(
-    statistics.maxIgnoredTradeEvents,
-    sample.marketStream.ignoredTradeEvents,
-  );
-  statistics.firstPaperBuyFillCount ??=
-    sample.marketStream.paperBuyFillCount;
-  statistics.lastPaperBuyFillCount = sample.marketStream.paperBuyFillCount;
-  statistics.maxPaperBuyFillCount = Math.max(
-    statistics.maxPaperBuyFillCount,
-    sample.marketStream.paperBuyFillCount,
-  );
-  statistics.firstPaperSellFillCount ??=
-    sample.marketStream.paperSellFillCount;
-  statistics.lastPaperSellFillCount = sample.marketStream.paperSellFillCount;
-  statistics.maxPaperSellFillCount = Math.max(
-    statistics.maxPaperSellFillCount,
-    sample.marketStream.paperSellFillCount,
-  );
-  statistics.firstCreatedPaperSellCount ??=
-    sample.marketStream.createdPaperSellCount;
-  statistics.lastCreatedPaperSellCount =
-    sample.marketStream.createdPaperSellCount;
-  statistics.maxCreatedPaperSellCount = Math.max(
-    statistics.maxCreatedPaperSellCount,
-    sample.marketStream.createdPaperSellCount,
-  );
-  statistics.firstPlacedBuyCount ??= sample.paperAutomation.placedBuyCount;
-  statistics.lastPlacedBuyCount = sample.paperAutomation.placedBuyCount;
-  statistics.maxPlacedBuyCount = Math.max(
-    statistics.maxPlacedBuyCount,
-    sample.paperAutomation.placedBuyCount,
-  );
+}
+
+function createCounterWindows(): CounterWindows {
+  const windows = {} as CounterWindows;
+  for (const name of Object.keys(counterReaders) as CounterName[]) {
+    windows[name] = { first: null, last: null, max: 0 };
+  }
+  return windows;
+}
+
+function updateCounterWindows(
+  windows: CounterWindows,
+  sample: PaperSoakSample,
+): void {
+  for (const name of Object.keys(counterReaders) as CounterName[]) {
+    const value = counterReaders[name](sample);
+    const window = windows[name];
+    window.first ??= value;
+    window.last = value;
+    window.max = Math.max(window.max, value);
+  }
+}
+
+function serializeCounterWindows(
+  windows: CounterWindows,
+): Record<string, number | null> {
+  const result: Record<string, number | null> = {};
+  for (const name of Object.keys(counterReaders) as CounterName[]) {
+    const window = windows[name];
+    result[`first${name}`] = window.first;
+    result[`last${name}`] = window.last;
+    result[`max${name}`] = window.max;
+  }
+  return result;
 }
 
 async function appendRecord(record: unknown): Promise<void> {
