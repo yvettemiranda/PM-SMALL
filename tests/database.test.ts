@@ -20,6 +20,37 @@ describe("PaperDatabase", () => {
     expect(state.reservedCashMicros).toBe(1_000_000);
   });
 
+  it("keeps market display metadata with an open PAPER position", () => {
+    const candidate = {
+      ...makeCandidate({ queueAheadSizeMicros: 0 }),
+      eventSlug: "will-this-test-pass",
+    };
+    const buy = database.placePaperBuy(candidate, 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "position-display-fill",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 2_000_000,
+      dataComplete: true,
+    });
+
+    expect(database.listPaperPositionViews()).toEqual([
+      expect.objectContaining({
+        tokenId: "yes-token",
+        eventId: "event-1",
+        eventSlug: "will-this-test-pass",
+        eventTitle: "Test event",
+        marketQuestion: "Will this test pass?",
+        marketId: "market-1",
+        direction: "YES",
+        openedAt: "2026-01-01T00:00:00.000Z",
+        endsAt: "2026-01-11T00:00:00.000Z",
+        quantityMicros: 2_000_000,
+        costMicros: 40_000,
+      }),
+    ]);
+  });
+
   it("blocks buys after a sports game starts", () => {
     expect(() =>
       database.placePaperBuy(

@@ -62,6 +62,23 @@ export class PaperMarketProcessor {
     return this.readyTokens.has(tokenId);
   }
 
+  public getBestBidMicros(tokenId: string): number | null {
+    if (!this.readyTokens.has(tokenId)) {
+      return null;
+    }
+    const book = this.books.get(tokenId);
+    if (book === undefined) {
+      return null;
+    }
+    let bestBid: number | null = null;
+    for (const [priceMicros, sizeMicros] of book.bids) {
+      if (sizeMicros > 0 && (bestBid === null || priceMicros > bestBid)) {
+        bestBid = priceMicros;
+      }
+    }
+    return bestBid;
+  }
+
   public getStatus(): PaperMarketProcessorStatus {
     return {
       dataCompleteTokenCount: this.readyTokens.size,

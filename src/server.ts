@@ -10,6 +10,7 @@ import { MarketStreamService } from "./services/market-stream-service.js";
 import { PaperMarketProcessor } from "./services/paper-market-processor.js";
 import { PaperAutomationService } from "./services/paper-automation-service.js";
 import { PaperSettlementService } from "./services/paper-settlement-service.js";
+import { PaperTradingPreferencesService } from "./services/paper-trading-preferences-service.js";
 import { PaperValidationService } from "./services/paper-validation-service.js";
 import { runShutdownWithDeadline } from "./services/process-shutdown.js";
 
@@ -21,7 +22,8 @@ const database = new PaperDatabase(
   config.initialCapitalMicros,
 );
 const marketData = new PolymarketMarketDataSource();
-const scanner = new MarketScanner(marketData, config);
+const tradingPreferences = new PaperTradingPreferencesService(database, config);
+const scanner = new MarketScanner(marketData, config, tradingPreferences);
 const candidates = new CandidateService(scanner, config.scanIntervalMs);
 const paperMarketProcessor = new PaperMarketProcessor(database);
 const marketStream = new MarketStreamService(
@@ -37,6 +39,7 @@ const paperAutomation = new PaperAutomationService(
   database,
   marketStream,
   config,
+  tradingPreferences,
 );
 const paperSettlement = new PaperSettlementService(
   marketData,
@@ -52,6 +55,7 @@ const app = buildApp({
   config,
   database,
   candidates,
+  tradingPreferences,
   liveExecutor,
   marketStream,
   paperAutomation,

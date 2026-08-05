@@ -5,6 +5,54 @@ import type { MarketDataSource } from "../src/infrastructure/polymarket/market-d
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
 describe("MarketScanner", () => {
+  it("uses the current PAPER UI filters for each scan", async () => {
+    const requestedWindows: unknown[] = [];
+    const source: MarketDataSource = {
+      listOpenEvents: async (request) => {
+        requestedWindows.push(request);
+        return [makeEvent()];
+      },
+      fetchOrderBooks: async (tokenIds) =>
+        tokenIds.map(
+          (tokenId) =>
+            ({
+              tokenId,
+              conditionId: "0xcondition",
+              bids: [{ price: tokenId === "yes-token" ? "0.01" : "0.97", size: "30" }],
+              asks: [{ price: tokenId === "yes-token" ? "0.03" : "0.99", size: "30" }],
+              minOrderSize: "5",
+              tickSize: "0.01",
+              negRisk: false,
+              hash: "hash",
+            }) as unknown as OrderBook,
+        ),
+    };
+    let filters = {
+      resultCounts: [2] as Array<2 | 3>,
+      maxBuyPriceMicros: 30_000,
+      maxMarketDurationDays: 7,
+    };
+    const scanner = new MarketScanner(source, testConfig, {
+      getMarketScanPreferences: () => filters,
+    });
+    const now = new Date("2026-01-02T00:00:00.000Z");
+
+    expect(await scanner.scan(now)).toEqual([]);
+    filters = { ...filters, maxMarketDurationDays: 14 };
+    expect(await scanner.scan(now)).toHaveLength(1);
+    filters = { ...filters, resultCounts: [3] };
+    expect(await scanner.scan(now)).toEqual([]);
+
+    expect(requestedWindows[0]).toMatchObject({
+      startDateMin: "2025-12-26T00:00:00.000Z",
+      endDateMax: "2026-01-09T00:00:00.000Z",
+    });
+    expect(requestedWindows[1]).toMatchObject({
+      startDateMin: "2025-12-19T00:00:00.000Z",
+      endDateMax: "2026-01-16T00:00:00.000Z",
+    });
+  });
+
   it("passes the cancellation signal through both scan stages", async () => {
     const controller = new AbortController();
     const signals: Array<AbortSignal | undefined> = [];

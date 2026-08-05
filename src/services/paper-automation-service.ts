@@ -22,6 +22,10 @@ export interface PaperAutomationRuntime {
   requestRun(): void;
 }
 
+export interface PaperCandidateSelection {
+  isTokenSelected(tokenId: string): boolean;
+}
+
 export class PaperAutomationService implements PaperAutomationRuntime {
   private started = false;
   private candidateUnsubscribe: (() => void) | null = null;
@@ -40,6 +44,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     private readonly database: PaperDatabase,
     private readonly marketStream: PaperMarketRuntime,
     private readonly config: AppConfig,
+    private readonly candidateSelection?: PaperCandidateSelection,
   ) {}
 
   public start(): void {
@@ -120,6 +125,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       if (this.database.getStrategyState().status === "RUNNING") {
         for (const candidate of this.candidates.getSnapshot().candidates) {
           if (
+            this.candidateSelection?.isTokenSelected(candidate.tokenId) === false ||
             !candidateIsCurrent(candidate, now, this.config) ||
             !this.marketStream.isTokenReady(candidate.tokenId)
           ) {

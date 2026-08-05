@@ -8,6 +8,7 @@ import type { MarketToken, TokenOrderBook } from "../src/domain/types.js";
 
 const token: MarketToken = {
   eventId: "event-1",
+  eventSlug: "event",
   eventTitle: "Event",
   category: "Tech",
   resultCount: 2,

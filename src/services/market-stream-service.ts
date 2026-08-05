@@ -30,6 +30,7 @@ export interface PaperMarketRuntime {
   getStatus(): MarketStreamStatus;
   refreshSubscriptions(): void;
   isTokenReady(tokenId: string): boolean;
+  getBestBidMicros?(tokenId: string): number | null;
 }
 
 export class MarketStreamService implements PaperMarketRuntime {
@@ -148,6 +149,10 @@ export class MarketStreamService implements PaperMarketRuntime {
 
   public isTokenReady(tokenId: string): boolean {
     return this.connected && this.processor.isTokenReady(tokenId);
+  }
+
+  public getBestBidMicros(tokenId: string): number | null {
+    return this.connected ? this.processor.getBestBidMicros(tokenId) : null;
   }
 
   private requestRestart(): void {

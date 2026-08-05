@@ -25,6 +25,16 @@ export type MarketScanDiagnostics = {
   transientErrorCount: number;
 };
 
+export type MarketScanPreferences = {
+  resultCounts: readonly (2 | 3)[];
+  maxBuyPriceMicros: number;
+  maxMarketDurationDays: number;
+};
+
+export interface MarketScanPreferencesProvider {
+  getMarketScanPreferences(): MarketScanPreferences;
+}
+
 function normalizeOrderBook(book: OrderBook): TokenOrderBook {
   return {
     tokenId: String(book.tokenId),
@@ -55,6 +65,7 @@ export class MarketScanner implements CandidateScanner {
   public constructor(
     private readonly marketData: MarketDataSource,
     private readonly config: AppConfig,
+    private readonly preferences?: MarketScanPreferencesProvider,
   ) {}
 
   public getLastDiagnostics(): MarketScanDiagnostics | null {
@@ -74,6 +85,16 @@ export class MarketScanner implements CandidateScanner {
     now: Date = new Date(),
     signal?: AbortSignal,
   ): Promise<TradeCandidate[]> {
+    const scanPreferences = this.preferences?.getMarketScanPreferences() ?? {
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: this.config.maxBuyPriceMicros,
+      maxMarketDurationDays: this.config.maxMarketDurationDays,
+    };
+    const scanConfig: AppConfig = {
+      ...this.config,
+      maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
+      maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
+    };
     const startedAt = new Date();
     const startedAtMs = Date.now();
     this.activeScanStartedAtMs = startedAtMs;
@@ -98,7 +119,7 @@ export class MarketScanner implements CandidateScanner {
     // is traversed, then the exact domain and order-book rules run locally.
     try {
       signal?.throwIfAborted();
-      const scanWindowMs = this.config.maxMarketDurationDays * DAY_MS;
+      const scanWindowMs = scanPreferences.maxMarketDurationDays * DAY_MS;
       const nowMs = now.getTime();
       let eventRetryCount = 0;
       let eventRateLimitCount = 0;
@@ -136,8 +157,9 @@ export class MarketScanner implements CandidateScanner {
       );
       signal?.throwIfAborted();
       const tokens = events.flatMap((event) => {
-        const eligibleEvent = filterEligibleEvent(event, this.config, now);
-        return eligibleEvent === null
+        const eligibleEvent = filterEligibleEvent(event, scanConfig, now);
+        return eligibleEvent === null ||
+          !scanPreferences.resultCounts.includes(eligibleEvent.resultCount)
           ? []
           : extractEligibleTokens(event, eligibleEvent, now);
       });
@@ -192,7 +214,7 @@ export class MarketScanner implements CandidateScanner {
           book,
           this.config.orderBudgetMicros,
           this.config.minBuyPriceMicros,
-          this.config.maxBuyPriceMicros,
+          scanPreferences.maxBuyPriceMicros,
         );
         return candidate === null ? [] : [candidate];
       });

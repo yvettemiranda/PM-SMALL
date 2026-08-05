@@ -58,6 +58,7 @@ export function makeMarket(overrides: Record<string, unknown> = {}): Market {
 export function makeEvent(overrides: Record<string, unknown> = {}): Event {
   return {
     id: "event-1",
+    slug: "test-event",
     title: "Test event",
     category: "Tech",
     state: { active: true, closed: false, archived: false },
@@ -87,6 +88,7 @@ export function makeCandidate(
   return {
     candidateId: "yes-token:20000",
     eventId: "event-1",
+    eventSlug: "test-event",
     eventTitle: "Test event",
     category: "Tech",
     resultCount: 2,

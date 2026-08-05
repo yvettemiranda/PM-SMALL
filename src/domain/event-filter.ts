@@ -74,6 +74,10 @@ export function filterEligibleEvent(
 
   return {
     eventId: String(event.id),
+    eventSlug:
+      typeof (event as Event & { slug?: unknown }).slug === "string"
+        ? (event as Event & { slug: string }).slug
+        : null,
     title: event.title ?? "Untitled event",
     category: event.category ?? "Other",
     resultCount,
@@ -115,6 +119,7 @@ export function extractEligibleTokens(
 
     const base = {
       eventId: eligibleEvent.eventId,
+      eventSlug: eligibleEvent.eventSlug,
       eventTitle: eligibleEvent.title,
       category: eligibleEvent.category,
       resultCount: eligibleEvent.resultCount,

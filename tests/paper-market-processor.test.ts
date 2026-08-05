@@ -115,7 +115,9 @@ describe("PaperMarketProcessor", () => {
       asks: [],
       timestampMs: 100,
     });
+    expect(processor.getBestBidMicros("yes-token")).toBe(20_000);
     processor.markDisconnected(["yes-token"]);
+    expect(processor.getBestBidMicros("yes-token")).toBeNull();
     processor.handle({
       type: "trade",
       sourceTradeId: "gap-trade",

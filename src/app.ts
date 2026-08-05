@@ -3,11 +3,14 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
-import { microsToDecimalString } from "./domain/price.js";
+import {
+  calculateOrderCostMicros,
+  microsToDecimalString,
+} from "./domain/price.js";
 import type { PaperOrder, TradeCandidate } from "./domain/types.js";
 import type {
   PaperDatabase,
-  PaperPosition,
+  PaperPositionView,
   PaperSettlement,
   StrategyState,
 } from "./infrastructure/db/database.js";
@@ -16,12 +19,18 @@ import type { CandidateService, CandidateSnapshot } from "./services/candidate-s
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
 import type { PaperSettlementRuntime } from "./services/paper-settlement-service.js";
+import {
+  MARKET_DURATION_DAY_OPTIONS,
+  type PaperTradingPreferencesService,
+  type PaperTradingPreferencesSnapshot,
+} from "./services/paper-trading-preferences-service.js";
 import type { PaperValidationRuntime } from "./services/paper-validation-service.js";
 
 export type AppDependencies = {
   config: AppConfig;
   database: PaperDatabase;
   candidates: CandidateService;
+  tradingPreferences: PaperTradingPreferencesService;
   liveExecutor: LiveExecutorDisabled;
   marketStream?: PaperMarketRuntime;
   paperAutomation?: PaperAutomationRuntime;
@@ -29,16 +38,20 @@ export type AppDependencies = {
   paperValidation?: PaperValidationRuntime;
 };
 
-function publicConfig(config: AppConfig) {
+function publicConfig(
+  config: AppConfig,
+  preferences: PaperTradingPreferencesSnapshot,
+) {
   return {
     initialCapital: microsToDecimalString(config.initialCapitalMicros),
     totalBudget: microsToDecimalString(config.totalBudgetMicros),
     orderBudget: microsToDecimalString(config.orderBudgetMicros),
-    maxMarketDurationDays: config.maxMarketDurationDays,
+    resultCounts: preferences.resultCounts,
+    maxMarketDurationDays: preferences.maxMarketDurationDays,
     maxMarketProgressPercent: config.maxMarketProgressPercent,
     stopBuyProgressPercent: config.stopBuyProgressPercent,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
-    maxBuyPrice: microsToDecimalString(config.maxBuyPriceMicros),
+    maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     scanIntervalMs: config.scanIntervalMs,
     paperSettlementIntervalMs: config.paperSettlementIntervalMs,
     paperValidationIntervalMs: config.paperValidationIntervalMs,
@@ -82,15 +95,6 @@ function serializeOrder(order: PaperOrder) {
   };
 }
 
-function serializePosition(position: PaperPosition) {
-  return {
-    ...position,
-    quantity: microsToDecimalString(position.quantityMicros),
-    cost: microsToDecimalString(position.costMicros),
-    realizedPnl: microsToDecimalString(position.realizedPnlMicros),
-  };
-}
-
 function serializeSettlement(settlement: PaperSettlement) {
   return {
     ...settlement,
@@ -100,9 +104,11 @@ function serializeSettlement(settlement: PaperSettlement) {
   };
 }
 
-function serializeCandidate(candidate: TradeCandidate) {
+function serializeCandidate(candidate: TradeCandidate, selected: boolean) {
   return {
     ...candidate,
+    selected,
+    marketUrl: polymarketEventUrl(candidate.eventSlug, candidate.eventId),
     bestBid: microsToDecimalString(candidate.bestBidMicros),
     bestAsk:
       candidate.bestAskMicros === null
@@ -119,13 +125,154 @@ function serializeCandidate(candidate: TradeCandidate) {
 
 function serializeSnapshot(
   snapshot: CandidateSnapshot,
+  preferences: PaperTradingPreferencesService,
   includeCandidates = true,
 ) {
   const { candidates, ...status } = snapshot;
-  const summary = { ...status, candidateCount: candidates.length };
+  const selectedCandidateCount = candidates.filter((candidate) =>
+    preferences.isTokenSelected(candidate.tokenId),
+  ).length;
+  const summary = {
+    ...status,
+    candidateCount: candidates.length,
+    selectedCandidateCount,
+  };
   return includeCandidates
-    ? { ...summary, candidates: candidates.map(serializeCandidate) }
+    ? {
+        ...summary,
+        candidates: candidates.map((candidate) =>
+          serializeCandidate(
+            candidate,
+            preferences.isTokenSelected(candidate.tokenId),
+          ),
+        ),
+      }
     : summary;
+}
+
+function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
+  return {
+    ...preferences,
+    maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
+    maxBuyPriceCents: preferences.maxBuyPriceMicros / 10_000,
+    durationOptions: [...MARKET_DURATION_DAY_OPTIONS],
+  };
+}
+
+function averagePriceMicros(position: PaperPositionView): number | null {
+  if (position.quantityMicros <= 0) {
+    return null;
+  }
+  return Number(
+    (BigInt(position.costMicros) * 1_000_000n) /
+      BigInt(position.quantityMicros),
+  );
+}
+
+function currentMarketProgress(
+  openedAt: string | null,
+  endsAt: string | null,
+  now: Date,
+): number | null {
+  if (openedAt === null || endsAt === null) {
+    return null;
+  }
+  const openedAtMs = Date.parse(openedAt);
+  const endsAtMs = Date.parse(endsAt);
+  if (
+    !Number.isFinite(openedAtMs) ||
+    !Number.isFinite(endsAtMs) ||
+    endsAtMs <= openedAtMs
+  ) {
+    return null;
+  }
+  return Math.min(
+    100,
+    Math.max(0, ((now.getTime() - openedAtMs) / (endsAtMs - openedAtMs)) * 100),
+  );
+}
+
+function polymarketEventUrl(eventSlug: string | null, eventId: string | null) {
+  const identifier = eventSlug ?? eventId;
+  return identifier === null
+    ? null
+    : `https://polymarket.com/event/${encodeURIComponent(identifier)}`;
+}
+
+function markPriceMicros(
+  position: PaperPositionView,
+  dependencies: AppDependencies,
+): number | null {
+  const streamed = dependencies.marketStream?.getBestBidMicros?.(position.tokenId);
+  if (streamed !== undefined && streamed !== null) {
+    return streamed;
+  }
+  return (
+    dependencies.candidates
+      .getSnapshot()
+      .candidates.find((candidate) => candidate.tokenId === position.tokenId)
+      ?.bestBidMicros ?? null
+  );
+}
+
+function serializePositionView(
+  position: PaperPositionView,
+  dependencies: AppDependencies,
+  now: Date,
+) {
+  const averageBuyPriceMicros = averagePriceMicros(position);
+  const currentMarkPriceMicros = markPriceMicros(position, dependencies);
+  const valuationPriceMicros = currentMarkPriceMicros ?? averageBuyPriceMicros;
+  const marketValueMicros =
+    valuationPriceMicros === null
+      ? position.costMicros
+      : calculateOrderCostMicros(valuationPriceMicros, position.quantityMicros);
+  return {
+    ...position,
+    marketUrl: polymarketEventUrl(position.eventSlug, position.eventId),
+    quantity: microsToDecimalString(position.quantityMicros),
+    cost: microsToDecimalString(position.costMicros),
+    realizedPnl: microsToDecimalString(position.realizedPnlMicros),
+    averageBuyPrice:
+      averageBuyPriceMicros === null
+        ? null
+        : microsToDecimalString(averageBuyPriceMicros),
+    markPrice:
+      currentMarkPriceMicros === null
+        ? null
+        : microsToDecimalString(currentMarkPriceMicros),
+    unrealizedPnl: microsToDecimalString(
+      marketValueMicros - position.costMicros,
+    ),
+    progressPercent: currentMarketProgress(position.openedAt, position.endsAt, now),
+  };
+}
+
+function serializePortfolio(
+  state: StrategyState,
+  positions: readonly PaperPositionView[],
+  dependencies: AppDependencies,
+) {
+  let marketValueMicros = 0;
+  for (const position of positions) {
+    const averageBuyPriceMicros = averagePriceMicros(position);
+    const valuationPriceMicros =
+      markPriceMicros(position, dependencies) ?? averageBuyPriceMicros;
+    marketValueMicros +=
+      valuationPriceMicros === null
+        ? position.costMicros
+        : calculateOrderCostMicros(valuationPriceMicros, position.quantityMicros);
+  }
+  const unrealizedPnlMicros = marketValueMicros - state.positionCostMicros;
+  const totalPnlMicros = state.realizedPnlMicros + unrealizedPnlMicros;
+  const totalFundsMicros =
+    state.availableCashMicros + state.reservedCashMicros + marketValueMicros;
+  return {
+    totalFunds: microsToDecimalString(totalFundsMicros),
+    totalPnl: microsToDecimalString(totalPnlMicros),
+    realizedPnl: microsToDecimalString(state.realizedPnlMicros),
+    unrealizedPnl: microsToDecimalString(unrealizedPnlMicros),
+  };
 }
 
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
@@ -137,15 +284,20 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const query = z
       .object({ compact: z.enum(["true", "false"]).optional() })
       .parse(request.query);
+    const strategy = dependencies.database.getStrategyState();
+    const positions = dependencies.database.listPaperPositionViews();
+    const preferences = dependencies.tradingPreferences.getSnapshot();
     return {
       version: "0.4.0",
       executionMode: "PAPER",
       liveExecutionEnabled: dependencies.liveExecutor.enabled,
-      strategy: serializeState(dependencies.database.getStrategyState()),
-      configuration: publicConfig(dependencies.config),
+      strategy: serializeState(strategy),
+      portfolio: serializePortfolio(strategy, positions, dependencies),
+      configuration: publicConfig(dependencies.config, preferences),
       runtime: runtimeStatus(),
       marketScan: serializeSnapshot(
         dependencies.candidates.getSnapshot(),
+        dependencies.tradingPreferences,
         query.compact !== "true",
       ),
       marketStream: dependencies.marketStream?.getStatus() ?? {
@@ -225,7 +377,67 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       query.refresh === "true"
         ? await dependencies.candidates.refresh()
         : dependencies.candidates.getSnapshot();
-    return serializeSnapshot(snapshot);
+    return serializeSnapshot(snapshot, dependencies.tradingPreferences);
+  });
+
+  app.get("/api/paper/preferences", async () => ({
+    preferences: serializePreferences(dependencies.tradingPreferences.getSnapshot()),
+  }));
+
+  app.put("/api/paper/preferences", async (request) => {
+    const body = z
+      .object({
+        resultCounts: z.array(z.union([z.literal(2), z.literal(3)])),
+        maxBuyPriceCents: z.number().int().min(1).max(99),
+        maxMarketDurationDays: z
+          .number()
+          .int()
+          .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
+      })
+      .parse(request.body);
+    const preferences = dependencies.tradingPreferences.updateMarketFilters({
+      resultCounts: body.resultCounts,
+      maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
+      maxMarketDurationDays: body.maxMarketDurationDays,
+    });
+    const scanWasRunning = dependencies.candidates.getSnapshot().scanning;
+    void dependencies.candidates.refresh().then(() => {
+      if (scanWasRunning) void dependencies.candidates.refresh();
+    });
+    return { preferences: serializePreferences(preferences) };
+  });
+
+  app.put("/api/paper/candidate-selection", async (request) => {
+    const body = z
+      .discriminatedUnion("action", [
+        z.object({ action: z.literal("all") }),
+        z.object({ action: z.literal("none") }),
+        z.object({
+          action: z.literal("set"),
+          tokenId: z.string().min(1),
+          selected: z.boolean(),
+        }),
+      ])
+      .parse(request.body);
+    if (body.action === "all") {
+      dependencies.tradingPreferences.setAllCandidatesSelected(true);
+    } else if (body.action === "none") {
+      dependencies.tradingPreferences.setAllCandidatesSelected(false);
+    } else {
+      dependencies.tradingPreferences.setCandidateSelected(
+        body.tokenId,
+        body.selected,
+      );
+    }
+    dependencies.paperAutomation?.requestRun();
+    dependencies.marketStream?.refreshSubscriptions();
+    const candidates = dependencies.candidates.getSnapshot().candidates;
+    return {
+      selectedCandidateCount: candidates.filter((candidate) =>
+        dependencies.tradingPreferences.isTokenSelected(candidate.tokenId),
+      ).length,
+      candidateCount: candidates.length,
+    };
   });
 
   app.get("/api/paper/orders", async () => ({
@@ -233,7 +445,9 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   }));
 
   app.get("/api/paper/positions", async () => ({
-    positions: dependencies.database.listPaperPositions().map(serializePosition),
+    positions: dependencies.database
+      .listPaperPositionViews()
+      .map((position) => serializePositionView(position, dependencies, new Date())),
   }));
 
   app.get("/api/paper/settlements", async () => ({

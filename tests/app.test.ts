@@ -8,6 +8,11 @@ import type { CandidateScanner } from "../src/domain/market-scanner.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { LiveExecutorDisabled } from "../src/infrastructure/execution/live-executor-disabled.js";
 import { CandidateService } from "../src/services/candidate-service.js";
+import type {
+  MarketStreamStatus,
+  PaperMarketRuntime,
+} from "../src/services/market-stream-service.js";
+import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
 import { makeCandidate, testConfig } from "./helpers.js";
 
 describe("HTTP app", () => {
@@ -23,10 +28,15 @@ describe("HTTP app", () => {
     };
     const candidates = new CandidateService(scanner, 15_000);
     const database = new PaperDatabase(":memory:", 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
     const app = buildApp({
       config: testConfig,
       database,
       candidates,
+      tradingPreferences,
       liveExecutor: new LiveExecutorDisabled(),
     });
     resources.push(app, database);
@@ -119,10 +129,15 @@ describe("HTTP app", () => {
     const scanner: CandidateScanner = { scan: async () => [] };
     const candidates = new CandidateService(scanner, 15_000);
     const database = new PaperDatabase(databasePath, 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
     const app = buildApp({
       config: { ...testConfig, databasePath },
       database,
       candidates,
+      tradingPreferences,
       liveExecutor: new LiveExecutorDisabled(),
     });
     resources.push(app, database, {
@@ -154,4 +169,167 @@ describe("HTTP app", () => {
     });
     expect(database.getStrategyState().status).toBe("RUNNING");
   });
+
+  it("applies TEST UI filters and candidate selection through PAPER APIs", async () => {
+    const scanner: CandidateScanner = {
+      scan: async () => [
+        makeCandidate(),
+        makeCandidate({
+          candidateId: "ternary-token:30000",
+          tokenId: "ternary-token",
+          resultCount: 3,
+          direction: "NO",
+        }),
+      ],
+    };
+    const candidates = new CandidateService(scanner, 15_000);
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
+    const app = buildApp({
+      config: testConfig,
+      database,
+      candidates,
+      tradingPreferences,
+      liveExecutor: new LiveExecutorDisabled(),
+    });
+    resources.push(app, database);
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: "/api/paper/preferences",
+      payload: {
+        resultCounts: [3],
+        maxBuyPriceCents: 5,
+        maxMarketDurationDays: 60,
+      },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().preferences).toMatchObject({
+      resultCounts: [3],
+      maxBuyPriceCents: 5,
+      maxMarketDurationDays: 60,
+    });
+
+    const cleared = await app.inject({
+      method: "PUT",
+      url: "/api/paper/candidate-selection",
+      payload: { action: "none" },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().selectedCandidateCount).toBe(0);
+
+    const selected = await app.inject({
+      method: "PUT",
+      url: "/api/paper/candidate-selection",
+      payload: { action: "set", tokenId: "ternary-token", selected: true },
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.json().selectedCandidateCount).toBe(1);
+
+    const snapshot = await app.inject({ method: "GET", url: "/api/candidates" });
+    expect(snapshot.json()).toMatchObject({
+      candidateCount: 2,
+      selectedCandidateCount: 1,
+      candidates: [
+        expect.objectContaining({ tokenId: "yes-token", selected: false }),
+        expect.objectContaining({ tokenId: "ternary-token", selected: true }),
+      ],
+    });
+  });
+
+  it("serves position display data, mark-to-market PnL, and the compact TEST UI", async () => {
+    const candidates = new CandidateService(
+      { scan: async () => [makeCandidate()] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
+    database.setStrategyStatus("RUNNING");
+    const buy = database.placePaperBuy(makeCandidate({ queueAheadSizeMicros: 0 }), 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "dashboard-position-fill",
+      tradePriceMicros: 20_000,
+      tradeSizeMicros: 2_000_000,
+      dataComplete: true,
+    });
+    const app = buildApp({
+      config: testConfig,
+      database,
+      candidates,
+      tradingPreferences,
+      liveExecutor: new LiveExecutorDisabled(),
+      marketStream: marketRuntimeWithBestBid(30_000),
+    });
+    resources.push(app, database);
+
+    const status = await app.inject({ method: "GET", url: "/api/status" });
+    expect(status.json().portfolio).toEqual({
+      totalFunds: "100.02",
+      totalPnl: "0.02",
+      realizedPnl: "0",
+      unrealizedPnl: "0.02",
+    });
+
+    const positions = await app.inject({
+      method: "GET",
+      url: "/api/paper/positions",
+    });
+    expect(positions.json().positions).toEqual([
+      expect.objectContaining({
+        marketQuestion: "Will this test pass?",
+        direction: "YES",
+        averageBuyPrice: "0.02",
+        markPrice: "0.03",
+        unrealizedPnl: "0.02",
+        marketUrl: "https://polymarket.com/event/test-event",
+      }),
+    ]);
+
+    const page = await app.inject({ method: "GET", url: "/" });
+    expect(page.body).toContain("TEST");
+    expect(page.body).toContain("LIVE");
+    expect(page.body).toContain("交易配置");
+    expect(page.body).toContain("总资金");
+    expect(page.body).toContain("当前持仓");
+    expect(page.body).toContain("扫描市场");
+    expect(page.body).not.toContain("PAPER ONLY");
+    expect(page.body).not.toContain("测试订单");
+    expect(page.body).not.toContain("结算与纸面赎回");
+  });
 });
+
+function marketRuntimeWithBestBid(bestBidMicros: number): PaperMarketRuntime {
+  return {
+    getStatus: (): MarketStreamStatus => ({
+      running: true,
+      connected: true,
+      subscribedTokenCount: 1,
+      dataCompleteTokenCount: 1,
+      lastEventAt: null,
+      processedTradeEvents: 0,
+      ignoredTradeEvents: 0,
+      paperBuyFillCount: 0,
+      paperSellFillCount: 0,
+      createdPaperSellCount: 0,
+      connectionCount: 1,
+      fullSnapshotCount: 1,
+      unexpectedDisconnectCount: 0,
+      recoveryCount: 0,
+      lastFullSnapshotDurationMs: 1,
+      lastRecoveryDurationMs: null,
+      lastError: null,
+    }),
+    refreshSubscriptions: () => {},
+    isTokenReady: () => true,
+    getBestBidMicros: () => bestBidMicros,
+  };
+}

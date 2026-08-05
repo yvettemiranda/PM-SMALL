@@ -8,6 +8,7 @@ export type PaperOrderStatus =
 
 export type EligibleEvent = {
   eventId: string;
+  eventSlug: string | null;
   title: string;
   category: string;
   resultCount: 2 | 3;
@@ -20,6 +21,7 @@ export type EligibleEvent = {
 
 export type MarketToken = {
   eventId: string;
+  eventSlug: string | null;
   eventTitle: string;
   category: string;
   resultCount: 2 | 3;

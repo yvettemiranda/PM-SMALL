@@ -101,6 +101,30 @@ export type PaperPosition = {
   updatedAt: string;
 };
 
+export type PaperPositionView = PaperPosition & {
+  eventId: string | null;
+  eventSlug: string | null;
+  eventTitle: string | null;
+  marketId: string | null;
+  marketQuestion: string | null;
+  direction: "YES" | "NO" | null;
+  openedAt: string | null;
+  endsAt: string | null;
+};
+
+export type PaperTradingPreferences = {
+  resultCounts: Array<2 | 3>;
+  maxBuyPriceMicros: number;
+  maxMarketDurationDays: number;
+  candidatesSelectedByDefault: boolean;
+  updatedAt: string;
+};
+
+export type PaperCandidateSelectionOverride = {
+  tokenId: string;
+  selected: boolean;
+};
+
 type PaperOrderRow = {
   id: string;
   token_id: string;
@@ -229,6 +253,26 @@ function rowToPaperPosition(row: PaperPositionRow): PaperPosition {
   };
 }
 
+function rowToPaperTradingPreferences(row: {
+  binary_enabled: number;
+  ternary_enabled: number;
+  max_buy_price_micros: number;
+  max_market_duration_days: number;
+  candidates_selected_by_default: number;
+  updated_at: string;
+}): PaperTradingPreferences {
+  const resultCounts: Array<2 | 3> = [];
+  if (row.binary_enabled === 1) resultCounts.push(2);
+  if (row.ternary_enabled === 1) resultCounts.push(3);
+  return {
+    resultCounts,
+    maxBuyPriceMicros: row.max_buy_price_micros,
+    maxMarketDurationDays: row.max_market_duration_days,
+    candidatesSelectedByDefault: row.candidates_selected_by_default === 1,
+    updatedAt: row.updated_at,
+  };
+}
+
 export class PaperDatabase {
   private readonly database: Database.Database;
   private paperValidationBlocked = false;
@@ -259,6 +303,8 @@ export class PaperDatabase {
       { version: 2, file: "002_queue_rebase.sql" },
       { version: 3, file: "003_game_start.sql" },
       { version: 4, file: "004_paper_settlement.sql" },
+      { version: 5, file: "005_paper_trading_preferences.sql" },
+      { version: 6, file: "006_paper_market_metadata.sql" },
     ];
 
     for (const migration of migrations) {
@@ -405,6 +451,146 @@ export class PaperDatabase {
     };
   }
 
+  public ensurePaperTradingPreferences(
+    defaults: Omit<PaperTradingPreferences, "updatedAt">,
+  ): PaperTradingPreferences {
+    const existing = this.getPaperTradingPreferencesRow();
+    if (existing === undefined) {
+      const now = new Date().toISOString();
+      this.database
+        .prepare(
+          `INSERT INTO paper_trading_preferences(
+            id, binary_enabled, ternary_enabled, max_buy_price_micros,
+            max_market_duration_days, candidates_selected_by_default, updated_at
+          ) VALUES (1, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          defaults.resultCounts.includes(2) ? 1 : 0,
+          defaults.resultCounts.includes(3) ? 1 : 0,
+          defaults.maxBuyPriceMicros,
+          defaults.maxMarketDurationDays,
+          defaults.candidatesSelectedByDefault ? 1 : 0,
+          now,
+        );
+    }
+    return this.getPaperTradingPreferences();
+  }
+
+  public getPaperTradingPreferences(): PaperTradingPreferences {
+    const row = this.getPaperTradingPreferencesRow();
+    if (row === undefined) {
+      throw new Error("Paper trading preferences are missing");
+    }
+    return rowToPaperTradingPreferences(row);
+  }
+
+  public updatePaperTradingPreferences(
+    preferences: Omit<PaperTradingPreferences, "updatedAt">,
+  ): PaperTradingPreferences {
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      this.database
+        .prepare(
+          `UPDATE paper_trading_preferences
+          SET binary_enabled = ?, ternary_enabled = ?, max_buy_price_micros = ?,
+              max_market_duration_days = ?, candidates_selected_by_default = ?,
+              updated_at = ?
+          WHERE id = 1`,
+        )
+        .run(
+          preferences.resultCounts.includes(2) ? 1 : 0,
+          preferences.resultCounts.includes(3) ? 1 : 0,
+          preferences.maxBuyPriceMicros,
+          preferences.maxMarketDurationDays,
+          preferences.candidatesSelectedByDefault ? 1 : 0,
+          now,
+        );
+      this.writeAudit("PAPER_TRADING_FILTERS_UPDATED", "strategy", "1", {
+        resultCounts: preferences.resultCounts,
+        maxBuyPriceMicros: preferences.maxBuyPriceMicros,
+        maxMarketDurationDays: preferences.maxMarketDurationDays,
+      });
+      return this.getPaperTradingPreferences();
+    });
+  }
+
+  public listPaperCandidateSelectionOverrides(): PaperCandidateSelectionOverride[] {
+    const rows = this.database
+      .prepare(
+        `SELECT token_id, selected
+        FROM paper_candidate_selection_overrides ORDER BY token_id`,
+      )
+      .all() as unknown as Array<{ token_id: string; selected: number }>;
+    return rows.map((row) => ({
+      tokenId: row.token_id,
+      selected: row.selected === 1,
+    }));
+  }
+
+  public setPaperCandidateSelected(
+    tokenId: string,
+    selected: boolean,
+    selectedByDefault: boolean,
+  ): void {
+    this.transaction(() => {
+      const now = new Date().toISOString();
+      if (selected === selectedByDefault) {
+        this.database
+          .prepare(
+            "DELETE FROM paper_candidate_selection_overrides WHERE token_id = ?",
+          )
+          .run(tokenId);
+      } else {
+        this.database
+          .prepare(
+            `INSERT INTO paper_candidate_selection_overrides(token_id, selected, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(token_id) DO UPDATE SET
+              selected = excluded.selected, updated_at = excluded.updated_at`,
+          )
+          .run(tokenId, selected ? 1 : 0, now);
+      }
+      const cancelledBuyCount = selected
+        ? 0
+        : this.cancelActiveBuysForToken(
+            tokenId,
+            now,
+            "CANDIDATE_SELECTION_EXCLUDED",
+          );
+      this.writeAudit("PAPER_CANDIDATE_SELECTION_UPDATED", "market_token", tokenId, {
+        selected,
+        cancelledBuyCount,
+      });
+    });
+  }
+
+  public setAllPaperCandidatesSelected(selected: boolean): PaperTradingPreferences {
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      this.database
+        .prepare(
+          `UPDATE paper_trading_preferences
+          SET candidates_selected_by_default = ?, updated_at = ? WHERE id = 1`,
+        )
+        .run(selected ? 1 : 0, now);
+      this.database.prepare("DELETE FROM paper_candidate_selection_overrides").run();
+      let cancelledBuyCount = 0;
+      if (!selected) {
+        for (const order of this.listActivePaperOrders().filter(
+          (paperOrder) => paperOrder.side === "BUY",
+        )) {
+          this.cancelPaperBuy(order, now, "CANDIDATE_SELECTION_CLEARED");
+          cancelledBuyCount += 1;
+        }
+      }
+      this.writeAudit("PAPER_CANDIDATE_SELECTION_RESET", "strategy", "1", {
+        selected,
+        cancelledBuyCount,
+      });
+      return this.getPaperTradingPreferences();
+    });
+  }
+
   public listPaperPositions(limit = 100): PaperPosition[] {
     const rows = this.database
       .prepare(
@@ -414,6 +600,40 @@ export class PaperDatabase {
       )
       .all(limit) as unknown as PaperPositionRow[];
     return rows.map(rowToPaperPosition);
+  }
+
+  public listPaperPositionViews(limit = 100): PaperPositionView[] {
+    const rows = this.database
+      .prepare(
+        `SELECT pp.token_id, pp.condition_id, pp.quantity_micros, pp.cost_micros,
+          pp.realized_pnl_micros, pp.first_sell_at, pp.cycle_closed_at,
+          pp.updated_at, pm.event_id, pm.event_slug, pm.event_title,
+          pm.market_id, pm.market_question, pm.direction, pm.opened_at, pm.ends_at
+        FROM paper_positions pp
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+        ORDER BY pp.updated_at DESC, pp.token_id LIMIT ?`,
+      )
+      .all(limit) as unknown as Array<PaperPositionRow & {
+      event_id: string | null;
+      event_slug: string | null;
+      event_title: string | null;
+      market_id: string | null;
+      market_question: string | null;
+      direction: "YES" | "NO" | null;
+      opened_at: string | null;
+      ends_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      ...rowToPaperPosition(row),
+      eventId: row.event_id,
+      eventSlug: row.event_slug,
+      eventTitle: row.event_title,
+      marketId: row.market_id,
+      marketQuestion: row.market_question,
+      direction: row.direction,
+      openedAt: row.opened_at,
+      endsAt: row.ends_at,
+    }));
   }
 
   public listPaperSettlements(limit = 100): PaperSettlement[] {
@@ -1288,6 +1508,35 @@ export class PaperDatabase {
       const now = new Date().toISOString();
       this.database
         .prepare(
+          `INSERT INTO paper_market_metadata(
+            token_id, event_id, event_slug, event_title, market_id,
+            market_question, direction, opened_at, ends_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(token_id) DO UPDATE SET
+            event_id = excluded.event_id,
+            event_slug = excluded.event_slug,
+            event_title = excluded.event_title,
+            market_id = excluded.market_id,
+            market_question = excluded.market_question,
+            direction = excluded.direction,
+            opened_at = excluded.opened_at,
+            ends_at = excluded.ends_at,
+            updated_at = excluded.updated_at`,
+        )
+        .run(
+          candidate.tokenId,
+          candidate.eventId,
+          candidate.eventSlug,
+          candidate.eventTitle,
+          candidate.marketId,
+          candidate.marketQuestion,
+          candidate.direction,
+          candidate.openedAt,
+          candidate.endsAt,
+          now,
+        );
+      this.database
+        .prepare(
           `INSERT INTO paper_orders(
             id, token_id, condition_id, event_id, market_id, game_starts_at,
             market_opened_at, market_ends_at, side,
@@ -1666,6 +1915,34 @@ export class PaperDatabase {
       )
       .run(now, order.id);
     this.writeAudit("PAPER_SELL_CANCELLED", "paper_order", order.id, { reason });
+  }
+
+  private getPaperTradingPreferencesRow():
+    | {
+        binary_enabled: number;
+        ternary_enabled: number;
+        max_buy_price_micros: number;
+        max_market_duration_days: number;
+        candidates_selected_by_default: number;
+        updated_at: string;
+      }
+    | undefined {
+    return this.database
+      .prepare(
+        `SELECT binary_enabled, ternary_enabled, max_buy_price_micros,
+          max_market_duration_days, candidates_selected_by_default, updated_at
+        FROM paper_trading_preferences WHERE id = 1`,
+      )
+      .get() as
+      | {
+          binary_enabled: number;
+          ternary_enabled: number;
+          max_buy_price_micros: number;
+          max_market_duration_days: number;
+          candidates_selected_by_default: number;
+          updated_at: string;
+        }
+      | undefined;
   }
 
   private getPaperSettlementRow(

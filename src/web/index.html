@@ -3,133 +3,149 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Polymarket低价合约机器人</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>PM-SMALL TEST</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <p class="eyebrow">PAPER ONLY</p>
-          <h1>低价合约自动挂单机器人</h1>
-          <p class="subtitle">真实公开行情、自动纸面挂单、保守队列成交和虚拟资金</p>
+    <main class="app-shell">
+      <h1 class="sr-only">PM-SMALL TEST</h1>
+
+      <header class="topbar">
+        <div class="mode-switch" role="group" aria-label="交易模式">
+          <button id="test-mode" type="button" aria-pressed="true">TEST</button>
+          <button id="live-mode" type="button" aria-pressed="false">LIVE</button>
         </div>
-        <div id="system-state" class="badge">正在读取</div>
+        <button
+          id="config-toggle"
+          class="button secondary"
+          type="button"
+          aria-expanded="false"
+          aria-controls="config-panel"
+        >
+          配置
+        </button>
       </header>
 
-      <section class="stats" id="stats"></section>
+      <p id="live-lock" class="inline-note" hidden>
+        LIVE 尚未开放；长期 TEST 验证完成前不能启用。
+      </p>
 
-      <section class="panel controls">
-        <div>
-          <h2>测试策略</h2>
-          <p>启动后自动建立符合规则的纸面买单；实盘执行器固定禁用。</p>
-        </div>
-        <div class="actions">
-          <button data-action="start">启动</button>
-          <button data-action="pause" class="secondary">暂停</button>
-          <button data-action="stop" class="danger">停止</button>
-          <button id="refresh" class="secondary">刷新候选</button>
-        </div>
+      <section id="config-panel" class="config-panel" hidden>
+        <form id="config-form">
+          <div class="section-heading config-heading">
+            <h2>交易配置</h2>
+            <button id="config-close" class="text-button" type="button">关闭</button>
+          </div>
+
+          <div class="config-grid">
+            <fieldset>
+              <legend>市场类型</legend>
+              <div class="check-options">
+                <label><input id="binary-market" type="checkbox" value="2" />二元市场</label>
+                <label><input id="ternary-market" type="checkbox" value="3" />三元市场</label>
+              </div>
+            </fieldset>
+
+            <label class="field">
+              <span>最高买入价</span>
+              <span class="price-input">
+                <span>≤</span>
+                <input
+                  id="max-buy-price"
+                  type="number"
+                  min="1"
+                  max="99"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="最高买入价（美分）"
+                />
+                <span>¢</span>
+              </span>
+            </label>
+
+            <div class="duration-field">
+              <div class="duration-heading">
+                <span>市场总时长</span>
+                <strong><span id="duration-value">30</span>天</strong>
+              </div>
+              <input
+                id="market-duration"
+                type="range"
+                min="0"
+                max="9"
+                step="1"
+                value="3"
+                aria-label="市场总时长上限"
+              />
+              <div id="duration-marks" class="duration-marks" aria-hidden="true"></div>
+            </div>
+          </div>
+
+          <button class="button primary save-config" type="submit">
+            保存并重新扫描
+          </button>
+        </form>
+      </section>
+
+      <section id="portfolio" class="portfolio" aria-label="资金与盈亏">
+        <article>
+          <span>总资金</span>
+          <strong id="total-funds">—</strong>
+        </article>
+        <article>
+          <span>总盈亏</span>
+          <strong id="total-pnl">—</strong>
+        </article>
+        <article>
+          <span>已实现</span>
+          <strong id="realized-pnl">—</strong>
+        </article>
+        <article>
+          <span>未实现</span>
+          <strong id="unrealized-pnl">—</strong>
+        </article>
       </section>
 
       <section class="panel">
         <div class="section-heading">
-          <div>
-            <h2>候选Token</h2>
-            <p id="scan-meta">尚未完成扫描</p>
-          </div>
+          <h2>当前持仓</h2>
+          <span id="position-count" class="count">0个</span>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>事件／市场</th>
-                <th>方向</th>
-                <th>进度</th>
-                <th>最优买价</th>
-                <th>Maker买价</th>
-                <th>固定卖价</th>
-                <th>份数</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="candidates"></tbody>
-          </table>
-        </div>
+        <div id="positions" class="position-list" aria-live="polite"></div>
       </section>
 
       <section class="panel">
-        <div class="section-heading">
-          <div>
-            <h2>测试订单</h2>
-            <p>成交采用挂单前方队列抵扣模型。</p>
+        <div class="section-heading scan-heading">
+          <h2>扫描市场</h2>
+          <div class="sort-control">
+            <span>进度排序</span>
+            <div class="segmented" role="group" aria-label="市场进度排序">
+              <button type="button" data-sort="asc" aria-pressed="true">正序</button>
+              <button type="button" data-sort="desc" aria-pressed="false">倒序</button>
+            </div>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Token</th>
-                <th>方向</th>
-                <th>价格</th>
-                <th>数量</th>
-                <th>已成交</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody id="orders"></tbody>
-          </table>
+
+        <div class="selection-toolbar">
+          <span id="selection-count" class="count">已选0 / 0</span>
+          <div>
+            <button id="select-all" class="text-button" type="button">全选</button>
+            <button id="clear-all" class="text-button" type="button">清空</button>
+          </div>
+        </div>
+
+        <div id="candidates" class="market-list" aria-live="polite"></div>
+
+        <div class="load-more">
+          <button id="load-more" class="button secondary" type="button">
+            再显示20个
+          </button>
+          <span id="display-count" class="count">当前显示0 / 0</span>
         </div>
       </section>
 
-      <section class="panel">
-        <div class="section-heading">
-          <div>
-            <h2>纸面持仓</h2>
-            <p>未卖出的持仓会在市场正式结算后模拟赎回。</p>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Token／Condition</th>
-                <th>数量</th>
-                <th>持仓成本</th>
-                <th>已实现收益</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody id="positions"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="section-heading">
-          <div>
-            <h2>结算与纸面赎回</h2>
-            <p>仅接受 Polymarket 正式结算结果；钱包和链上操作保持禁用。</p>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Condition／市场</th>
-                <th>状态／结果</th>
-                <th>盈亏类型</th>
-                <th>回收金额</th>
-                <th>结算收益</th>
-                <th>赎回状态</th>
-              </tr>
-            </thead>
-            <tbody id="settlements"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <p id="message" role="status"></p>
+      <p id="message" role="status" aria-live="polite"></p>
     </main>
     <script type="module" src="/app.js"></script>
   </body>

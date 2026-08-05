@@ -134,6 +134,29 @@ describe("PaperAutomationService", () => {
 
     expect(database.listPaperOrders()).toHaveLength(0);
   });
+
+  it("does not place automatic buys for a token excluded in the TEST UI", async () => {
+    const candidates = new CandidateService(
+      { scan: async () => [makeCurrentCandidate()] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      { isTokenSelected: () => false },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+
+    expect(database.listPaperOrders()).toHaveLength(0);
+  });
 });
 
 function makeCurrentCandidate() {

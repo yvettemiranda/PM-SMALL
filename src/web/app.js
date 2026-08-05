@@ -1,5 +1,15 @@
 const $ = (selector) => document.querySelector(selector);
 
+const ui = {
+  candidates: [],
+  selectedCandidateCount: 0,
+  sortDirection: "asc",
+  visibleCandidateCount: 20,
+  durationOptions: [1, 7, 14, 30, 60, 90, 120, 180, 360, 365],
+  messageTimer: null,
+  loading: false,
+};
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "content-type": "application/json" },
@@ -8,10 +18,6 @@ async function api(path, options = {}) {
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "请求失败");
   return body;
-}
-
-function money(value) {
-  return `${Number(value).toFixed(2)}U`;
 }
 
 function escapeHtml(value) {
@@ -27,160 +33,306 @@ function escapeHtml(value) {
   });
 }
 
-function shortToken(value) {
-  const text = String(value);
-  return `${escapeHtml(text.slice(0, 8))}…${escapeHtml(text.slice(-6))}`;
-}
-
 function showMessage(message, error = false) {
   const element = $("#message");
   element.textContent = message;
   element.className = error ? "error" : "success";
+  if (ui.messageTimer !== null) window.clearTimeout(ui.messageTimer);
+  ui.messageTimer = window.setTimeout(() => {
+    element.textContent = "";
+    ui.messageTimer = null;
+  }, 4_000);
 }
 
-function renderStatus(status) {
-  const strategy = status.strategy;
-  const stream = status.marketStream;
-  const streamState = stream.connected
-    ? `行情 ${stream.dataCompleteTokenCount}/${stream.subscribedTokenCount}`
-    : "行情未连接";
-  const automationState = status.paperAutomation.running ? "自动调度" : "调度停止";
-  $("#system-state").textContent = `${strategy.status} · PAPER · ${automationState} · ${streamState}`;
-  $("#system-state").dataset.status = strategy.status;
-  $("#stats").innerHTML = [
-    ["可用资金", money(strategy.availableCash)],
-    ["挂单占用", money(strategy.reservedCash)],
-    ["持仓成本", money(strategy.positionCost)],
-    ["已实现收益", money(strategy.realizedPnl)],
-  ]
-    .map(([label, value]) => `<article><span>${label}</span><strong>${value}</strong></article>`)
-    .join("");
+function formatMoney(value, signed = false) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "—";
+  const prefix = signed && amount > 0 ? "+" : "";
+  return `${prefix}${amount.toFixed(2)}U`;
 }
 
-function renderCandidates(snapshot) {
-  const body = $("#candidates");
-  $("#scan-meta").textContent = snapshot.lastError
-    ? `扫描异常：${snapshot.lastError}`
-    : snapshot.lastScanAt
-      ? `最近扫描：${new Date(snapshot.lastScanAt).toLocaleString()}，共${snapshot.candidates.length}个`
-      : "尚未完成扫描";
-
-  body.innerHTML = snapshot.candidates.length
-    ? snapshot.candidates
-        .map(
-          (candidate) => `<tr>
-            <td><strong>${escapeHtml(candidate.eventTitle)}</strong><small>${escapeHtml(candidate.marketQuestion)}</small></td>
-            <td>${escapeHtml(candidate.direction)}</td>
-            <td>${candidate.progressPercent.toFixed(1)}%</td>
-            <td>${candidate.bestBid}</td>
-            <td>${candidate.makerBuyPrice}</td>
-            <td>${candidate.fixedSellPrice}</td>
-            <td>${Number(candidate.orderSize).toFixed(2)}</td>
-            <td><button class="small" data-buy="${escapeHtml(candidate.candidateId)}">虚拟买入</button></td>
-          </tr>`,
-        )
-        .join("")
-    : '<tr><td colspan="8" class="empty">当前没有符合条件的候选Token</td></tr>';
+function formatCents(value) {
+  const cents = Number(value) * 100;
+  if (!Number.isFinite(cents)) return "—";
+  return `${cents.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1")}¢`;
 }
 
-function renderOrders(orders) {
-  $("#orders").innerHTML = orders.length
-    ? orders
-        .map(
-          (order) => `<tr>
-            <td title="${escapeHtml(order.tokenId)}">${shortToken(order.tokenId)}</td>
-            <td>${escapeHtml(order.side)}</td>
-            <td>${order.price}</td>
-            <td>${Number(order.originalSize).toFixed(2)}</td>
-            <td>${Number(order.filledSize).toFixed(2)}</td>
-            <td>${escapeHtml(order.status)}</td>
-          </tr>`,
-        )
-        .join("")
-    : '<tr><td colspan="6" class="empty">暂无测试订单</td></tr>';
+function setMoneyValue(selector, value, signed = false) {
+  const element = $(selector);
+  const amount = Number(value);
+  element.textContent = formatMoney(value, signed);
+  element.dataset.tone = amount > 0 ? "positive" : amount < 0 ? "negative" : "neutral";
+}
+
+function renderPortfolio(portfolio) {
+  setMoneyValue("#total-funds", portfolio.totalFunds);
+  setMoneyValue("#total-pnl", portfolio.totalPnl, true);
+  setMoneyValue("#realized-pnl", portfolio.realizedPnl, true);
+  setMoneyValue("#unrealized-pnl", portfolio.unrealizedPnl, true);
+}
+
+function marketTitleMarkup(item) {
+  const title = escapeHtml(item.marketQuestion || item.eventTitle || "未命名市场");
+  const url = item.marketUrl;
+  return url
+    ? `<a class="market-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${title}</a>`
+    : `<span class="market-link">${title}</span>`;
+}
+
+function progressMarkup(progressPercent, label = "市场进度") {
+  const progress = Number(progressPercent);
+  if (!Number.isFinite(progress)) {
+    return `<div class="position-meta"><span>${label}</span><span>待更新</span></div>`;
+  }
+  const clamped = Math.min(100, Math.max(0, progress));
+  return `<div class="progress-track" role="progressbar" aria-label="${label}${clamped.toFixed(1)}%" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamped.toFixed(1)}"><span style="width:${clamped.toFixed(1)}%"></span></div>`;
 }
 
 function renderPositions(positions) {
-  const body = $("#positions");
-  body.innerHTML = positions.length
-    ? positions
-        .map(
-          (position) => `<tr>
-            <td title="${escapeHtml(position.tokenId)}">${shortToken(position.tokenId)}<small>${shortToken(position.conditionId)}</small></td>
-            <td>${Number(position.quantity).toFixed(2)}</td>
-            <td>${Number(position.cost).toFixed(2)}</td>
-            <td>${Number(position.realizedPnl).toFixed(2)}</td>
-            <td>${position.cycleClosedAt ? "已关闭" : "持有中"}</td>
-          </tr>`,
-        )
+  const currentPositions = positions.filter(
+    (position) => Number(position.quantity) > 0 && position.cycleClosedAt === null,
+  );
+  $("#position-count").textContent = `${currentPositions.length}个`;
+  $("#positions").innerHTML = currentPositions.length
+    ? currentPositions
+        .map((position) => {
+          const progress = Number(position.progressPercent);
+          const progressText = Number.isFinite(progress)
+            ? `市场进度 ${progress.toFixed(1)}%`
+            : "市场进度待更新";
+          return `<article class="position-row">
+            <div class="position-main">
+              <div>
+                ${marketTitleMarkup(position)}
+                <span class="event-title">${escapeHtml(position.eventTitle || "")}</span>
+              </div>
+              <div class="outcome-badge">
+                <small>买入结果</small>
+                <strong>${escapeHtml(position.direction || "—")}</strong>
+              </div>
+            </div>
+            <div class="position-meta">
+              <span class="buy-price">买入价 ${formatCents(position.averageBuyPrice)}</span>
+              <span>${progressText}</span>
+            </div>
+            ${progressMarkup(position.progressPercent)}
+          </article>`;
+        })
         .join("")
-    : '<tr><td colspan="5" class="empty">暂无纸面持仓</td></tr>';
+    : '<p class="empty-state">暂无当前持仓</p>';
 }
 
-function renderSettlements(settlements) {
-  const body = $("#settlements");
-  body.innerHTML = settlements.length
-    ? settlements
-        .map(
-          (settlement) => `<tr>
-            <td title="${escapeHtml(settlement.conditionId)}">${shortToken(settlement.conditionId)}<small>${escapeHtml(settlement.marketId)}</small></td>
-            <td>${escapeHtml(settlement.status)}<small>${escapeHtml(settlement.winningOutcome || "等待正式结果")}</small></td>
-            <td>${escapeHtml(settlement.outcome || "-")}</td>
-            <td>${Number(settlement.payout).toFixed(2)}</td>
-            <td>${Number(settlement.realizedPnl).toFixed(2)}</td>
-            <td>${escapeHtml(settlement.redemptionStatus)}</td>
-          </tr>`,
-        )
-        .join("")
-    : '<tr><td colspan="6" class="empty">暂无待结算市场</td></tr>';
+function sortedCandidates() {
+  return [...ui.candidates].sort((left, right) =>
+    ui.sortDirection === "asc"
+      ? left.progressPercent - right.progressPercent
+      : right.progressPercent - left.progressPercent,
+  );
 }
 
-async function loadAll(refresh = false) {
-  const [status, candidates, orders, positions, settlements] = await Promise.all([
-    api("/api/status"),
-    api(`/api/candidates${refresh ? "?refresh=true" : ""}`),
-    api("/api/paper/orders"),
-    api("/api/paper/positions"),
-    api("/api/paper/settlements"),
-  ]);
-  renderStatus(status);
-  renderCandidates(candidates);
-  renderOrders(orders.orders);
-  renderPositions(positions.positions);
-  renderSettlements(settlements.settlements);
+function renderCandidates() {
+  const sorted = sortedCandidates();
+  const visible = sorted.slice(0, ui.visibleCandidateCount);
+  $("#selection-count").textContent = `已选${ui.selectedCandidateCount.toLocaleString("zh-CN")} / ${sorted.length.toLocaleString("zh-CN")}`;
+  $("#display-count").textContent = `当前显示${visible.length.toLocaleString("zh-CN")} / ${sorted.length.toLocaleString("zh-CN")}`;
+  $("#load-more").disabled = visible.length >= sorted.length;
+  $("#load-more").textContent = visible.length >= sorted.length ? "已全部显示" : "再显示20个";
+
+  $("#candidates").innerHTML = visible.length
+    ? visible
+        .map(
+          (candidate) => `<article class="market-row" data-market-token="${escapeHtml(candidate.tokenId)}">
+            <input
+              type="checkbox"
+              data-candidate-token="${escapeHtml(candidate.tokenId)}"
+              aria-label="允许TEST交易：${escapeHtml(candidate.marketQuestion)}—${escapeHtml(candidate.direction)}"
+              ${candidate.selected ? "checked" : ""}
+            />
+            <div>
+              ${marketTitleMarkup(candidate)}
+              <span class="mobile-market-detail">结果 ${escapeHtml(candidate.direction)}</span>
+            </div>
+            <span class="market-outcome">${escapeHtml(candidate.direction)}</span>
+            <strong class="market-price">${formatCents(candidate.makerBuyPrice)}</strong>
+            <div class="market-progress">
+              <div class="market-progress-heading"><span>市场进度</span><span>${Number(candidate.progressPercent).toFixed(1)}%</span></div>
+              ${progressMarkup(candidate.progressPercent)}
+            </div>
+          </article>`,
+        )
+        .join("")
+    : '<p class="empty-state">当前没有符合条件的市场</p>';
 }
+
+function renderPreferences(preferences) {
+  ui.durationOptions = preferences.durationOptions;
+  $("#binary-market").checked = preferences.resultCounts.includes(2);
+  $("#ternary-market").checked = preferences.resultCounts.includes(3);
+  $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
+  const durationIndex = Math.max(
+    0,
+    ui.durationOptions.indexOf(preferences.maxMarketDurationDays),
+  );
+  $("#market-duration").max = String(ui.durationOptions.length - 1);
+  $("#market-duration").value = String(durationIndex);
+  $("#duration-value").textContent = String(ui.durationOptions[durationIndex]);
+  $("#duration-marks").innerHTML = ui.durationOptions
+    .map((duration) => `<span>${duration}</span>`)
+    .join("");
+}
+
+async function loadAll() {
+  if (ui.loading) return;
+  ui.loading = true;
+  try {
+    const [status, candidates, positions, preferences] = await Promise.all([
+      api("/api/status"),
+      api("/api/candidates"),
+      api("/api/paper/positions"),
+      api("/api/paper/preferences"),
+    ]);
+    renderPortfolio(status.portfolio);
+    renderPositions(positions.positions);
+    ui.candidates = candidates.candidates;
+    ui.selectedCandidateCount = candidates.selectedCandidateCount;
+    ui.visibleCandidateCount = Math.max(
+      20,
+      Math.min(ui.visibleCandidateCount, Math.max(20, ui.candidates.length)),
+    );
+    renderCandidates();
+    renderPreferences(preferences.preferences);
+  } finally {
+    ui.loading = false;
+  }
+}
+
+function setConfigOpen(open) {
+  $("#config-panel").hidden = !open;
+  $("#config-toggle").setAttribute("aria-expanded", String(open));
+}
+
+$("#config-toggle").addEventListener("click", () => {
+  setConfigOpen($("#config-panel").hidden);
+});
+
+$("#config-close").addEventListener("click", () => setConfigOpen(false));
+
+$("#market-duration").addEventListener("input", (event) => {
+  const index = Number(event.target.value);
+  $("#duration-value").textContent = String(ui.durationOptions[index]);
+});
+
+$("#config-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submit = event.submitter;
+  if (submit) submit.disabled = true;
+  try {
+    const resultCounts = [];
+    if ($("#binary-market").checked) resultCounts.push(2);
+    if ($("#ternary-market").checked) resultCounts.push(3);
+    const durationIndex = Number($("#market-duration").value);
+    const response = await api("/api/paper/preferences", {
+      method: "PUT",
+      body: JSON.stringify({
+        resultCounts,
+        maxBuyPriceCents: Number($("#max-buy-price").value),
+        maxMarketDurationDays: ui.durationOptions[durationIndex],
+      }),
+    });
+    renderPreferences(response.preferences);
+    ui.visibleCandidateCount = 20;
+    setConfigOpen(false);
+    showMessage("配置已保存，正在重新扫描市场");
+    await loadAll();
+  } catch (error) {
+    showMessage(error.message, true);
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+});
+
+$("#live-mode").addEventListener("click", () => {
+  $("#live-lock").hidden = false;
+  showMessage("LIVE 尚未开放，当前仍为 TEST");
+});
+
+$("#test-mode").addEventListener("click", () => {
+  $("#live-lock").hidden = true;
+});
 
 document.addEventListener("click", async (event) => {
-  const action = event.target.dataset.action;
-  const candidateId = event.target.dataset.buy;
+  const sortButton = event.target.closest("[data-sort]");
+  if (sortButton) {
+    ui.sortDirection = sortButton.dataset.sort;
+    document.querySelectorAll("[data-sort]").forEach((button) => {
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.sort === ui.sortDirection),
+      );
+    });
+    renderCandidates();
+  }
+});
+
+$("#candidates").addEventListener("change", async (event) => {
+  const input = event.target.closest("[data-candidate-token]");
+  if (!input) return;
+  const candidate = ui.candidates.find(
+    (item) => item.tokenId === input.dataset.candidateToken,
+  );
+  if (!candidate) return;
+  input.disabled = true;
   try {
-    if (action) {
-      await api(`/api/paper/${action}`, { method: "POST" });
-      showMessage(`策略状态已更新：${action}`);
-      await loadAll();
-    }
-    if (candidateId) {
-      await api("/api/paper/orders/buy", {
-        method: "POST",
-        body: JSON.stringify({ candidateId }),
-      });
-      showMessage("虚拟买单已创建");
-      await loadAll();
-    }
+    await api("/api/paper/candidate-selection", {
+      method: "PUT",
+      body: JSON.stringify({
+        action: "set",
+        tokenId: candidate.tokenId,
+        selected: input.checked,
+      }),
+    });
+    candidate.selected = input.checked;
+    ui.selectedCandidateCount = ui.candidates.filter(
+      (item) => item.selected,
+    ).length;
+    renderCandidates();
   } catch (error) {
+    input.checked = !input.checked;
+    input.disabled = false;
     showMessage(error.message, true);
   }
 });
 
-$("#refresh").addEventListener("click", async () => {
+async function setAllCandidates(action) {
   try {
-    showMessage("正在刷新候选市场");
-    await loadAll(true);
-    showMessage("候选市场已刷新");
+    await api("/api/paper/candidate-selection", {
+      method: "PUT",
+      body: JSON.stringify({ action }),
+    });
+    const selected = action === "all";
+    ui.candidates.forEach((candidate) => {
+      candidate.selected = selected;
+    });
+    ui.selectedCandidateCount = selected ? ui.candidates.length : 0;
+    renderCandidates();
+    showMessage(selected ? "已选择全部扫描市场" : "已清空TEST交易范围");
   } catch (error) {
     showMessage(error.message, true);
   }
+}
+
+$("#select-all").addEventListener("click", () => setAllCandidates("all"));
+$("#clear-all").addEventListener("click", () => setAllCandidates("none"));
+
+$("#load-more").addEventListener("click", () => {
+  ui.visibleCandidateCount = Math.min(
+    ui.candidates.length,
+    ui.visibleCandidateCount + 20,
+  );
+  renderCandidates();
 });
 
 loadAll().catch((error) => showMessage(error.message, true));
-setInterval(() => loadAll().catch(() => {}), 10_000);
+window.setInterval(() => {
+  loadAll().catch(() => {});
+}, 10_000);
