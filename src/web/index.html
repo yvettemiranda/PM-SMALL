@@ -55,7 +55,7 @@
                   id="max-buy-price"
                   type="number"
                   min="1"
-                  max="99"
+                  max="3"
                   step="1"
                   inputmode="numeric"
                   aria-label="最高买入价（美分）"
@@ -66,8 +66,8 @@
 
             <div class="duration-field">
               <div class="duration-heading">
-                <span>市场总时长</span>
-                <strong><span id="duration-value">30</span>天</strong>
+                <span>市场总时长上限</span>
+                <strong>≤<span id="duration-value">30</span>天</strong>
               </div>
               <input
                 id="market-duration"
@@ -77,6 +77,7 @@
                 step="1"
                 value="3"
                 aria-label="市场总时长上限"
+                aria-valuetext="30天"
               />
               <div id="duration-marks" class="duration-marks" aria-hidden="true"></div>
             </div>

@@ -2,8 +2,13 @@ CREATE TABLE IF NOT EXISTS paper_trading_preferences (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   binary_enabled INTEGER NOT NULL CHECK (binary_enabled IN (0, 1)),
   ternary_enabled INTEGER NOT NULL CHECK (ternary_enabled IN (0, 1)),
-  max_buy_price_micros INTEGER NOT NULL CHECK (max_buy_price_micros > 0),
-  max_market_duration_days INTEGER NOT NULL CHECK (max_market_duration_days > 0),
+  max_buy_price_micros INTEGER NOT NULL
+    CHECK (
+      max_buy_price_micros BETWEEN 10000 AND 30000
+      AND max_buy_price_micros % 10000 = 0
+    ),
+  max_market_duration_days INTEGER NOT NULL
+    CHECK (max_market_duration_days IN (1, 7, 14, 30, 60, 90, 120, 180, 360, 365)),
   candidates_selected_by_default INTEGER NOT NULL
     CHECK (candidates_selected_by_default IN (0, 1)),
   updated_at TEXT NOT NULL

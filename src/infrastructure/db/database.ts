@@ -180,6 +180,17 @@ type PaperPositionRow = {
   updated_at: string;
 };
 
+type PaperPositionViewRow = PaperPositionRow & {
+  event_id: string | null;
+  event_slug: string | null;
+  event_title: string | null;
+  market_id: string | null;
+  market_question: string | null;
+  direction: "YES" | "NO" | null;
+  opened_at: string | null;
+  ends_at: string | null;
+};
+
 const FINAL_RESOLUTION_STATUSES = new Set(["resolved", "settled"]);
 
 function normalizeFinalResolutionStatus(value: string): string {
@@ -250,6 +261,20 @@ function rowToPaperPosition(row: PaperPositionRow): PaperPosition {
     firstSellAt: row.first_sell_at,
     cycleClosedAt: row.cycle_closed_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function rowToPaperPositionView(row: PaperPositionViewRow): PaperPositionView {
+  return {
+    ...rowToPaperPosition(row),
+    eventId: row.event_id,
+    eventSlug: row.event_slug,
+    eventTitle: row.event_title,
+    marketId: row.market_id,
+    marketQuestion: row.market_question,
+    direction: row.direction,
+    openedAt: row.opened_at,
+    endsAt: row.ends_at,
   };
 }
 
@@ -532,6 +557,12 @@ export class PaperDatabase {
     selected: boolean,
     selectedByDefault: boolean,
   ): void {
+    if (
+      !selected &&
+      this.listActivePaperOrders(tokenId).some((order) => order.side === "BUY")
+    ) {
+      this.assertPaperAccountingMutationAllowed();
+    }
     this.transaction(() => {
       const now = new Date().toISOString();
       if (selected === selectedByDefault) {
@@ -565,6 +596,12 @@ export class PaperDatabase {
   }
 
   public setAllPaperCandidatesSelected(selected: boolean): PaperTradingPreferences {
+    if (
+      !selected &&
+      this.listActivePaperOrders().some((order) => order.side === "BUY")
+    ) {
+      this.assertPaperAccountingMutationAllowed();
+    }
     return this.transaction(() => {
       const now = new Date().toISOString();
       this.database
@@ -613,27 +650,24 @@ export class PaperDatabase {
         LEFT JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
         ORDER BY pp.updated_at DESC, pp.token_id LIMIT ?`,
       )
-      .all(limit) as unknown as Array<PaperPositionRow & {
-      event_id: string | null;
-      event_slug: string | null;
-      event_title: string | null;
-      market_id: string | null;
-      market_question: string | null;
-      direction: "YES" | "NO" | null;
-      opened_at: string | null;
-      ends_at: string | null;
-    }>;
-    return rows.map((row) => ({
-      ...rowToPaperPosition(row),
-      eventId: row.event_id,
-      eventSlug: row.event_slug,
-      eventTitle: row.event_title,
-      marketId: row.market_id,
-      marketQuestion: row.market_question,
-      direction: row.direction,
-      openedAt: row.opened_at,
-      endsAt: row.ends_at,
-    }));
+      .all(limit) as unknown as PaperPositionViewRow[];
+    return rows.map(rowToPaperPositionView);
+  }
+
+  public listCurrentPaperPositionViews(): PaperPositionView[] {
+    const rows = this.database
+      .prepare(
+        `SELECT pp.token_id, pp.condition_id, pp.quantity_micros, pp.cost_micros,
+          pp.realized_pnl_micros, pp.first_sell_at, pp.cycle_closed_at,
+          pp.updated_at, pm.event_id, pm.event_slug, pm.event_title,
+          pm.market_id, pm.market_question, pm.direction, pm.opened_at, pm.ends_at
+        FROM paper_positions pp
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+        WHERE pp.quantity_micros > 0
+        ORDER BY pp.updated_at DESC, pp.token_id`,
+      )
+      .all() as unknown as PaperPositionViewRow[];
+    return rows.map(rowToPaperPositionView);
   }
 
   public listPaperSettlements(limit = 100): PaperSettlement[] {

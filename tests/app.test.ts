@@ -203,14 +203,14 @@ describe("HTTP app", () => {
       url: "/api/paper/preferences",
       payload: {
         resultCounts: [3],
-        maxBuyPriceCents: 5,
+        maxBuyPriceCents: 3,
         maxMarketDurationDays: 60,
       },
     });
     expect(updated.statusCode).toBe(200);
     expect(updated.json().preferences).toMatchObject({
       resultCounts: [3],
-      maxBuyPriceCents: 5,
+      maxBuyPriceCents: 3,
       maxMarketDurationDays: 60,
     });
 
@@ -232,22 +232,39 @@ describe("HTTP app", () => {
 
     const snapshot = await app.inject({ method: "GET", url: "/api/candidates" });
     expect(snapshot.json()).toMatchObject({
-      candidateCount: 2,
+      candidateCount: 1,
       selectedCandidateCount: 1,
       candidates: [
-        expect.objectContaining({ tokenId: "yes-token", selected: false }),
         expect.objectContaining({ tokenId: "ternary-token", selected: true }),
       ],
     });
+
+    await app.inject({ method: "POST", url: "/api/paper/start" });
+    const rejectedExcludedBuy = await app.inject({
+      method: "POST",
+      url: "/api/paper/orders/buy",
+      payload: { candidateId: "yes-token:20000" },
+    });
+    expect(rejectedExcludedBuy.statusCode).toBe(409);
+    expect(rejectedExcludedBuy.json().error).toMatch(/current TEST filters/);
+
+    const unknownSelection = await app.inject({
+      method: "PUT",
+      url: "/api/paper/candidate-selection",
+      payload: { action: "set", tokenId: "unknown-token", selected: false },
+    });
+    expect(unknownSelection.statusCode).toBe(404);
   });
 
   it("serves position display data, mark-to-market PnL, and the compact TEST UI", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-dashboard-position-"));
+    const databasePath = join(directory, "paper.db");
     const candidates = new CandidateService(
       { scan: async () => [makeCandidate()] },
       15_000,
     );
     await candidates.refresh();
-    const database = new PaperDatabase(":memory:", 100_000_000);
+    const database = new PaperDatabase(databasePath, 100_000_000);
     const tradingPreferences = new PaperTradingPreferencesService(
       database,
       testConfig,
@@ -261,6 +278,19 @@ describe("HTTP app", () => {
       tradeSizeMicros: 2_000_000,
       dataComplete: true,
     });
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase
+        .prepare(
+          `UPDATE paper_market_metadata
+          SET event_slug = NULL, event_title = NULL,
+              market_question = NULL, direction = NULL
+          WHERE token_id = ?`,
+        )
+        .run("yes-token");
+    } finally {
+      rawDatabase.close();
+    }
     const app = buildApp({
       config: testConfig,
       database,
@@ -269,7 +299,9 @@ describe("HTTP app", () => {
       liveExecutor: new LiveExecutorDisabled(),
       marketStream: marketRuntimeWithBestBid(30_000),
     });
-    resources.push(app, database);
+    resources.push(app, database, {
+      close: () => rmSync(directory, { recursive: true, force: true }),
+    });
 
     const status = await app.inject({ method: "GET", url: "/api/status" });
     expect(status.json().portfolio).toEqual({
@@ -301,6 +333,8 @@ describe("HTTP app", () => {
     expect(page.body).toContain("总资金");
     expect(page.body).toContain("当前持仓");
     expect(page.body).toContain("扫描市场");
+    expect(page.body).toContain('max="3"');
+    expect(page.body).toContain("市场总时长上限");
     expect(page.body).not.toContain("PAPER ONLY");
     expect(page.body).not.toContain("测试订单");
     expect(page.body).not.toContain("结算与纸面赎回");

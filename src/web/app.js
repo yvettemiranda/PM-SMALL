@@ -6,6 +6,8 @@ const ui = {
   sortDirection: "asc",
   visibleCandidateCount: 20,
   durationOptions: [1, 7, 14, 30, 60, 90, 120, 180, 360, 365],
+  preferences: null,
+  configDirty: false,
   messageTimer: null,
   loading: false,
 };
@@ -90,7 +92,7 @@ function progressMarkup(progressPercent, label = "市场进度") {
 
 function renderPositions(positions) {
   const currentPositions = positions.filter(
-    (position) => Number(position.quantity) > 0 && position.cycleClosedAt === null,
+    (position) => Number(position.quantity) > 0,
   );
   $("#position-count").textContent = `${currentPositions.length}个`;
   $("#positions").innerHTML = currentPositions.length
@@ -142,18 +144,20 @@ function renderCandidates() {
     ? visible
         .map(
           (candidate) => `<article class="market-row" data-market-token="${escapeHtml(candidate.tokenId)}">
-            <input
-              type="checkbox"
-              data-candidate-token="${escapeHtml(candidate.tokenId)}"
-              aria-label="允许TEST交易：${escapeHtml(candidate.marketQuestion)}—${escapeHtml(candidate.direction)}"
-              ${candidate.selected ? "checked" : ""}
-            />
+            <label class="candidate-toggle">
+              <input
+                type="checkbox"
+                data-candidate-token="${escapeHtml(candidate.tokenId)}"
+                aria-label="允许TEST交易：${escapeHtml(candidate.marketQuestion)}—${escapeHtml(candidate.direction)}"
+                ${candidate.selected ? "checked" : ""}
+              />
+            </label>
             <div>
               ${marketTitleMarkup(candidate)}
               <span class="mobile-market-detail">结果 ${escapeHtml(candidate.direction)}</span>
             </div>
             <span class="market-outcome">${escapeHtml(candidate.direction)}</span>
-            <strong class="market-price">${formatCents(candidate.makerBuyPrice)}</strong>
+            <strong class="market-price"><small>买入价</small>${formatCents(candidate.makerBuyPrice)}</strong>
             <div class="market-progress">
               <div class="market-progress-heading"><span>市场进度</span><span>${Number(candidate.progressPercent).toFixed(1)}%</span></div>
               ${progressMarkup(candidate.progressPercent)}
@@ -176,6 +180,10 @@ function renderPreferences(preferences) {
   $("#market-duration").max = String(ui.durationOptions.length - 1);
   $("#market-duration").value = String(durationIndex);
   $("#duration-value").textContent = String(ui.durationOptions[durationIndex]);
+  $("#market-duration").setAttribute(
+    "aria-valuetext",
+    `${ui.durationOptions[durationIndex]}天`,
+  );
   $("#duration-marks").innerHTML = ui.durationOptions
     .map((duration) => `<span>${duration}</span>`)
     .join("");
@@ -186,7 +194,7 @@ async function loadAll() {
   ui.loading = true;
   try {
     const [status, candidates, positions, preferences] = await Promise.all([
-      api("/api/status"),
+      api("/api/status?compact=true"),
       api("/api/candidates"),
       api("/api/paper/positions"),
       api("/api/paper/preferences"),
@@ -200,7 +208,10 @@ async function loadAll() {
       Math.min(ui.visibleCandidateCount, Math.max(20, ui.candidates.length)),
     );
     renderCandidates();
-    renderPreferences(preferences.preferences);
+    ui.preferences = preferences.preferences;
+    if (!ui.configDirty) {
+      renderPreferences(preferences.preferences);
+    }
   } finally {
     ui.loading = false;
   }
@@ -212,14 +223,26 @@ function setConfigOpen(open) {
 }
 
 $("#config-toggle").addEventListener("click", () => {
-  setConfigOpen($("#config-panel").hidden);
+  const open = $("#config-panel").hidden;
+  if (ui.preferences !== null) renderPreferences(ui.preferences);
+  ui.configDirty = false;
+  setConfigOpen(open);
 });
 
-$("#config-close").addEventListener("click", () => setConfigOpen(false));
+$("#config-close").addEventListener("click", () => {
+  if (ui.preferences !== null) renderPreferences(ui.preferences);
+  ui.configDirty = false;
+  setConfigOpen(false);
+});
+
+$("#config-form").addEventListener("input", () => {
+  ui.configDirty = true;
+});
 
 $("#market-duration").addEventListener("input", (event) => {
   const index = Number(event.target.value);
   $("#duration-value").textContent = String(ui.durationOptions[index]);
+  event.target.setAttribute("aria-valuetext", `${ui.durationOptions[index]}天`);
 });
 
 $("#config-form").addEventListener("submit", async (event) => {
@@ -239,6 +262,8 @@ $("#config-form").addEventListener("submit", async (event) => {
         maxMarketDurationDays: ui.durationOptions[durationIndex],
       }),
     });
+    ui.preferences = response.preferences;
+    ui.configDirty = false;
     renderPreferences(response.preferences);
     ui.visibleCandidateCount = 20;
     setConfigOpen(false);

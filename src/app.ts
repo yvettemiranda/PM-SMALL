@@ -128,7 +128,10 @@ function serializeSnapshot(
   preferences: PaperTradingPreferencesService,
   includeCandidates = true,
 ) {
-  const { candidates, ...status } = snapshot;
+  const { candidates: unfilteredCandidates, ...status } = snapshot;
+  const candidates = unfilteredCandidates.filter((candidate) =>
+    preferences.candidateMatchesMarketFilters(candidate),
+  );
   const selectedCandidateCount = candidates.filter((candidate) =>
     preferences.isTokenSelected(candidate.tokenId),
   ).length;
@@ -202,16 +205,19 @@ function polymarketEventUrl(eventSlug: string | null, eventId: string | null) {
 function markPriceMicros(
   position: PaperPositionView,
   dependencies: AppDependencies,
+  candidate: TradeCandidate | undefined = undefined,
 ): number | null {
   const streamed = dependencies.marketStream?.getBestBidMicros?.(position.tokenId);
   if (streamed !== undefined && streamed !== null) {
     return streamed;
   }
   return (
+    candidate?.bestBidMicros ??
     dependencies.candidates
       .getSnapshot()
-      .candidates.find((candidate) => candidate.tokenId === position.tokenId)
-      ?.bestBidMicros ?? null
+      .candidates.find((item) => item.tokenId === position.tokenId)
+      ?.bestBidMicros ??
+    null
   );
 }
 
@@ -220,8 +226,19 @@ function serializePositionView(
   dependencies: AppDependencies,
   now: Date,
 ) {
+  const candidate = dependencies.candidates
+    .getSnapshot()
+    .candidates.find((item) => item.tokenId === position.tokenId);
+  const eventId = position.eventId ?? candidate?.eventId ?? null;
+  const eventSlug = position.eventSlug ?? candidate?.eventSlug ?? null;
+  const openedAt = position.openedAt ?? candidate?.openedAt ?? null;
+  const endsAt = position.endsAt ?? candidate?.endsAt ?? null;
   const averageBuyPriceMicros = averagePriceMicros(position);
-  const currentMarkPriceMicros = markPriceMicros(position, dependencies);
+  const currentMarkPriceMicros = markPriceMicros(
+    position,
+    dependencies,
+    candidate,
+  );
   const valuationPriceMicros = currentMarkPriceMicros ?? averageBuyPriceMicros;
   const marketValueMicros =
     valuationPriceMicros === null
@@ -229,7 +246,16 @@ function serializePositionView(
       : calculateOrderCostMicros(valuationPriceMicros, position.quantityMicros);
   return {
     ...position,
-    marketUrl: polymarketEventUrl(position.eventSlug, position.eventId),
+    eventId,
+    eventSlug,
+    eventTitle: position.eventTitle ?? candidate?.eventTitle ?? null,
+    marketId: position.marketId ?? candidate?.marketId ?? null,
+    marketQuestion:
+      position.marketQuestion ?? candidate?.marketQuestion ?? null,
+    direction: position.direction ?? candidate?.direction ?? null,
+    openedAt,
+    endsAt,
+    marketUrl: polymarketEventUrl(eventSlug, eventId),
     quantity: microsToDecimalString(position.quantityMicros),
     cost: microsToDecimalString(position.costMicros),
     realizedPnl: microsToDecimalString(position.realizedPnlMicros),
@@ -244,7 +270,7 @@ function serializePositionView(
     unrealizedPnl: microsToDecimalString(
       marketValueMicros - position.costMicros,
     ),
-    progressPercent: currentMarketProgress(position.openedAt, position.endsAt, now),
+    progressPercent: currentMarketProgress(openedAt, endsAt, now),
   };
 }
 
@@ -285,7 +311,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       .object({ compact: z.enum(["true", "false"]).optional() })
       .parse(request.query);
     const strategy = dependencies.database.getStrategyState();
-    const positions = dependencies.database.listPaperPositionViews();
+    const positions = dependencies.database.listCurrentPaperPositionViews();
     const preferences = dependencies.tradingPreferences.getSnapshot();
     return {
       version: "0.4.0",
@@ -388,7 +414,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const body = z
       .object({
         resultCounts: z.array(z.union([z.literal(2), z.literal(3)])),
-        maxBuyPriceCents: z.number().int().min(1).max(99),
+        maxBuyPriceCents: z.number().int().min(1).max(3),
         maxMarketDurationDays: z
           .number()
           .int()
@@ -407,14 +433,14 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return { preferences: serializePreferences(preferences) };
   });
 
-  app.put("/api/paper/candidate-selection", async (request) => {
+  app.put("/api/paper/candidate-selection", async (request, reply) => {
     const body = z
       .discriminatedUnion("action", [
         z.object({ action: z.literal("all") }),
         z.object({ action: z.literal("none") }),
         z.object({
           action: z.literal("set"),
-          tokenId: z.string().min(1),
+          tokenId: z.string().min(1).max(256),
           selected: z.boolean(),
         }),
       ])
@@ -424,6 +450,16 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     } else if (body.action === "none") {
       dependencies.tradingPreferences.setAllCandidatesSelected(false);
     } else {
+      const candidate = dependencies.candidates
+        .getSnapshot()
+        .candidates.find(
+          (item) =>
+            item.tokenId === body.tokenId &&
+            dependencies.tradingPreferences.candidateMatchesMarketFilters(item),
+        );
+      if (candidate === undefined) {
+        return reply.code(404).send({ error: "Candidate is unavailable or stale" });
+      }
       dependencies.tradingPreferences.setCandidateSelected(
         body.tokenId,
         body.selected,
@@ -431,7 +467,11 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     }
     dependencies.paperAutomation?.requestRun();
     dependencies.marketStream?.refreshSubscriptions();
-    const candidates = dependencies.candidates.getSnapshot().candidates;
+    const candidates = dependencies.candidates
+      .getSnapshot()
+      .candidates.filter((candidate) =>
+        dependencies.tradingPreferences.candidateMatchesMarketFilters(candidate),
+      );
     return {
       selectedCandidateCount: candidates.filter((candidate) =>
         dependencies.tradingPreferences.isTokenSelected(candidate.tokenId),
@@ -446,7 +486,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/api/paper/positions", async () => ({
     positions: dependencies.database
-      .listPaperPositionViews()
+      .listCurrentPaperPositionViews()
       .map((position) => serializePositionView(position, dependencies, new Date())),
   }));
 
@@ -461,6 +501,11 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const candidate = dependencies.candidates.getCandidate(body.candidateId);
     if (candidate === null) {
       return reply.code(404).send({ error: "Candidate is unavailable or stale" });
+    }
+    if (!dependencies.tradingPreferences.isCandidateEnabled(candidate)) {
+      return reply.code(409).send({
+        error: "Candidate is excluded by the current TEST filters or selection",
+      });
     }
 
     const order = dependencies.database.placePaperBuy(

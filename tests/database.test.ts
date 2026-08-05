@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { makeCandidate } from "./helpers.js";
@@ -49,6 +53,80 @@ describe("PaperDatabase", () => {
         costMicros: 40_000,
       }),
     ]);
+  });
+
+  it("returns every current PAPER position without a history limit", () => {
+    for (let index = 0; index < 101; index += 1) {
+      const candidate = makeCandidate({
+        candidateId: `token-${index}:20000`,
+        tokenId: `token-${index}`,
+        conditionId: `condition-${index}`,
+        marketId: `market-${index}`,
+        orderSizeMicros: 1_000_000,
+        queueAheadSizeMicros: 0,
+      });
+      const buy = database.placePaperBuy(candidate, 100_000_000);
+      database.applyPaperTrade({
+        orderId: buy.id,
+        sourceTradeId: `position-fill-${index}`,
+        tradePriceMicros: 20_000,
+        tradeSizeMicros: 1_000_000,
+        dataComplete: true,
+      });
+    }
+
+    expect(database.listPaperPositionViews()).toHaveLength(100);
+    expect(database.listCurrentPaperPositionViews()).toHaveLength(101);
+  });
+
+  it("backfills display-safe metadata when upgrading a database with positions", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-metadata-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const legacyDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      legacyDatabase.setStrategyStatus("RUNNING");
+      const buy = legacyDatabase.placePaperBuy(
+        makeCandidate({ queueAheadSizeMicros: 0 }),
+        100_000_000,
+      );
+      legacyDatabase.applyPaperTrade({
+        orderId: buy.id,
+        sourceTradeId: "legacy-position-fill",
+        tradePriceMicros: 20_000,
+        tradeSizeMicros: 1_000_000,
+        dataComplete: true,
+      });
+    } finally {
+      legacyDatabase.close();
+    }
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase.exec(
+        "DROP TABLE paper_market_metadata; DELETE FROM schema_migrations WHERE version = 6;",
+      );
+    } finally {
+      rawDatabase.close();
+    }
+
+    const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(upgradedDatabase.listCurrentPaperPositionViews()).toEqual([
+        expect.objectContaining({
+          tokenId: "yes-token",
+          eventId: "event-1",
+          marketId: "market-1",
+          openedAt: "2026-01-01T00:00:00.000Z",
+          endsAt: "2026-01-11T00:00:00.000Z",
+          eventTitle: null,
+          marketQuestion: null,
+          direction: null,
+        }),
+      ]);
+    } finally {
+      upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("blocks buys after a sports game starts", () => {

@@ -148,7 +148,7 @@ describe("PaperAutomationService", () => {
       database,
       new FakeMarketRuntime(),
       { ...testConfig, paperSchedulerIntervalMs: 10 },
-      { isTokenSelected: () => false },
+      { isCandidateEnabled: () => false },
     );
     resources.push(database, automation);
 

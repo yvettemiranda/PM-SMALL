@@ -1,5 +1,6 @@
 import type { AppConfig } from "../config.js";
 import type { MarketScanPreferences } from "../domain/market-scanner.js";
+import type { TradeCandidate } from "../domain/types.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 
 export const MARKET_DURATION_DAY_OPTIONS = [
@@ -29,12 +30,15 @@ export class PaperTradingPreferencesService {
     private readonly database: PaperDatabase,
     config: AppConfig,
   ) {
-    this.snapshot = database.ensurePaperTradingPreferences({
+    const defaults = {
       resultCounts: [2, 3],
       maxBuyPriceMicros: config.maxBuyPriceMicros,
       maxMarketDurationDays: config.maxMarketDurationDays,
       candidatesSelectedByDefault: true,
-    });
+    } satisfies Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
+    validateMarketFilterValues(defaults);
+    this.snapshot = database.ensurePaperTradingPreferences(defaults);
+    validateMarketFilterValues(this.snapshot);
     this.selectionOverrides = new Map(
       database
         .listPaperCandidateSelectionOverrides()
@@ -56,16 +60,7 @@ export class PaperTradingPreferencesService {
 
   public updateMarketFilters(update: MarketFilterUpdate): PaperTradingPreferencesSnapshot {
     const resultCounts = normalizeResultCounts(update.resultCounts);
-    if (
-      !Number.isInteger(update.maxBuyPriceMicros) ||
-      update.maxBuyPriceMicros < 10_000 ||
-      update.maxBuyPriceMicros > 990_000
-    ) {
-      throw new Error("Maximum PAPER buy price must be between 1 and 99 cents");
-    }
-    if (!MARKET_DURATION_DAY_OPTIONS.includes(update.maxMarketDurationDays as never)) {
-      throw new Error("Market duration must use a supported slider value");
-    }
+    validateMarketFilterValues(update);
 
     this.snapshot = this.database.updatePaperTradingPreferences({
       ...this.snapshot,
@@ -80,6 +75,26 @@ export class PaperTradingPreferencesService {
     return (
       this.selectionOverrides.get(tokenId) ??
       this.snapshot.candidatesSelectedByDefault
+    );
+  }
+
+  public candidateMatchesMarketFilters(
+    candidate: Pick<
+      TradeCandidate,
+      "resultCount" | "makerBuyPriceMicros" | "durationDays"
+    >,
+  ): boolean {
+    return (
+      this.snapshot.resultCounts.includes(candidate.resultCount) &&
+      candidate.makerBuyPriceMicros <= this.snapshot.maxBuyPriceMicros &&
+      candidate.durationDays <= this.snapshot.maxMarketDurationDays
+    );
+  }
+
+  public isCandidateEnabled(candidate: TradeCandidate): boolean {
+    return (
+      this.candidateMatchesMarketFilters(candidate) &&
+      this.isTokenSelected(candidate.tokenId)
     );
   }
 
@@ -99,6 +114,25 @@ export class PaperTradingPreferencesService {
   public setAllCandidatesSelected(selected: boolean): void {
     this.snapshot = this.database.setAllPaperCandidatesSelected(selected);
     this.selectionOverrides.clear();
+  }
+}
+
+function validateMarketFilterValues(
+  values: Pick<
+    PaperTradingPreferencesSnapshot,
+    "maxBuyPriceMicros" | "maxMarketDurationDays"
+  >,
+): void {
+  if (
+    !Number.isInteger(values.maxBuyPriceMicros) ||
+    values.maxBuyPriceMicros % 10_000 !== 0 ||
+    values.maxBuyPriceMicros < 10_000 ||
+    values.maxBuyPriceMicros > 30_000
+  ) {
+    throw new Error("Maximum PAPER buy price must be a whole cent between 1 and 3 cents");
+  }
+  if (!MARKET_DURATION_DAY_OPTIONS.includes(values.maxMarketDurationDays as never)) {
+    throw new Error("Market duration must use a supported slider value");
   }
 }
 
