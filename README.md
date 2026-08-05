@@ -36,7 +36,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Docker默认只绑定`127.0.0.1:3000`。Linux服务器的受限访问、更新和回滚步骤见[`docs/SERVER_DEPLOY.md`](docs/SERVER_DEPLOY.md)，不得直接把控制接口暴露到公网。
+Docker默认只绑定`127.0.0.1:3000`。Linux服务器可通过受信任HTTPS和反向代理登录认证提供手机/电脑跨网络访问；配置、更新和回滚步骤见[`docs/SERVER_DEPLOY.md`](docs/SERVER_DEPLOY.md)，不得直接把控制接口或3000端口暴露到公网。
 
 ## 验证
 
@@ -88,7 +88,6 @@ npm run build
 ## 当前未实现
 
 - 长时间运行、完整故障注入、性能和真实全市场容量验证；
-- Linux服务器PAPER部署、访问保护和短时冒烟；
 - 钱包签名、实盘下单、撤单和链上赎回。
 
 ## 安全边界
