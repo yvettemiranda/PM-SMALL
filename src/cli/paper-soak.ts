@@ -72,7 +72,19 @@ const counterReaders = {
 type CounterName = keyof typeof counterReaders;
 type CounterWindows = Record<CounterName, CounterWindow>;
 
-type RunStatistics = {
+function createRuntimeResourceMaxima() {
+  return {
+    maxRuntimeUptimeSeconds: 0,
+    maxRssBytes: 0,
+    maxHeapTotalBytes: 0,
+    maxHeapUsedBytes: 0,
+    maxExternalBytes: 0,
+  };
+}
+
+type RuntimeResourceMaxima = ReturnType<typeof createRuntimeResourceMaxima>;
+
+type RunStatistics = RuntimeResourceMaxima & {
   sampleCount: number;
   warningSampleCount: number;
   transportErrorCount: number;
@@ -86,11 +98,6 @@ type RunStatistics = {
   maxSubscribedTokenCount: number;
   maxFullSnapshotDurationMs: number;
   maxRecoveryDurationMs: number;
-  maxRuntimeUptimeSeconds: number;
-  maxRssBytes: number;
-  maxHeapTotalBytes: number;
-  maxHeapUsedBytes: number;
-  maxExternalBytes: number;
   counterWindows: CounterWindows;
   criticalErrors: string[];
 };
@@ -162,11 +169,7 @@ async function run(): Promise<void> {
     maxSubscribedTokenCount: 0,
     maxFullSnapshotDurationMs: 0,
     maxRecoveryDurationMs: 0,
-    maxRuntimeUptimeSeconds: 0,
-    maxRssBytes: 0,
-    maxHeapTotalBytes: 0,
-    maxHeapUsedBytes: 0,
-    maxExternalBytes: 0,
+    ...createRuntimeResourceMaxima(),
     counterWindows: createCounterWindows(),
     criticalErrors: [],
   };
@@ -399,26 +402,7 @@ function updateStatistics(
     statistics.maxRequestDurationMs,
     sample.http.requestDurationMs,
   );
-  statistics.maxRuntimeUptimeSeconds = Math.max(
-    statistics.maxRuntimeUptimeSeconds,
-    sample.runtime.uptimeSeconds,
-  );
-  statistics.maxRssBytes = Math.max(
-    statistics.maxRssBytes,
-    sample.runtime.rssBytes,
-  );
-  statistics.maxHeapTotalBytes = Math.max(
-    statistics.maxHeapTotalBytes,
-    sample.runtime.heapTotalBytes,
-  );
-  statistics.maxHeapUsedBytes = Math.max(
-    statistics.maxHeapUsedBytes,
-    sample.runtime.heapUsedBytes,
-  );
-  statistics.maxExternalBytes = Math.max(
-    statistics.maxExternalBytes,
-    sample.runtime.externalBytes,
-  );
+  updateRuntimeResourceMaxima(statistics, sample.runtime);
   statistics.maxCandidateCount = Math.max(
     statistics.maxCandidateCount,
     sample.scan.candidateCount,
@@ -451,6 +435,29 @@ function updateStatistics(
   statistics.maxRecoveryDurationMs = Math.max(
     statistics.maxRecoveryDurationMs,
     sample.marketStream.lastRecoveryDurationMs ?? 0,
+  );
+}
+
+function updateRuntimeResourceMaxima(
+  maxima: RuntimeResourceMaxima,
+  runtime: PaperSoakSample["runtime"],
+): void {
+  maxima.maxRuntimeUptimeSeconds = Math.max(
+    maxima.maxRuntimeUptimeSeconds,
+    runtime.uptimeSeconds,
+  );
+  maxima.maxRssBytes = Math.max(maxima.maxRssBytes, runtime.rssBytes);
+  maxima.maxHeapTotalBytes = Math.max(
+    maxima.maxHeapTotalBytes,
+    runtime.heapTotalBytes,
+  );
+  maxima.maxHeapUsedBytes = Math.max(
+    maxima.maxHeapUsedBytes,
+    runtime.heapUsedBytes,
+  );
+  maxima.maxExternalBytes = Math.max(
+    maxima.maxExternalBytes,
+    runtime.externalBytes,
   );
 }
 

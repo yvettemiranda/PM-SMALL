@@ -38,6 +38,7 @@
 - 进程资源留证TDD已复现状态接口、样本和汇总缺少运行时数据；最小实现后，定向测试确认完整/轻量状态均返回运行时长与内存，JSONL样本保留原值，汇总保留窗口最大值。
 - 实际构建产物以独立SQLite、停止策略运行2.2秒端到端冒烟：5样本、传输错误0、关键错误0；最大RSS 451,395,584字节、最大堆已用135,581,432字节，扫描未完成产生5个预期告警。忽略证据SHA-256为`b6c7cc15f55e63586bdb766b95c5d7a0eb91bf58c1bce3ef4e8325cd3eee297f`，只验证资源留证接线，不作为Linux容量基线。
 - 清理本轮临时冒烟目录时，直接递归删除被环境安全策略拒绝；已改为可恢复地移动到`/Users/d4clt/.Trash/pm-small-runtime-smoke.feEfnY`，正式JSONL证据仍保留在Git忽略目录。
+- 资源留证首轮Spec审查无发现；Standards审查提出1项P2判断性Data Clumps/Duplicated Code，五项峰值曾在类型、初始化和更新三处展开。现已收拢为`RuntimeResourceMaxima`与统一更新函数，对外JSONL字段不变。
 
 ## 下一步
 
