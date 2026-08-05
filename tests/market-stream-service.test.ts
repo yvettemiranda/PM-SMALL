@@ -11,15 +11,18 @@ import { makeCandidate } from "./helpers.js";
 
 class ControllableDisconnectSource implements MarketStreamSource {
   public calls: string[][] = [];
-  private releaseCurrent: (() => void) | null = null;
+  private endCurrent: ((error?: Error) => void) | null = null;
 
   public async subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle> {
     this.calls.push([...tokenIds]);
     let release: () => void = () => {};
-    const closed = new Promise<void>((resolve) => {
+    let reject: (error: Error) => void = () => {};
+    const closed = new Promise<void>((resolve, rejectPromise) => {
       release = resolve;
+      reject = rejectPromise;
     });
-    this.releaseCurrent = release;
+    this.endCurrent = (error) =>
+      error === undefined ? release() : reject(error);
     return {
       close: async () => release(),
       async *[Symbol.asyncIterator]() {
@@ -29,12 +32,12 @@ class ControllableDisconnectSource implements MarketStreamSource {
     };
   }
 
-  public disconnectCurrent(): void {
-    if (this.releaseCurrent === null) {
+  public disconnectCurrent(error?: Error): void {
+    if (this.endCurrent === null) {
       throw new Error("Expected an active market stream");
     }
-    this.releaseCurrent();
-    this.releaseCurrent = null;
+    this.endCurrent(error);
+    this.endCurrent = null;
   }
 }
 
@@ -92,7 +95,7 @@ describe("MarketStreamService", () => {
 
     service.start();
     await waitFor(() => service.getStatus().fullSnapshotCount === 1);
-    source.disconnectCurrent();
+    source.disconnectCurrent(new Error("test disconnect"));
     await waitFor(() => service.getStatus().recoveryCount === 1);
 
     expect(source.calls).toEqual([["yes-token"], ["yes-token"]]);
