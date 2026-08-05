@@ -25,6 +25,14 @@ const paperValidationResultSchema = z.object({
   checkedAt: z.string(),
 });
 
+const runtimeSchema = z.object({
+  uptimeSeconds: z.number().nonnegative(),
+  rssBytes: z.number().int().nonnegative(),
+  heapTotalBytes: z.number().int().nonnegative(),
+  heapUsedBytes: z.number().int().nonnegative(),
+  externalBytes: z.number().int().nonnegative(),
+});
+
 const statusSchema = z.object({
   version: z.string(),
   executionMode: z.string(),
@@ -41,6 +49,7 @@ const statusSchema = z.object({
   configuration: z.object({
     maxMarketDurationDays: z.number().positive(),
   }),
+  runtime: runtimeSchema,
   marketScan: z.object({
     candidateCount: z.number().int().nonnegative(),
     lastScanAt: nullableString,
@@ -160,6 +169,7 @@ export type PaperSoakSample = {
     strategyStatus: string;
   };
   configuration: { maxMarketDurationDays: number };
+  runtime: z.infer<typeof runtimeSchema>;
   strategy: {
     initialCapitalMicros: number;
     availableCashMicros: number;
@@ -255,6 +265,7 @@ export function evaluatePaperSoakSample(
     configuration: {
       maxMarketDurationDays: status.configuration.maxMarketDurationDays,
     },
+    runtime: status.runtime,
     strategy: {
       initialCapitalMicros: status.strategy.initialCapitalMicros,
       availableCashMicros: status.strategy.availableCashMicros,

@@ -86,6 +86,11 @@ type RunStatistics = {
   maxSubscribedTokenCount: number;
   maxFullSnapshotDurationMs: number;
   maxRecoveryDurationMs: number;
+  maxRuntimeUptimeSeconds: number;
+  maxRssBytes: number;
+  maxHeapTotalBytes: number;
+  maxHeapUsedBytes: number;
+  maxExternalBytes: number;
   counterWindows: CounterWindows;
   criticalErrors: string[];
 };
@@ -157,6 +162,11 @@ async function run(): Promise<void> {
     maxSubscribedTokenCount: 0,
     maxFullSnapshotDurationMs: 0,
     maxRecoveryDurationMs: 0,
+    maxRuntimeUptimeSeconds: 0,
+    maxRssBytes: 0,
+    maxHeapTotalBytes: 0,
+    maxHeapUsedBytes: 0,
+    maxExternalBytes: 0,
     counterWindows: createCounterWindows(),
     criticalErrors: [],
   };
@@ -388,6 +398,26 @@ function updateStatistics(
   statistics.maxRequestDurationMs = Math.max(
     statistics.maxRequestDurationMs,
     sample.http.requestDurationMs,
+  );
+  statistics.maxRuntimeUptimeSeconds = Math.max(
+    statistics.maxRuntimeUptimeSeconds,
+    sample.runtime.uptimeSeconds,
+  );
+  statistics.maxRssBytes = Math.max(
+    statistics.maxRssBytes,
+    sample.runtime.rssBytes,
+  );
+  statistics.maxHeapTotalBytes = Math.max(
+    statistics.maxHeapTotalBytes,
+    sample.runtime.heapTotalBytes,
+  );
+  statistics.maxHeapUsedBytes = Math.max(
+    statistics.maxHeapUsedBytes,
+    sample.runtime.heapUsedBytes,
+  );
+  statistics.maxExternalBytes = Math.max(
+    statistics.maxExternalBytes,
+    sample.runtime.externalBytes,
   );
   statistics.maxCandidateCount = Math.max(
     statistics.maxCandidateCount,

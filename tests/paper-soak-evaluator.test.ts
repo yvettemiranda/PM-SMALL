@@ -30,6 +30,13 @@ describe("evaluatePaperSoakSample", () => {
         strategyMode: "PAPER",
         strategyStatus: "RUNNING",
       },
+      runtime: {
+        uptimeSeconds: 3_600,
+        rssBytes: 320_000_000,
+        heapTotalBytes: 160_000_000,
+        heapUsedBytes: 120_000_000,
+        externalBytes: 20_000_000,
+      },
       strategy: {
         initialCapitalMicros: 100_000_000,
         availableCashMicros: 99_000_000,
@@ -193,6 +200,13 @@ function makeStatus() {
       updatedAt: "2026-08-04T00:00:00.000Z",
     },
     configuration: { maxMarketDurationDays: 30 },
+    runtime: {
+      uptimeSeconds: 3_600,
+      rssBytes: 320_000_000,
+      heapTotalBytes: 160_000_000,
+      heapUsedBytes: 120_000_000,
+      externalBytes: 20_000_000,
+    },
     marketScan: {
       candidateCount: 2,
       candidates: [{ id: "candidate-1" }, { id: "candidate-2" }],

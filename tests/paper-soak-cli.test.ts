@@ -151,6 +151,11 @@ describe("paper soak CLI", () => {
       maxRecoveryCount: 1,
       maxFullSnapshotDurationMs: 400,
       maxRecoveryDurationMs: 900,
+      maxRuntimeUptimeSeconds: 3_600,
+      maxRssBytes: 320_000_000,
+      maxHeapTotalBytes: 160_000_000,
+      maxHeapUsedBytes: 120_000_000,
+      maxExternalBytes: 20_000_000,
       firstProcessedTradeEvents: 12,
       lastProcessedTradeEvents: 0,
       maxProcessedTradeEvents: 12,
@@ -282,6 +287,21 @@ function makeHealthyStatus(callCount: number) {
       positionCostMicros: 0,
     },
     configuration: { maxMarketDurationDays: 30 },
+    runtime: beforeRestart
+      ? {
+          uptimeSeconds: 3_600,
+          rssBytes: 320_000_000,
+          heapTotalBytes: 160_000_000,
+          heapUsedBytes: 120_000_000,
+          externalBytes: 20_000_000,
+        }
+      : {
+          uptimeSeconds: 10,
+          rssBytes: 280_000_000,
+          heapTotalBytes: 150_000_000,
+          heapUsedBytes: 110_000_000,
+          externalBytes: 18_000_000,
+        },
     marketScan: {
       candidateCount: 2,
       lastScanAt: "2026-08-04T00:00:00.000Z",

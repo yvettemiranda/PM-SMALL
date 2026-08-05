@@ -44,6 +44,13 @@ describe("HTTP app", () => {
       validationCount: 0,
       lastResult: null,
     });
+    expect(status.json().runtime).toEqual({
+      uptimeSeconds: expect.any(Number),
+      rssBytes: expect.any(Number),
+      heapTotalBytes: expect.any(Number),
+      heapUsedBytes: expect.any(Number),
+      externalBytes: expect.any(Number),
+    });
 
     const compactStatus = await app.inject({
       method: "GET",
@@ -55,6 +62,13 @@ describe("HTTP app", () => {
       lastScanAt: null,
     });
     expect(compactStatus.json().marketScan).not.toHaveProperty("candidates");
+    expect(compactStatus.json().runtime).toEqual({
+      uptimeSeconds: expect.any(Number),
+      rssBytes: expect.any(Number),
+      heapTotalBytes: expect.any(Number),
+      heapUsedBytes: expect.any(Number),
+      externalBytes: expect.any(Number),
+    });
 
     const validation = await app.inject({
       method: "GET",

@@ -45,6 +45,17 @@ function publicConfig(config: AppConfig) {
   };
 }
 
+function runtimeStatus() {
+  const { rss, heapTotal, heapUsed, external } = process.memoryUsage();
+  return {
+    uptimeSeconds: process.uptime(),
+    rssBytes: rss,
+    heapTotalBytes: heapTotal,
+    heapUsedBytes: heapUsed,
+    externalBytes: external,
+  };
+}
+
 function serializeState(state: StrategyState) {
   return {
     ...state,
@@ -132,6 +143,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       liveExecutionEnabled: dependencies.liveExecutor.enabled,
       strategy: serializeState(dependencies.database.getStrategyState()),
       configuration: publicConfig(dependencies.config),
+      runtime: runtimeStatus(),
       marketScan: serializeSnapshot(
         dependencies.candidates.getSnapshot(),
         query.compact !== "true",
