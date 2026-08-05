@@ -84,7 +84,19 @@ function createRuntimeResourceMaxima() {
 
 type RuntimeResourceMaxima = ReturnType<typeof createRuntimeResourceMaxima>;
 
-type RunStatistics = RuntimeResourceMaxima & {
+function createScanRequestMaxima() {
+  return {
+    maxEventPageRequestCount: 0,
+    maxOrderBookRequestCount: 0,
+    maxScanRetryCount: 0,
+    maxScanRateLimitCount: 0,
+    maxScanTransientErrorCount: 0,
+  };
+}
+
+type ScanRequestMaxima = ReturnType<typeof createScanRequestMaxima>;
+
+type RunStatistics = RuntimeResourceMaxima & ScanRequestMaxima & {
   sampleCount: number;
   warningSampleCount: number;
   transportErrorCount: number;
@@ -170,6 +182,7 @@ async function run(): Promise<void> {
     maxFullSnapshotDurationMs: 0,
     maxRecoveryDurationMs: 0,
     ...createRuntimeResourceMaxima(),
+    ...createScanRequestMaxima(),
     counterWindows: createCounterWindows(),
     criticalErrors: [],
   };
@@ -423,6 +436,7 @@ function updateStatistics(
     statistics.maxScanDurationMs,
     sample.scan.diagnostics?.durationMs ?? 0,
   );
+  updateScanRequestMaxima(statistics, sample.scan.diagnostics);
   statistics.maxSubscribedTokenCount = Math.max(
     statistics.maxSubscribedTokenCount,
     sample.marketStream.subscribedTokenCount,
@@ -435,6 +449,35 @@ function updateStatistics(
   statistics.maxRecoveryDurationMs = Math.max(
     statistics.maxRecoveryDurationMs,
     sample.marketStream.lastRecoveryDurationMs ?? 0,
+  );
+}
+
+function updateScanRequestMaxima(
+  maxima: ScanRequestMaxima,
+  diagnostics: PaperSoakSample["scan"]["diagnostics"],
+): void {
+  if (diagnostics === null) {
+    return;
+  }
+  maxima.maxEventPageRequestCount = Math.max(
+    maxima.maxEventPageRequestCount,
+    diagnostics.eventPageRequestCount,
+  );
+  maxima.maxOrderBookRequestCount = Math.max(
+    maxima.maxOrderBookRequestCount,
+    diagnostics.orderBookRequestCount,
+  );
+  maxima.maxScanRetryCount = Math.max(
+    maxima.maxScanRetryCount,
+    diagnostics.retryCount,
+  );
+  maxima.maxScanRateLimitCount = Math.max(
+    maxima.maxScanRateLimitCount,
+    diagnostics.rateLimitCount,
+  );
+  maxima.maxScanTransientErrorCount = Math.max(
+    maxima.maxScanTransientErrorCount,
+    diagnostics.transientErrorCount,
   );
 }
 

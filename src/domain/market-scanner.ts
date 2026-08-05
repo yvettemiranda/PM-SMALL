@@ -13,11 +13,16 @@ export type MarketScanDiagnostics = {
   completedAt: string | null;
   durationMs: number;
   eventPageCount: number;
+  eventPageRequestCount: number;
   eventCount: number;
   eligibleTokenCount: number;
   orderBookBatchCount: number;
+  orderBookRequestCount: number;
   orderBookCount: number;
   candidateCount: number;
+  retryCount: number;
+  rateLimitCount: number;
+  transientErrorCount: number;
 };
 
 function normalizeOrderBook(book: OrderBook): TokenOrderBook {
@@ -78,11 +83,16 @@ export class MarketScanner implements CandidateScanner {
       completedAt: null,
       durationMs: 0,
       eventPageCount: 0,
+      eventPageRequestCount: 0,
       eventCount: 0,
       eligibleTokenCount: 0,
       orderBookBatchCount: 0,
+      orderBookRequestCount: 0,
       orderBookCount: 0,
       candidateCount: 0,
+      retryCount: 0,
+      rateLimitCount: 0,
+      transientErrorCount: 0,
     };
     // The time window is only a safe upstream reduction. Every page inside it
     // is traversed, then the exact domain and order-book rules run locally.
@@ -90,6 +100,9 @@ export class MarketScanner implements CandidateScanner {
       signal?.throwIfAborted();
       const scanWindowMs = this.config.maxMarketDurationDays * DAY_MS;
       const nowMs = now.getTime();
+      let eventRetryCount = 0;
+      let eventRateLimitCount = 0;
+      let eventTransientErrorCount = 0;
       const events = await this.marketData.listOpenEvents(
         {
           pageSize: this.config.scanEventPageSize,
@@ -98,11 +111,25 @@ export class MarketScanner implements CandidateScanner {
           endDateMin: now.toISOString(),
           endDateMax: new Date(nowMs + scanWindowMs).toISOString(),
         },
-        ({ pageCount, eventCount }) => {
+        ({
+          pageCount,
+          eventCount,
+          requestCount,
+          retryCount,
+          rateLimitCount,
+          transientErrorCount,
+        }) => {
+          eventRetryCount = retryCount;
+          eventRateLimitCount = rateLimitCount;
+          eventTransientErrorCount = transientErrorCount;
           this.updateDiagnostics({
             phase: "EVENTS",
             eventPageCount: pageCount,
+            eventPageRequestCount: requestCount,
             eventCount,
+            retryCount,
+            rateLimitCount,
+            transientErrorCount,
           });
         },
         signal,
@@ -125,11 +152,23 @@ export class MarketScanner implements CandidateScanner {
           ? []
           : await this.marketData.fetchOrderBooks(
               tokens.map((token) => token.tokenId),
-              ({ batchCount, orderBookCount }) => {
+              ({
+                batchCount,
+                orderBookCount,
+                requestCount,
+                retryCount,
+                rateLimitCount,
+                transientErrorCount,
+              }) => {
                 this.updateDiagnostics({
                   phase: "ORDER_BOOKS",
                   orderBookBatchCount: batchCount,
+                  orderBookRequestCount: requestCount,
                   orderBookCount,
+                  retryCount: eventRetryCount + retryCount,
+                  rateLimitCount: eventRateLimitCount + rateLimitCount,
+                  transientErrorCount:
+                    eventTransientErrorCount + transientErrorCount,
                 });
               },
               signal,

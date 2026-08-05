@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { PublicClient } from "@polymarket/client";
+import {
+  RateLimitError,
+  RequestRejectedError,
+  type PublicClient,
+} from "@polymarket/client";
 import { PolymarketMarketDataSource } from "../src/infrastructure/polymarket/market-data.js";
 import { makeEvent } from "./helpers.js";
 
@@ -8,10 +12,17 @@ describe("PolymarketMarketDataSource", () => {
     const firstEvent = makeEvent({ id: "event-page-1" });
     const secondEvent = makeEvent({ id: "event-page-2" });
     const requests: unknown[] = [];
+    const secondPage = { items: [secondEvent], hasMore: false };
     const paginator = {
+      firstPage: async () => ({
+        items: [firstEvent],
+        hasMore: true,
+        nextCursor: "cursor-2" as never,
+      }),
+      from: () => ({ firstPage: async () => secondPage }),
       async *[Symbol.asyncIterator]() {
         yield { items: [firstEvent], hasMore: true, nextCursor: "cursor-2" };
-        yield { items: [secondEvent], hasMore: false };
+        yield secondPage;
       },
     };
     const source = new PolymarketMarketDataSource({
@@ -22,48 +33,223 @@ describe("PolymarketMarketDataSource", () => {
     } as unknown as PublicClient);
     const progress: unknown[] = [];
 
-    const scanWindow = {
-      pageSize: 100,
-      startDateMin: "2026-01-01T00:00:00.000Z",
-      startDateMax: "2026-01-31T00:00:00.000Z",
-      endDateMin: "2026-01-31T00:00:00.000Z",
-      endDateMax: "2026-03-02T00:00:00.000Z",
-    };
+    const scanWindow = makeScanWindow();
 
     await expect(
       source.listOpenEvents(scanWindow, (update) => progress.push(update)),
     ).resolves.toEqual([firstEvent, secondEvent]);
     expect(requests).toEqual([{ closed: false, ...scanWindow }]);
     expect(progress).toEqual([
-      { pageCount: 1, eventCount: 1 },
-      { pageCount: 2, eventCount: 2 },
+      {
+        pageCount: 1,
+        eventCount: 1,
+        requestCount: 1,
+        retryCount: 0,
+        rateLimitCount: 0,
+        transientErrorCount: 0,
+      },
+      {
+        pageCount: 2,
+        eventCount: 2,
+        requestCount: 2,
+        retryCount: 0,
+        rateLimitCount: 0,
+        transientErrorCount: 0,
+      },
     ]);
   });
 
-  it("stops waiting for an event page when the scan is aborted", async () => {
-    let iteratorReturned = false;
+  it("retries a rate-limited event page without restarting earlier pages", async () => {
+    const firstEvent = makeEvent({ id: "event-page-1" });
+    const secondEvent = makeEvent({ id: "event-page-2" });
+    let firstPageAttempts = 0;
+    let secondPageAttempts = 0;
+    const cursors: string[] = [];
+    const firstPage = {
+      items: [firstEvent],
+      hasMore: true,
+      nextCursor: "cursor-2" as never,
+    };
+    const secondPaginator = {
+      firstPage: async () => {
+        secondPageAttempts += 1;
+        if (secondPageAttempts === 1) {
+          throw new RateLimitError("temporary Gamma rate limit");
+        }
+        return { items: [secondEvent], hasMore: false };
+      },
+    };
     const paginator = {
+      firstPage: async () => {
+        firstPageAttempts += 1;
+        return firstPage;
+      },
+      from: (cursor: unknown) => {
+        cursors.push(String(cursor));
+        return secondPaginator;
+      },
+      async *[Symbol.asyncIterator]() {
+        yield firstPage;
+        throw new RateLimitError("temporary Gamma rate limit");
+      },
+    };
+    const source = new PolymarketMarketDataSource(
+      { listEvents: () => paginator } as unknown as PublicClient,
+      [0, 0],
+    );
+    const progress: Array<Record<string, number>> = [];
+
+    await expect(
+      source.listOpenEvents(
+        makeScanWindow(),
+        (update) => progress.push(update),
+      ),
+    ).resolves.toEqual([firstEvent, secondEvent]);
+    expect(firstPageAttempts).toBe(1);
+    expect(secondPageAttempts).toBe(2);
+    expect(cursors).toEqual(["cursor-2", "cursor-2"]);
+    expect(progress.at(-1)).toMatchObject({
+      pageCount: 2,
+      eventCount: 2,
+      requestCount: 3,
+      retryCount: 1,
+      rateLimitCount: 1,
+      transientErrorCount: 1,
+    });
+  });
+
+  it("retries a transient order-book batch and reports the recovery", async () => {
+    let attempts = 0;
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new RequestRejectedError("temporary CLOB failure", {
+              status: 503,
+            });
+          }
+          return [{ tokenId: "token-1" }] as never;
+        },
+      } as unknown as PublicClient,
+      [0, 0],
+    );
+    const progress: Array<Record<string, number>> = [];
+
+    await expect(
+      source.fetchOrderBooks(["token-1"], (update) => progress.push(update)),
+    ).resolves.toEqual([{ tokenId: "token-1" }]);
+    expect(attempts).toBe(2);
+    expect(progress.at(-1)).toMatchObject({
+      batchCount: 1,
+      orderBookCount: 1,
+      requestCount: 2,
+      retryCount: 1,
+      rateLimitCount: 0,
+      transientErrorCount: 1,
+    });
+  });
+
+  it("does not retry a permanent order-book rejection", async () => {
+    let attempts = 0;
+    const progress: Array<Record<string, number>> = [];
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async () => {
+          attempts += 1;
+          throw new RequestRejectedError("invalid order-book request", {
+            status: 400,
+          });
+        },
+      } as unknown as PublicClient,
+      [0, 0],
+    );
+
+    await expect(
+      source.fetchOrderBooks(["token-1"], (update) => progress.push(update)),
+    ).rejects.toThrow("invalid order-book request");
+    expect(attempts).toBe(1);
+    expect(progress.at(-1)).toMatchObject({
+      requestCount: 1,
+      retryCount: 0,
+      rateLimitCount: 0,
+      transientErrorCount: 0,
+    });
+  });
+
+  it("stops after the bounded matching-engine retry budget", async () => {
+    let attempts = 0;
+    const progress: Array<Record<string, number>> = [];
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async () => {
+          attempts += 1;
+          throw new RequestRejectedError("matching engine restarting", {
+            status: 425,
+          });
+        },
+      } as unknown as PublicClient,
+      [0, 0],
+    );
+
+    await expect(
+      source.fetchOrderBooks(["token-1"], (update) => progress.push(update)),
+    ).rejects.toThrow("matching engine restarting");
+    expect(attempts).toBe(3);
+    expect(progress.at(-1)).toMatchObject({
+      requestCount: 3,
+      retryCount: 2,
+      rateLimitCount: 0,
+      transientErrorCount: 3,
+    });
+  });
+
+  it("stops a retry backoff when the scan is aborted", async () => {
+    let attempts = 0;
+    let markAttempted: () => void = () => {};
+    const attempted = new Promise<void>((resolve) => {
+      markAttempted = resolve;
+    });
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async () => {
+          attempts += 1;
+          markAttempted();
+          throw new RateLimitError("temporary CLOB rate limit");
+        },
+      } as unknown as PublicClient,
+      [10_000],
+    );
+    const controller = new AbortController();
+    const pending = source.fetchOrderBooks(
+      ["token-1"],
+      undefined,
+      controller.signal,
+    );
+    const rejection = expect(pending).rejects.toThrow("scan stopped");
+
+    await attempted;
+    controller.abort(new Error("scan stopped"));
+
+    await rejection;
+    expect(attempts).toBe(1);
+  });
+
+  it("stops waiting for an event page when the scan is aborted", async () => {
+    const paginator = {
+      firstPage: () => new Promise<never>(() => {}),
+      from: () => paginator,
       [Symbol.asyncIterator]() {
         return this;
       },
       next: () => new Promise<IteratorResult<never>>(() => {}),
-      return: async () => {
-        iteratorReturned = true;
-        return { done: true as const, value: undefined };
-      },
     };
     const source = new PolymarketMarketDataSource({
       listEvents: () => paginator,
     } as unknown as PublicClient);
     const controller = new AbortController();
     const pending = source.listOpenEvents(
-      {
-        pageSize: 100,
-        startDateMin: "2026-01-01T00:00:00.000Z",
-        startDateMax: "2026-01-31T00:00:00.000Z",
-        endDateMin: "2026-01-31T00:00:00.000Z",
-        endDateMax: "2026-03-02T00:00:00.000Z",
-      },
+      makeScanWindow(),
       undefined,
       controller.signal,
     );
@@ -71,7 +257,6 @@ describe("PolymarketMarketDataSource", () => {
     controller.abort(new Error("scan stopped"));
 
     await expect(pending).rejects.toThrow("scan stopped");
-    expect(iteratorReturned).toBe(true);
   });
 
   it("stops waiting for an order-book batch when the scan is aborted", async () => {
@@ -140,3 +325,13 @@ describe("PolymarketMarketDataSource", () => {
     });
   });
 });
+
+function makeScanWindow() {
+  return {
+    pageSize: 100,
+    startDateMin: "2026-01-01T00:00:00.000Z",
+    startDateMax: "2026-01-31T00:00:00.000Z",
+    endDateMin: "2026-01-31T00:00:00.000Z",
+    endDateMax: "2026-03-02T00:00:00.000Z",
+  };
+}

@@ -8,11 +8,16 @@ const scanDiagnosticsSchema = z.object({
   completedAt: z.string().nullable(),
   durationMs: z.number().nonnegative(),
   eventPageCount: z.number().int().nonnegative(),
+  eventPageRequestCount: z.number().int().nonnegative(),
   eventCount: z.number().int().nonnegative(),
   eligibleTokenCount: z.number().int().nonnegative(),
   orderBookBatchCount: z.number().int().nonnegative(),
+  orderBookRequestCount: z.number().int().nonnegative(),
   orderBookCount: z.number().int().nonnegative(),
   candidateCount: z.number().int().nonnegative(),
+  retryCount: z.number().int().nonnegative(),
+  rateLimitCount: z.number().int().nonnegative(),
+  transientErrorCount: z.number().int().nonnegative(),
 });
 
 const paperValidationResultSchema = z.object({
@@ -228,8 +233,17 @@ export function evaluatePaperSoakSample(
   if (status.marketScan.lastScanAt === null) {
     warnings.push("Market scan has not completed yet");
   }
-  if ((status.marketScan.diagnostics ?? null) === null) {
+  const scanDiagnostics = status.marketScan.diagnostics ?? null;
+  if (scanDiagnostics === null) {
     warnings.push("Market scan diagnostics are not available yet");
+  } else if (
+    scanDiagnostics.retryCount > 0 ||
+    scanDiagnostics.transientErrorCount > 0 ||
+    scanDiagnostics.rateLimitCount > 0
+  ) {
+    warnings.push(
+      `Market scan request recovery: retries=${scanDiagnostics.retryCount}, transientErrors=${scanDiagnostics.transientErrorCount}, rateLimits=${scanDiagnostics.rateLimitCount}`,
+    );
   }
   if (
     status.marketStream.subscribedTokenCount > 0 &&

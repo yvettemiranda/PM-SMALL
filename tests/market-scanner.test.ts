@@ -56,12 +56,26 @@ describe("MarketScanner", () => {
     const source: MarketDataSource = {
       listOpenEvents: async (request, reportProgress) => {
         requestedWindow = request;
-        reportProgress?.({ pageCount: 3, eventCount: events.length });
+        reportProgress?.({
+          pageCount: 3,
+          eventCount: events.length,
+          requestCount: 4,
+          retryCount: 1,
+          rateLimitCount: 1,
+          transientErrorCount: 1,
+        });
         eventsProgress = scanner.getLastDiagnostics();
         return events;
       },
       fetchOrderBooks: async (tokenIds, reportProgress) => {
-        reportProgress?.({ batchCount: 5, orderBookCount: tokenIds.length });
+        reportProgress?.({
+          batchCount: 5,
+          orderBookCount: tokenIds.length,
+          requestCount: 6,
+          retryCount: 1,
+          rateLimitCount: 0,
+          transientErrorCount: 1,
+        });
         booksProgress = scanner.getLastDiagnostics();
         return tokenIds.map((tokenId) => {
           const isYes = tokenId.startsWith("yes-");
@@ -101,17 +115,31 @@ describe("MarketScanner", () => {
       completedAt: null,
       eventPageCount: 3,
       eventCount: 121,
+      eventPageRequestCount: 4,
+      retryCount: 1,
+      rateLimitCount: 1,
+      transientErrorCount: 1,
     });
     expect(booksProgress).toMatchObject({
       phase: "ORDER_BOOKS",
       completedAt: null,
       orderBookBatchCount: 5,
       orderBookCount: 242,
+      eventPageRequestCount: 4,
+      orderBookRequestCount: 6,
+      retryCount: 2,
+      rateLimitCount: 1,
+      transientErrorCount: 2,
     });
     expect(scanner.getLastDiagnostics()).toMatchObject({
       phase: "COMPLETE",
       eventPageCount: 3,
       orderBookBatchCount: 5,
+      eventPageRequestCount: 4,
+      orderBookRequestCount: 6,
+      retryCount: 2,
+      rateLimitCount: 1,
+      transientErrorCount: 2,
       eventCount: 121,
       eligibleTokenCount: 242,
       orderBookCount: 242,
@@ -123,7 +151,14 @@ describe("MarketScanner", () => {
   it("retains failed-scan diagnostics", async () => {
     const source: MarketDataSource = {
       listOpenEvents: async (_request, reportProgress) => {
-        reportProgress?.({ pageCount: 2, eventCount: 100 });
+        reportProgress?.({
+          pageCount: 2,
+          eventCount: 100,
+          requestCount: 3,
+          retryCount: 2,
+          rateLimitCount: 2,
+          transientErrorCount: 3,
+        });
         throw new Error("temporary Gamma failure");
       },
       fetchOrderBooks: async () => [],
@@ -136,6 +171,10 @@ describe("MarketScanner", () => {
       completedAt: expect.any(String),
       eventPageCount: 2,
       eventCount: 100,
+      eventPageRequestCount: 3,
+      retryCount: 2,
+      rateLimitCount: 2,
+      transientErrorCount: 3,
     });
   });
 

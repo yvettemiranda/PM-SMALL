@@ -102,6 +102,28 @@ describe("evaluatePaperSoakSample", () => {
     );
   });
 
+  it("warns when a completed market scan needed request recovery", () => {
+    const status = makeStatus();
+    status.marketScan.diagnostics.retryCount = 2;
+    status.marketScan.diagnostics.rateLimitCount = 1;
+    status.marketScan.diagnostics.transientErrorCount = 2;
+
+    const sample = evaluatePaperSoakSample({
+      sampledAt: "2026-08-04T00:00:00.000Z",
+      requestDurationMs: 25,
+      statusHttpStatus: 200,
+      validationHttpStatus: 200,
+      statusPayload: status,
+      validationPayload: makeValidation(),
+      requireRunning: true,
+    });
+
+    expect(sample.criticalErrors).toEqual([]);
+    expect(sample.warnings).toContain(
+      "Market scan request recovery: retries=2, transientErrors=2, rateLimits=1",
+    );
+  });
+
   it("stops on LIVE, paused strategy, or failed ledger validation", () => {
     const status = makeStatus();
     status.executionMode = "LIVE";
@@ -219,11 +241,16 @@ function makeStatus() {
         completedAt: "2026-08-04T00:00:00.000Z",
         durationMs: 800,
         eventPageCount: 3,
+        eventPageRequestCount: 3,
         eventCount: 120,
         eligibleTokenCount: 40,
         orderBookBatchCount: 1,
+        orderBookRequestCount: 1,
         orderBookCount: 40,
         candidateCount: 2,
+        retryCount: 0,
+        rateLimitCount: 0,
+        transientErrorCount: 0,
       },
     },
     marketStream: {
