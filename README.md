@@ -36,6 +36,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
+Docker默认只绑定`127.0.0.1:3000`。Linux服务器的受限访问、更新和回滚步骤见[`docs/SERVER_DEPLOY.md`](docs/SERVER_DEPLOY.md)，不得直接把控制接口暴露到公网。
+
 ## 验证
 
 ```bash

@@ -1,10 +1,28 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     ports:
-      - "3000:3000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PUBLIC_PORT:-3000}:3000"
     volumes:
       - ./data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/api/status?compact=true')
+          .then((response) => { if (!response.ok) process.exit(1); })
+          .catch(() => process.exit(1));
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 10s
+    security_opt:
+      - no-new-privileges:true
