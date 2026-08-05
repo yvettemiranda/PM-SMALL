@@ -19,6 +19,9 @@ export type PaperMarketProcessorStatus = {
   lastEventAt: string | null;
   processedTradeEvents: number;
   ignoredTradeEvents: number;
+  paperBuyFillCount: number;
+  paperSellFillCount: number;
+  createdPaperSellCount: number;
 };
 
 function levelsToMap(levels: BookLevel[]): Map<number, number> {
@@ -31,6 +34,9 @@ export class PaperMarketProcessor {
   private lastEventAt: string | null = null;
   private processedTradeEvents = 0;
   private ignoredTradeEvents = 0;
+  private paperBuyFillCount = 0;
+  private paperSellFillCount = 0;
+  private createdPaperSellCount = 0;
 
   public constructor(private readonly database: PaperDatabase) {}
 
@@ -62,6 +68,9 @@ export class PaperMarketProcessor {
       lastEventAt: this.lastEventAt,
       processedTradeEvents: this.processedTradeEvents,
       ignoredTradeEvents: this.ignoredTradeEvents,
+      paperBuyFillCount: this.paperBuyFillCount,
+      paperSellFillCount: this.paperSellFillCount,
+      createdPaperSellCount: this.createdPaperSellCount,
     };
   }
 
@@ -119,7 +128,7 @@ export class PaperMarketProcessor {
       const targetSellPrice = order.targetSellPriceMicros;
       const sellRealQueueAheadSizeMicros =
         targetSellPrice === null ? 0 : (book.asks.get(targetSellPrice) ?? 0);
-      this.database.applyPaperTrade({
+      const applied = this.database.applyPaperTrade({
         orderId: order.id,
         sourceTradeId: event.sourceTradeId,
         tradePriceMicros: event.priceMicros,
@@ -127,6 +136,16 @@ export class PaperMarketProcessor {
         dataComplete: true,
         sellRealQueueAheadSizeMicros,
       });
+      if (applied.incrementalFillSizeMicros > 0) {
+        if (order.side === "BUY") {
+          this.paperBuyFillCount += 1;
+          if (applied.createdSellOrder !== null) {
+            this.createdPaperSellCount += 1;
+          }
+        } else {
+          this.paperSellFillCount += 1;
+        }
+      }
     }
     this.processedTradeEvents += 1;
   }

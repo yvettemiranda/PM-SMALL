@@ -18,6 +18,7 @@ class ReconnectingSource implements MarketStreamSource {
       return {
         close: async () => undefined,
         async *[Symbol.asyncIterator]() {
+          yield makeBookEvent(tokenIds[0]);
           throw new Error("test disconnect");
         },
       };
@@ -30,6 +31,7 @@ class ReconnectingSource implements MarketStreamSource {
     return {
       close: async () => release(),
       async *[Symbol.asyncIterator]() {
+        yield makeBookEvent(tokenIds[0]);
         await closed;
       },
     };
@@ -89,13 +91,20 @@ describe("MarketStreamService", () => {
     resources.push(database, service);
 
     service.start();
-    await waitFor(() => source.calls.length >= 2);
+    await waitFor(() => service.getStatus().recoveryCount === 1);
 
     expect(source.calls).toEqual([["yes-token"], ["yes-token"]]);
     expect(service.getStatus()).toMatchObject({
       running: true,
       connected: true,
       subscribedTokenCount: 1,
+      dataCompleteTokenCount: 1,
+      connectionCount: 2,
+      fullSnapshotCount: 2,
+      unexpectedDisconnectCount: 1,
+      recoveryCount: 1,
+      lastFullSnapshotDurationMs: expect.any(Number),
+      lastRecoveryDurationMs: expect.any(Number),
     });
   });
 
@@ -136,6 +145,19 @@ describe("MarketStreamService", () => {
     expect(service.getStatus().lastError).toContain("timed out after 10ms");
   });
 });
+
+function makeBookEvent(tokenId: string | undefined) {
+  if (tokenId === undefined) {
+    throw new Error("Expected a subscribed token");
+  }
+  return {
+    type: "book" as const,
+    tokenId,
+    bids: [],
+    asks: [],
+    timestampMs: Date.now(),
+  };
+}
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 1_000;

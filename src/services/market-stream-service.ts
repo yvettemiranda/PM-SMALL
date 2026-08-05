@@ -14,6 +14,15 @@ export type MarketStreamStatus = {
   lastEventAt: string | null;
   processedTradeEvents: number;
   ignoredTradeEvents: number;
+  paperBuyFillCount: number;
+  paperSellFillCount: number;
+  createdPaperSellCount: number;
+  connectionCount: number;
+  fullSnapshotCount: number;
+  unexpectedDisconnectCount: number;
+  recoveryCount: number;
+  lastFullSnapshotDurationMs: number | null;
+  lastRecoveryDurationMs: number | null;
   lastError: string | null;
 };
 
@@ -35,6 +44,15 @@ export class MarketStreamService implements PaperMarketRuntime {
   private restartLoop: Promise<void> | null = null;
   private generation = 0;
   private lastError: string | null = null;
+  private connectionCount = 0;
+  private fullSnapshotCount = 0;
+  private unexpectedDisconnectCount = 0;
+  private recoveryCount = 0;
+  private currentConnectionStartedAtMs: number | null = null;
+  private currentConnectionDataComplete = false;
+  private recoveryStartedAtMs: number | null = null;
+  private lastFullSnapshotDurationMs: number | null = null;
+  private lastRecoveryDurationMs: number | null = null;
 
   public constructor(
     private readonly source: MarketStreamSource,
@@ -73,6 +91,9 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.handle = null;
     this.currentTokenIds = [];
     this.connected = false;
+    this.currentConnectionStartedAtMs = null;
+    this.currentConnectionDataComplete = false;
+    this.recoveryStartedAtMs = null;
     this.processor.markDisconnected(tokenIds);
     await Promise.all([
       handle === null
@@ -115,6 +136,12 @@ export class MarketStreamService implements PaperMarketRuntime {
       connected: this.connected,
       subscribedTokenCount: this.currentTokenIds.length,
       ...this.processor.getStatus(),
+      connectionCount: this.connectionCount,
+      fullSnapshotCount: this.fullSnapshotCount,
+      unexpectedDisconnectCount: this.unexpectedDisconnectCount,
+      recoveryCount: this.recoveryCount,
+      lastFullSnapshotDurationMs: this.lastFullSnapshotDurationMs,
+      lastRecoveryDurationMs: this.lastRecoveryDurationMs,
       lastError: this.lastError,
     };
   }
@@ -152,6 +179,8 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.handle = null;
     this.currentTokenIds = [];
     this.connected = false;
+    this.currentConnectionStartedAtMs = null;
+    this.currentConnectionDataComplete = false;
     this.processor.markDisconnected(previousTokenIds);
 
     if (previousHandle !== null) {
@@ -172,9 +201,14 @@ export class MarketStreamService implements PaperMarketRuntime {
       this.handle = handle;
       this.currentTokenIds = tokenIds;
       this.connected = true;
+      this.connectionCount += 1;
+      this.currentConnectionStartedAtMs = Date.now();
+      this.currentConnectionDataComplete = false;
       this.lastError = null;
       void this.consume(handle, tokenIds, generation);
     } catch (error) {
+      this.currentConnectionStartedAtMs = null;
+      this.currentConnectionDataComplete = false;
       this.lastError = errorMessage(error);
       this.scheduleReconnect();
     }
@@ -191,6 +225,7 @@ export class MarketStreamService implements PaperMarketRuntime {
           return;
         }
         this.processor.handle(event);
+        this.recordFullSnapshotIfReady(tokenIds);
       }
     } catch (error) {
       if (generation === this.generation) {
@@ -198,12 +233,43 @@ export class MarketStreamService implements PaperMarketRuntime {
       }
     } finally {
       if (this.started && generation === this.generation) {
+        const disconnectedAtMs = Date.now();
+        this.unexpectedDisconnectCount += 1;
+        this.recoveryStartedAtMs ??= disconnectedAtMs;
         this.handle = null;
         this.currentTokenIds = [];
         this.connected = false;
+        this.currentConnectionStartedAtMs = null;
+        this.currentConnectionDataComplete = false;
         this.processor.markDisconnected(tokenIds);
         this.scheduleReconnect();
       }
+    }
+  }
+
+  private recordFullSnapshotIfReady(tokenIds: readonly string[]): void {
+    if (
+      this.currentConnectionDataComplete ||
+      tokenIds.length === 0 ||
+      !tokenIds.every((tokenId) => this.processor.isTokenReady(tokenId))
+    ) {
+      return;
+    }
+
+    const completedAtMs = Date.now();
+    this.currentConnectionDataComplete = true;
+    this.fullSnapshotCount += 1;
+    this.lastFullSnapshotDurationMs = Math.max(
+      0,
+      completedAtMs - (this.currentConnectionStartedAtMs ?? completedAtMs),
+    );
+    if (this.recoveryStartedAtMs !== null) {
+      this.recoveryCount += 1;
+      this.lastRecoveryDurationMs = Math.max(
+        0,
+        completedAtMs - this.recoveryStartedAtMs,
+      );
+      this.recoveryStartedAtMs = null;
     }
   }
 

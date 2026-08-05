@@ -40,6 +40,38 @@ type RunStatistics = {
   maxSubscribedTokenCount: number;
   firstValidationCount: number | null;
   lastValidationCount: number | null;
+  firstConnectionCount: number | null;
+  lastConnectionCount: number | null;
+  maxConnectionCount: number;
+  firstFullSnapshotCount: number | null;
+  lastFullSnapshotCount: number | null;
+  maxFullSnapshotCount: number;
+  firstUnexpectedDisconnectCount: number | null;
+  lastUnexpectedDisconnectCount: number | null;
+  maxUnexpectedDisconnectCount: number;
+  firstRecoveryCount: number | null;
+  lastRecoveryCount: number | null;
+  maxRecoveryCount: number;
+  maxFullSnapshotDurationMs: number;
+  maxRecoveryDurationMs: number;
+  firstProcessedTradeEvents: number | null;
+  lastProcessedTradeEvents: number | null;
+  maxProcessedTradeEvents: number;
+  firstIgnoredTradeEvents: number | null;
+  lastIgnoredTradeEvents: number | null;
+  maxIgnoredTradeEvents: number;
+  firstPaperBuyFillCount: number | null;
+  lastPaperBuyFillCount: number | null;
+  maxPaperBuyFillCount: number;
+  firstPaperSellFillCount: number | null;
+  lastPaperSellFillCount: number | null;
+  maxPaperSellFillCount: number;
+  firstCreatedPaperSellCount: number | null;
+  lastCreatedPaperSellCount: number | null;
+  maxCreatedPaperSellCount: number;
+  firstPlacedBuyCount: number | null;
+  lastPlacedBuyCount: number | null;
+  maxPlacedBuyCount: number;
   criticalErrors: string[];
 };
 
@@ -110,6 +142,38 @@ async function run(): Promise<void> {
     maxSubscribedTokenCount: 0,
     firstValidationCount: null,
     lastValidationCount: null,
+    firstConnectionCount: null,
+    lastConnectionCount: null,
+    maxConnectionCount: 0,
+    firstFullSnapshotCount: null,
+    lastFullSnapshotCount: null,
+    maxFullSnapshotCount: 0,
+    firstUnexpectedDisconnectCount: null,
+    lastUnexpectedDisconnectCount: null,
+    maxUnexpectedDisconnectCount: 0,
+    firstRecoveryCount: null,
+    lastRecoveryCount: null,
+    maxRecoveryCount: 0,
+    maxFullSnapshotDurationMs: 0,
+    maxRecoveryDurationMs: 0,
+    firstProcessedTradeEvents: null,
+    lastProcessedTradeEvents: null,
+    maxProcessedTradeEvents: 0,
+    firstIgnoredTradeEvents: null,
+    lastIgnoredTradeEvents: null,
+    maxIgnoredTradeEvents: 0,
+    firstPaperBuyFillCount: null,
+    lastPaperBuyFillCount: null,
+    maxPaperBuyFillCount: 0,
+    firstPaperSellFillCount: null,
+    lastPaperSellFillCount: null,
+    maxPaperSellFillCount: 0,
+    firstCreatedPaperSellCount: null,
+    lastCreatedPaperSellCount: null,
+    maxCreatedPaperSellCount: 0,
+    firstPlacedBuyCount: null,
+    lastPlacedBuyCount: null,
+    maxPlacedBuyCount: 0,
     criticalErrors: [],
   };
   let consecutiveTransportErrors = 0;
@@ -366,6 +430,84 @@ function updateStatistics(
   statistics.firstValidationCount ??=
     sample.periodicValidation.validationCount;
   statistics.lastValidationCount = sample.periodicValidation.validationCount;
+  statistics.firstConnectionCount ??= sample.marketStream.connectionCount;
+  statistics.lastConnectionCount = sample.marketStream.connectionCount;
+  statistics.maxConnectionCount = Math.max(
+    statistics.maxConnectionCount,
+    sample.marketStream.connectionCount,
+  );
+  statistics.firstFullSnapshotCount ??=
+    sample.marketStream.fullSnapshotCount;
+  statistics.lastFullSnapshotCount = sample.marketStream.fullSnapshotCount;
+  statistics.maxFullSnapshotCount = Math.max(
+    statistics.maxFullSnapshotCount,
+    sample.marketStream.fullSnapshotCount,
+  );
+  statistics.firstUnexpectedDisconnectCount ??=
+    sample.marketStream.unexpectedDisconnectCount;
+  statistics.lastUnexpectedDisconnectCount =
+    sample.marketStream.unexpectedDisconnectCount;
+  statistics.maxUnexpectedDisconnectCount = Math.max(
+    statistics.maxUnexpectedDisconnectCount,
+    sample.marketStream.unexpectedDisconnectCount,
+  );
+  statistics.firstRecoveryCount ??= sample.marketStream.recoveryCount;
+  statistics.lastRecoveryCount = sample.marketStream.recoveryCount;
+  statistics.maxRecoveryCount = Math.max(
+    statistics.maxRecoveryCount,
+    sample.marketStream.recoveryCount,
+  );
+  statistics.maxFullSnapshotDurationMs = Math.max(
+    statistics.maxFullSnapshotDurationMs,
+    sample.marketStream.lastFullSnapshotDurationMs ?? 0,
+  );
+  statistics.maxRecoveryDurationMs = Math.max(
+    statistics.maxRecoveryDurationMs,
+    sample.marketStream.lastRecoveryDurationMs ?? 0,
+  );
+  statistics.firstProcessedTradeEvents ??=
+    sample.marketStream.processedTradeEvents;
+  statistics.lastProcessedTradeEvents =
+    sample.marketStream.processedTradeEvents;
+  statistics.maxProcessedTradeEvents = Math.max(
+    statistics.maxProcessedTradeEvents,
+    sample.marketStream.processedTradeEvents,
+  );
+  statistics.firstIgnoredTradeEvents ??=
+    sample.marketStream.ignoredTradeEvents;
+  statistics.lastIgnoredTradeEvents = sample.marketStream.ignoredTradeEvents;
+  statistics.maxIgnoredTradeEvents = Math.max(
+    statistics.maxIgnoredTradeEvents,
+    sample.marketStream.ignoredTradeEvents,
+  );
+  statistics.firstPaperBuyFillCount ??=
+    sample.marketStream.paperBuyFillCount;
+  statistics.lastPaperBuyFillCount = sample.marketStream.paperBuyFillCount;
+  statistics.maxPaperBuyFillCount = Math.max(
+    statistics.maxPaperBuyFillCount,
+    sample.marketStream.paperBuyFillCount,
+  );
+  statistics.firstPaperSellFillCount ??=
+    sample.marketStream.paperSellFillCount;
+  statistics.lastPaperSellFillCount = sample.marketStream.paperSellFillCount;
+  statistics.maxPaperSellFillCount = Math.max(
+    statistics.maxPaperSellFillCount,
+    sample.marketStream.paperSellFillCount,
+  );
+  statistics.firstCreatedPaperSellCount ??=
+    sample.marketStream.createdPaperSellCount;
+  statistics.lastCreatedPaperSellCount =
+    sample.marketStream.createdPaperSellCount;
+  statistics.maxCreatedPaperSellCount = Math.max(
+    statistics.maxCreatedPaperSellCount,
+    sample.marketStream.createdPaperSellCount,
+  );
+  statistics.firstPlacedBuyCount ??= sample.paperAutomation.placedBuyCount;
+  statistics.lastPlacedBuyCount = sample.paperAutomation.placedBuyCount;
+  statistics.maxPlacedBuyCount = Math.max(
+    statistics.maxPlacedBuyCount,
+    sample.paperAutomation.placedBuyCount,
+  );
 }
 
 async function appendRecord(record: unknown): Promise<void> {

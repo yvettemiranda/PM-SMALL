@@ -56,6 +56,54 @@ describe("PaperMarketProcessor", () => {
         queueAheadSizeMicros: 6_000_000,
       }),
     ]);
+    expect(processor.getStatus()).toMatchObject({
+      paperBuyFillCount: 1,
+      paperSellFillCount: 0,
+      createdPaperSellCount: 1,
+    });
+  });
+
+  it("records a complete buy-to-sell PAPER cycle from market events", () => {
+    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+    processor.handle({
+      type: "book",
+      tokenId: "yes-token",
+      bids: [],
+      asks: [],
+      timestampMs: 100,
+    });
+    processor.handle({
+      type: "trade",
+      sourceTradeId: "cycle-buy",
+      tokenId: "yes-token",
+      takerSide: "SELL",
+      priceMicros: 20_000,
+      sizeMicros: 2_000_000,
+      timestampMs: 101,
+    });
+    processor.handle({
+      type: "trade",
+      sourceTradeId: "cycle-sell",
+      tokenId: "yes-token",
+      takerSide: "BUY",
+      priceMicros: 30_000,
+      sizeMicros: 2_000_000,
+      timestampMs: 102,
+    });
+
+    expect(database.listPaperOrders()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: buy.id, status: "CANCELLED" }),
+        expect.objectContaining({ side: "SELL", status: "FILLED" }),
+      ]),
+    );
+    expect(database.validatePaperState()).toMatchObject({ passed: true });
+    expect(processor.getStatus()).toMatchObject({
+      processedTradeEvents: 2,
+      paperBuyFillCount: 1,
+      paperSellFillCount: 1,
+      createdPaperSellCount: 1,
+    });
   });
 
   it("does not fill during a gap and waits for a fresh snapshot", () => {

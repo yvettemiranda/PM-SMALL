@@ -20,6 +20,15 @@ class FakeMarketRuntime implements PaperMarketRuntime {
       lastEventAt: null,
       processedTradeEvents: 0,
       ignoredTradeEvents: 0,
+      paperBuyFillCount: 0,
+      paperSellFillCount: 0,
+      createdPaperSellCount: 0,
+      connectionCount: 0,
+      fullSnapshotCount: 0,
+      unexpectedDisconnectCount: 0,
+      recoveryCount: 0,
+      lastFullSnapshotDurationMs: null,
+      lastRecoveryDurationMs: null,
       lastError: null,
     };
   }
