@@ -3,7 +3,7 @@
 ## 项目
 
 - PM-SMALL：基于公开 Polymarket 数据的 PAPER 交易闭环项目。
-- 本轮功能与审查基线`6fbd1d9`已推送到GitHub `origin/main`并核对；后续记录提交继续按提交后立即推送和远端SHA复核的流程处理。
+- GitHub `origin/main` 是唯一交付进度基线；本地增量只有在验证、审查、提交、推送并核对远端后才算完成同步。
 
 ## 边界
 
