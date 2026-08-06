@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildMonitoredCandidate,
   buildTradeCandidate,
   calculateFixedSellPriceMicros,
   calculateOrderSizeMicros,
@@ -23,6 +24,9 @@ const token: MarketToken = {
   durationDays: 9,
   progressPercent: 10,
   gameStartsAt: null,
+  feesEnabled: false,
+  feeRateMicros: 0,
+  feeExponent: 1,
 };
 
 describe("price rules", () => {
@@ -35,7 +39,7 @@ describe("price rules", () => {
     expect(calculateFixedSellPriceMicros(25_000, 2_500)).toBe(37_500);
   });
 
-  it("keeps the current bid when one tick would touch the ask", () => {
+  it("uses the executable best ask instead of posting a maker bid", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
@@ -52,16 +56,17 @@ describe("price rules", () => {
       10_000,
       30_000,
     );
-    expect(candidate?.makerBuyPriceMicros).toBe(15_000);
-    expect(candidate?.queueAheadSizeMicros).toBe(30_000_000);
+    expect(candidate?.executableBuyPriceMicros).toBe(20_000);
+    expect(candidate?.bestAskMicros).toBe(20_000);
+    expect(candidate?.queueAheadSizeMicros).toBe(0);
   });
 
-  it("improves the bid by one tick without crossing", () => {
+  it("rejects a market whose executable ask is above the configured cap", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
       bids: [{ priceMicros: 10_000, sizeMicros: 30_000_000 }],
-      asks: [{ priceMicros: 30_000, sizeMicros: 10_000_000 }],
+      asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
       minOrderSizeMicros: 5_000_000,
       tickSizeMicros: 10_000,
       isNegativeRisk: false,
@@ -73,7 +78,60 @@ describe("price rules", () => {
       10_000,
       30_000,
     );
-    expect(candidate?.makerBuyPriceMicros).toBe(20_000);
-    expect(candidate?.queueAheadSizeMicros).toBe(0);
+    expect(candidate).toBeNull();
+  });
+
+  it("keeps an above-cap order book available for realtime monitoring", () => {
+    const book: TokenOrderBook = {
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      bids: [{ priceMicros: 30_000, sizeMicros: 30_000_000 }],
+      asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
+      minOrderSizeMicros: 5_000_000,
+      tickSizeMicros: 10_000,
+      isNegativeRisk: false,
+    };
+
+    expect(buildMonitoredCandidate(token, book, 1_000_000)).toMatchObject({
+      tokenId: "token-1",
+      bestAskMicros: 40_000,
+      executableBuyPriceMicros: 40_000,
+    });
+  });
+
+  it("keeps an empty order book monitored until an executable ask appears", () => {
+    const book: TokenOrderBook = {
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      bids: [],
+      asks: [],
+      minOrderSizeMicros: 5_000_000,
+      tickSizeMicros: 10_000,
+      isNegativeRisk: false,
+    };
+
+    expect(buildMonitoredCandidate(token, book, 1_000_000)).toMatchObject({
+      tokenId: "token-1",
+      bestBidMicros: null,
+      bestAskMicros: null,
+      executableBuyPriceMicros: 0,
+      orderSizeMicros: 0,
+    });
+  });
+
+  it("rejects a market without an executable ask even when it has a low bid", () => {
+    const book: TokenOrderBook = {
+      tokenId: "token-1",
+      conditionId: "condition-1",
+      bids: [{ priceMicros: 10_000, sizeMicros: 30_000_000 }],
+      asks: [],
+      minOrderSizeMicros: 5_000_000,
+      tickSizeMicros: 10_000,
+      isNegativeRisk: false,
+    };
+
+    expect(
+      buildTradeCandidate(token, book, 1_000_000, 10_000, 30_000),
+    ).toBeNull();
   });
 });

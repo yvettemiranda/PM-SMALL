@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.js";
+import type { TradingExecutionAdapter } from "../domain/execution.js";
 import type { TradeCandidate } from "../domain/types.js";
 import type {
   PaperDatabase,
@@ -6,6 +7,7 @@ import type {
 } from "../infrastructure/db/database.js";
 import type { CandidateService } from "./candidate-service.js";
 import type { PaperMarketRuntime } from "./market-stream-service.js";
+import { TestExecutor } from "../infrastructure/execution/test-executor.js";
 
 export type PaperAutomationStatus = {
   running: boolean;
@@ -26,13 +28,21 @@ export interface PaperAutomationRuntime {
 export interface PaperCandidateSelection {
   isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean;
   reconcileActiveBuys?(now?: Date): number;
+  getMaxBuyPriceMicros?(): number;
+  getOrderBudgetMicros?(): number;
+  getOrderedCandidates?(
+    candidates: readonly TradeCandidate[],
+    now?: Date,
+  ): TradeCandidate[];
 }
 
 export class PaperAutomationService implements PaperAutomationRuntime {
   private started = false;
   private candidateUnsubscribe: (() => void) | null = null;
+  private quoteUnsubscribe: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
-  private runRequested = false;
+  private fullRunRequested = false;
+  private readonly pendingTokenIds = new Set<string>();
   private runLoop: Promise<void> | null = null;
   private lastRunAt: string | null = null;
   private lastError: string | null = null;
@@ -41,6 +51,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private cancelledStartedBuyCount = 0;
   private cancelledProgressedBuyCount = 0;
   private recovery: PaperRecoveryResult | null = null;
+  private readonly attemptedBuyIntentByToken = new Map<string, string>();
 
   public constructor(
     private readonly candidates: CandidateService,
@@ -48,7 +59,14 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     private readonly marketStream: PaperMarketRuntime,
     private readonly config: AppConfig,
     private readonly candidateSelection?: PaperCandidateSelection,
-  ) {}
+    private readonly executor: TradingExecutionAdapter = new TestExecutor(
+      database,
+    ),
+  ) {
+    if (executor.mode !== "TEST" || !executor.enabled) {
+      throw new Error("PaperAutomationService requires the enabled TEST executor");
+    }
+  }
 
   public start(): void {
     if (this.started) {
@@ -58,6 +76,9 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     this.started = true;
     this.candidateUnsubscribe = this.candidates.subscribe(() =>
       this.requestRun(),
+    );
+    this.quoteUnsubscribe = this.candidates.subscribeQuotes((tokenId) =>
+      this.requestTokenRun(tokenId),
     );
     this.timer = setInterval(
       () => this.requestRun(),
@@ -70,6 +91,8 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     this.started = false;
     this.candidateUnsubscribe?.();
     this.candidateUnsubscribe = null;
+    this.quoteUnsubscribe?.();
+    this.quoteUnsubscribe = null;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -81,14 +104,26 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     if (!this.started) {
       return;
     }
-    this.runRequested = true;
+    this.fullRunRequested = true;
+    this.scheduleRun();
+  }
+
+  private requestTokenRun(tokenId: string): void {
+    if (!this.started) {
+      return;
+    }
+    this.pendingTokenIds.add(tokenId);
+    this.scheduleRun();
+  }
+
+  private scheduleRun(): void {
     if (this.runLoop !== null) {
       return;
     }
     this.runLoop = this.drainRuns().finally(() => {
       this.runLoop = null;
-      if (this.runRequested && this.started) {
-        this.requestRun();
+      if (this.hasPendingRun() && this.started) {
+        this.scheduleRun();
       }
     });
   }
@@ -107,44 +142,95 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   }
 
   private async drainRuns(): Promise<void> {
-    while (this.runRequested && this.started) {
-      this.runRequested = false;
-      this.runOnce();
+    while (this.hasPendingRun() && this.started) {
+      const runAll = this.fullRunRequested;
+      const tokenIds = runAll ? null : new Set(this.pendingTokenIds);
+      this.fullRunRequested = false;
+      this.pendingTokenIds.clear();
+      this.runOnce(tokenIds);
       await Promise.resolve();
     }
   }
 
-  private runOnce(): void {
+  private hasPendingRun(): boolean {
+    return this.fullRunRequested || this.pendingTokenIds.size > 0;
+  }
+
+  private runOnce(tokenIds: ReadonlySet<string> | null): void {
     const now = new Date();
     try {
       const cancelledFiltered =
-        this.candidateSelection?.reconcileActiveBuys?.(now) ?? 0;
+        tokenIds === null
+          ? (this.candidateSelection?.reconcileActiveBuys?.(now) ?? 0)
+          : 0;
       this.cancelledFilterBuyCount += cancelledFiltered;
-      const cancelled = this.database.cancelStartedGameBuys(now);
+      const cancelled =
+        tokenIds === null ? this.database.cancelStartedGameBuys(now) : 0;
       this.cancelledStartedBuyCount += cancelled;
-      const cancelledProgressed = this.database.cancelProgressedMarketBuys(
-        this.config.stopBuyProgressPercent,
-        now,
-      );
+      // Lifecycle progress is an ordering/display value only. Keep the
+      // compatibility counter, but never use progress to cancel or block buys.
+      const cancelledProgressed = 0;
       this.cancelledProgressedBuyCount += cancelledProgressed;
       let placedThisRun = 0;
 
       if (this.database.getStrategyState().status === "RUNNING") {
-        for (const candidate of this.candidates.getSnapshot().candidates) {
+        const snapshotCandidates = this.candidates.getSnapshot().candidates;
+        const orderedCandidates =
+          this.candidateSelection?.getOrderedCandidates?.(
+            snapshotCandidates,
+            now,
+          ) ?? snapshotCandidates;
+        for (const candidate of orderedCandidates) {
           if (
+            (tokenIds !== null && !tokenIds.has(candidate.tokenId)) ||
             this.candidateSelection?.isCandidateEnabled(candidate, now) === false ||
-            !candidateIsCurrent(candidate, now, this.config) ||
+            !candidateIsCurrent(candidate, now) ||
             !this.marketStream.isTokenReady(candidate.tokenId)
           ) {
             continue;
           }
+          const book = this.marketStream.getOrderBook?.(candidate) ?? null;
+          if (book === null) {
+            continue;
+          }
+          const bookRevision =
+            this.marketStream.getOrderBookRevision?.(candidate.tokenId) ?? null;
+          const maxPriceMicros =
+            this.candidateSelection?.getMaxBuyPriceMicros?.() ??
+            this.config.maxBuyPriceMicros;
+          const orderBudgetMicros =
+            this.candidateSelection?.getOrderBudgetMicros?.() ??
+            this.config.orderBudgetMicros;
+          const buyIntentKey =
+            bookRevision === null
+              ? null
+              : `${bookRevision}:${maxPriceMicros}:${orderBudgetMicros}`;
+          if (
+            buyIntentKey !== null &&
+            this.attemptedBuyIntentByToken.get(candidate.tokenId) === buyIntentKey
+          ) {
+            continue;
+          }
+          if (buyIntentKey !== null) {
+            this.attemptedBuyIntentByToken.set(candidate.tokenId, buyIntentKey);
+          }
           try {
-            this.database.placePaperBuy(
+            const execution = this.executor.executeBuy({
               candidate,
-              this.config.totalBudgetMicros,
-            );
-            this.placedBuyCount += 1;
-            placedThisRun += 1;
+              book,
+              maxPriceMicros,
+              orderBudgetMicros,
+              feeRateMicros: candidate.feeRateMicros,
+              feeExponent: candidate.feeExponent,
+            });
+            if (execution.order !== null) {
+              this.marketStream.consumeTestBuyLiquidity?.(
+                candidate.tokenId,
+                execution.consumedAsks,
+              );
+              this.placedBuyCount += 1;
+              placedThisRun += 1;
+            }
           } catch (error) {
             if (!isExpectedPlacementRejection(error)) {
               throw error;
@@ -173,7 +259,6 @@ export class PaperAutomationService implements PaperAutomationRuntime {
 function candidateIsCurrent(
   candidate: TradeCandidate,
   now: Date,
-  config: AppConfig,
 ): boolean {
   const openedAt = Date.parse(candidate.openedAt);
   const endsAt = Date.parse(candidate.endsAt);
@@ -189,12 +274,7 @@ function candidateIsCurrent(
     return false;
   }
 
-  const progressPercent =
-    ((now.getTime() - openedAt) / (endsAt - openedAt)) * 100;
-  // The user-selected progress filter is enforced by candidateSelection.
-  // Keep this independent hard cut-off here so a buy at the boundary is not
-  // cancelled and immediately recreated during the same automation pass.
-  return progressPercent < config.stopBuyProgressPercent;
+  return true;
 }
 
 function isExpectedPlacementRejection(error: unknown): boolean {

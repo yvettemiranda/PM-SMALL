@@ -2,7 +2,15 @@ import type { OrderBook } from "@polymarket/client";
 import type { AppConfig } from "../config.js";
 import type { MarketDataSource } from "../infrastructure/polymarket/market-data.js";
 import { extractEligibleTokens, filterEligibleEvent } from "./event-filter.js";
-import { buildTradeCandidate, decimalStringToMicros } from "./price.js";
+import {
+  buildMonitoredCandidate,
+  buildTradeCandidate,
+  decimalStringToMicros,
+} from "./price.js";
+import {
+  sortTradeCandidates,
+  type CandidateSortDirection,
+} from "./trading-strategy.js";
 import type { TokenOrderBook, TradeCandidate } from "./types.js";
 
 const DAY_MS = 86_400_000;
@@ -19,7 +27,9 @@ export type MarketScanDiagnostics = {
   orderBookBatchCount: number;
   orderBookRequestCount: number;
   orderBookCount: number;
+  monitoredTokenCount: number;
   candidateCount: number;
+  availableCategories: string[];
   retryCount: number;
   rateLimitCount: number;
   transientErrorCount: number;
@@ -30,6 +40,10 @@ export type MarketScanPreferences = {
   maxBuyPriceMicros: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
+  allCategories: boolean;
+  selectedCategories: readonly string[];
+  candidateSortDirection: CandidateSortDirection;
+  orderBudgetMicros: number;
 };
 
 export interface MarketScanPreferencesProvider {
@@ -91,6 +105,10 @@ export class MarketScanner implements CandidateScanner {
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
       maxMarketProgressPercent: this.config.maxMarketProgressPercent,
+      allCategories: true,
+      selectedCategories: [],
+      candidateSortDirection: "ASC",
+      orderBudgetMicros: this.config.orderBudgetMicros,
     };
     const scanConfig: AppConfig = {
       ...this.config,
@@ -113,7 +131,9 @@ export class MarketScanner implements CandidateScanner {
       orderBookBatchCount: 0,
       orderBookRequestCount: 0,
       orderBookCount: 0,
+      monitoredTokenCount: 0,
       candidateCount: 0,
+      availableCategories: [],
       retryCount: 0,
       rateLimitCount: 0,
       transientErrorCount: 0,
@@ -159,9 +179,18 @@ export class MarketScanner implements CandidateScanner {
         signal,
       );
       signal?.throwIfAborted();
-      const tokens = events.flatMap((event) => {
+      const eligibleEvents = events.flatMap((event) => {
         const eligibleEvent = filterEligibleEvent(event, scanConfig, now);
-        return eligibleEvent === null ||
+        return eligibleEvent === null ? [] : [{ event, eligibleEvent }];
+      });
+      const availableCategories = Array.from(
+        new Set(eligibleEvents.map(({ eligibleEvent }) => eligibleEvent.category)),
+      ).sort((left, right) => left.localeCompare(right));
+      const tokens = eligibleEvents.flatMap(({ event, eligibleEvent }) => {
+        const categoryAllowed =
+          scanPreferences.allCategories ||
+          scanPreferences.selectedCategories.includes(eligibleEvent.category);
+        return !categoryAllowed ||
           !scanPreferences.resultCounts.includes(eligibleEvent.resultCount)
           ? []
           : extractEligibleTokens(event, eligibleEvent, now);
@@ -171,6 +200,7 @@ export class MarketScanner implements CandidateScanner {
         phase: "ORDER_BOOKS",
         eventCount: events.length,
         eligibleTokenCount: tokens.length,
+        availableCategories,
       });
       const books =
         tokens.length === 0
@@ -206,28 +236,47 @@ export class MarketScanner implements CandidateScanner {
         }),
       );
 
-      const candidates = tokens.flatMap((token) => {
+      const monitoredCandidates: TradeCandidate[] = [];
+      let candidateCount = 0;
+      for (const token of tokens) {
         const book = bookByToken.get(token.tokenId);
         if (book === undefined || book.isNegativeRisk !== token.isNegativeRisk) {
-          return [];
+          continue;
         }
-
-        const candidate = buildTradeCandidate(
+        const monitored = buildMonitoredCandidate(
           token,
           book,
-          this.config.orderBudgetMicros,
-          this.config.minBuyPriceMicros,
-          scanPreferences.maxBuyPriceMicros,
+          scanPreferences.orderBudgetMicros,
         );
-        return candidate === null ? [] : [candidate];
-      });
+        if (monitored === null) {
+          continue;
+        }
+        monitoredCandidates.push(monitored);
+        if (
+          buildTradeCandidate(
+            token,
+            book,
+            scanPreferences.orderBudgetMicros,
+            1,
+            scanPreferences.maxBuyPriceMicros,
+          ) !== null
+        ) {
+          candidateCount += 1;
+        }
+      }
+      const orderedCandidates = sortTradeCandidates(
+        monitoredCandidates,
+        scanPreferences.candidateSortDirection,
+      );
       this.finishDiagnostics("COMPLETE", {
         eventCount: events.length,
         eligibleTokenCount: tokens.length,
         orderBookCount: books.length,
-        candidateCount: candidates.length,
+        monitoredTokenCount: orderedCandidates.length,
+        candidateCount,
+        availableCategories,
       });
-      return candidates;
+      return orderedCandidates;
     } catch (error) {
       this.finishDiagnostics("FAILED");
       throw error;

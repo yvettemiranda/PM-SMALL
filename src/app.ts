@@ -3,10 +3,12 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
+import type { TradingExecutionAdapter } from "./domain/execution.js";
 import {
   calculateOrderCostMicros,
   microsToDecimalString,
 } from "./domain/price.js";
+import { calculateTakerFeeMicros } from "./domain/trading-strategy.js";
 import type { PaperOrder, TradeCandidate } from "./domain/types.js";
 import type {
   PaperDatabase,
@@ -15,6 +17,7 @@ import type {
   StrategyState,
 } from "./infrastructure/db/database.js";
 import type { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
+import { TestExecutor } from "./infrastructure/execution/test-executor.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
@@ -32,6 +35,7 @@ export type AppDependencies = {
   candidates: CandidateService;
   tradingPreferences: PaperTradingPreferencesService;
   liveExecutor: LiveExecutorDisabled;
+  testExecutor?: TradingExecutionAdapter;
   marketStream?: PaperMarketRuntime;
   paperAutomation?: PaperAutomationRuntime;
   paperSettlement?: PaperSettlementRuntime;
@@ -41,11 +45,12 @@ export type AppDependencies = {
 function publicConfig(
   config: AppConfig,
   preferences: PaperTradingPreferencesSnapshot,
+  strategy: StrategyState,
 ) {
   return {
-    initialCapital: microsToDecimalString(config.initialCapitalMicros),
-    totalBudget: microsToDecimalString(config.totalBudgetMicros),
-    orderBudget: microsToDecimalString(config.orderBudgetMicros),
+    initialCapital: microsToDecimalString(strategy.initialCapitalMicros),
+    totalBudget: microsToDecimalString(strategy.initialCapitalMicros),
+    orderBudget: microsToDecimalString(preferences.orderBudgetMicros),
     resultCounts: preferences.resultCounts,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
@@ -72,6 +77,7 @@ function runtimeStatus() {
 function serializeState(state: StrategyState) {
   return {
     ...state,
+    mode: "TEST" as const,
     initialCapital: microsToDecimalString(state.initialCapitalMicros),
     availableCash: microsToDecimalString(state.availableCashMicros),
     reservedCash: microsToDecimalString(state.reservedCashMicros),
@@ -92,6 +98,8 @@ function serializeOrder(order: PaperOrder) {
     filledSize: microsToDecimalString(order.filledSizeMicros),
     queueAheadSize: microsToDecimalString(order.queueAheadSizeMicros),
     observedTradeSize: microsToDecimalString(order.observedTradeSizeMicros),
+    cashLimit: microsToDecimalString(order.cashLimitMicros),
+    fee: microsToDecimalString(order.feeMicros),
   };
 }
 
@@ -104,17 +112,21 @@ function serializeSettlement(settlement: PaperSettlement) {
   };
 }
 
-function serializeCandidate(candidate: TradeCandidate, selected: boolean) {
+function serializeCandidate(candidate: TradeCandidate) {
   return {
     ...candidate,
-    selected,
     marketUrl: polymarketEventUrl(candidate.eventSlug, candidate.eventId),
-    bestBid: microsToDecimalString(candidate.bestBidMicros),
+    bestBid:
+      candidate.bestBidMicros === null
+        ? null
+        : microsToDecimalString(candidate.bestBidMicros),
     bestAsk:
       candidate.bestAskMicros === null
         ? null
         : microsToDecimalString(candidate.bestAskMicros),
-    makerBuyPrice: microsToDecimalString(candidate.makerBuyPriceMicros),
+    executableBuyPrice: microsToDecimalString(
+      candidate.executableBuyPriceMicros,
+    ),
     fixedSellPrice: microsToDecimalString(candidate.fixedSellPriceMicros),
     orderSize: microsToDecimalString(candidate.orderSizeMicros),
     queueAheadSize: microsToDecimalString(candidate.queueAheadSizeMicros),
@@ -129,26 +141,18 @@ function serializeSnapshot(
   includeCandidates = true,
 ) {
   const { candidates: unfilteredCandidates, ...status } = snapshot;
-  const candidates = unfilteredCandidates.filter((candidate) =>
-    preferences.candidateMatchesMarketFilters(candidate),
+  const candidates = preferences.getOrderedCandidates(
+    unfilteredCandidates,
+    new Date(),
   );
-  const selectedCandidateCount = candidates.filter((candidate) =>
-    preferences.isTokenSelected(candidate.tokenId),
-  ).length;
   const summary = {
     ...status,
     candidateCount: candidates.length,
-    selectedCandidateCount,
   };
   return includeCandidates
     ? {
         ...summary,
-        candidates: candidates.map((candidate) =>
-          serializeCandidate(
-            candidate,
-            preferences.isTokenSelected(candidate.tokenId),
-          ),
-        ),
+        candidates: candidates.map(serializeCandidate),
       }
     : summary;
 }
@@ -158,17 +162,18 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
     ...preferences,
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     maxBuyPriceCents: preferences.maxBuyPriceMicros / 10_000,
+    orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
     durationOptions: [...MARKET_DURATION_DAY_OPTIONS],
   };
 }
 
 function averagePriceMicros(position: PaperPositionView): number | null {
-  if (position.quantityMicros <= 0) {
+  if (position.grossBuySizeMicros <= 0) {
     return null;
   }
   return Number(
-    (BigInt(position.costMicros) * 1_000_000n) /
-      BigInt(position.quantityMicros),
+    (BigInt(position.grossBuyNotionalMicros) * 1_000_000n) /
+      BigInt(position.grossBuySizeMicros),
   );
 }
 
@@ -208,7 +213,7 @@ function markPriceMicros(
   candidate: TradeCandidate | undefined = undefined,
 ): number | null {
   const streamed = dependencies.marketStream?.getBestBidMicros?.(position.tokenId);
-  if (streamed !== undefined && streamed !== null) {
+  if (streamed !== undefined) {
     return streamed;
   }
   return (
@@ -239,11 +244,18 @@ function serializePositionView(
     dependencies,
     candidate,
   );
-  const valuationPriceMicros = currentMarkPriceMicros ?? averageBuyPriceMicros;
-  const marketValueMicros =
-    valuationPriceMicros === null
-      ? position.costMicros
-      : calculateOrderCostMicros(valuationPriceMicros, position.quantityMicros);
+  const marketValueMicros = positionMarketValueMicros(
+    position,
+    currentMarkPriceMicros,
+    dependencies,
+  );
+  const targetSellPrices = dependencies.database
+    .listActivePaperOrders(position.tokenId)
+    .filter(
+      (order) => order.side === "SELL" && order.executionKind === "TARGET",
+    )
+    .map((order) => order.priceMicros)
+    .sort((left, right) => left - right);
   return {
     ...position,
     eventId,
@@ -267,6 +279,15 @@ function serializePositionView(
       currentMarkPriceMicros === null
         ? null
         : microsToDecimalString(currentMarkPriceMicros),
+    currentSellPrice:
+      currentMarkPriceMicros === null
+        ? null
+        : microsToDecimalString(currentMarkPriceMicros),
+    targetSellPrice:
+      targetSellPrices[0] === undefined
+        ? null
+        : microsToDecimalString(targetSellPrices[0]),
+    targetSellPrices: targetSellPrices.map(microsToDecimalString),
     unrealizedPnl: microsToDecimalString(
       marketValueMicros - position.costMicros,
     ),
@@ -281,13 +302,11 @@ function serializePortfolio(
 ) {
   let marketValueMicros = 0;
   for (const position of positions) {
-    const averageBuyPriceMicros = averagePriceMicros(position);
-    const valuationPriceMicros =
-      markPriceMicros(position, dependencies) ?? averageBuyPriceMicros;
-    marketValueMicros +=
-      valuationPriceMicros === null
-        ? position.costMicros
-        : calculateOrderCostMicros(valuationPriceMicros, position.quantityMicros);
+    marketValueMicros += positionMarketValueMicros(
+      position,
+      markPriceMicros(position, dependencies),
+      dependencies,
+    );
   }
   const unrealizedPnlMicros = marketValueMicros - state.positionCostMicros;
   const totalPnlMicros = state.realizedPnlMicros + unrealizedPnlMicros;
@@ -301,10 +320,45 @@ function serializePortfolio(
   };
 }
 
+function positionMarketValueMicros(
+  position: PaperPositionView,
+  valuationPriceMicros: number | null,
+  dependencies: AppDependencies,
+): number {
+  if (valuationPriceMicros === null) {
+    // TEST PnL is based on immediately executable value. With no bid there is
+    // currently no realizable exit value, so carrying the position at cost
+    // would overstate both funds and performance.
+    return 0;
+  }
+  const grossValueMicros = calculateOrderCostMicros(
+    valuationPriceMicros,
+    position.quantityMicros,
+  );
+  const metadata = dependencies.database.getTestMarketExecutionMetadata(
+    position.tokenId,
+  );
+  const feeMicros =
+    metadata === null
+      ? 0
+      : calculateTakerFeeMicros({
+          sizeMicros: position.quantityMicros,
+          priceMicros: valuationPriceMicros,
+          feeRateMicros: metadata.feeRateMicros,
+          feeExponent: metadata.feeExponent,
+        });
+  return Math.max(0, grossValueMicros - feeMicros);
+}
+
 export function buildApp(dependencies: AppDependencies): FastifyInstance {
   const app = Fastify({ logger: true });
+  const testExecutor =
+    dependencies.testExecutor ?? new TestExecutor(dependencies.database);
+  if (testExecutor.mode !== "TEST" || !testExecutor.enabled) {
+    throw new Error("The HTTP app requires the enabled TEST executor");
+  }
 
-  app.get("/api/health", async () => ({ status: "ok", mode: "PAPER" }));
+  app.get("/api/health", async () => ({ status: "ok", mode: "TEST" }));
 
   app.get("/api/status", async (request) => {
     const query = z
@@ -314,12 +368,12 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const positions = dependencies.database.listCurrentPaperPositionViews();
     const preferences = dependencies.tradingPreferences.getSnapshot();
     return {
-      version: "0.4.0",
-      executionMode: "PAPER",
+      version: "0.5.0",
+      executionMode: "TEST",
       liveExecutionEnabled: dependencies.liveExecutor.enabled,
       strategy: serializeState(strategy),
       portfolio: serializePortfolio(strategy, positions, dependencies),
-      configuration: publicConfig(dependencies.config, preferences),
+      configuration: publicConfig(dependencies.config, preferences, strategy),
       runtime: runtimeStatus(),
       marketScan: serializeSnapshot(
         dependencies.candidates.getSnapshot(),
@@ -374,13 +428,53 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     };
   });
 
-  app.get("/api/paper/validation", async (_request, reply) => {
+  app.get("/api/dashboard", async (request) => {
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).default(20),
+      })
+      .parse(request.query);
+    const strategy = dependencies.database.getStrategyState();
+    const positions = dependencies.database.listCurrentPaperPositionViews();
+    const preferences = dependencies.tradingPreferences.getSnapshot();
+    const candidateSnapshot = dependencies.candidates.getSnapshot();
+    const orderedCandidates = dependencies.tradingPreferences.getOrderedCandidates(
+      candidateSnapshot.candidates,
+      new Date(),
+    );
+    const { candidates: _unfilteredCandidates, ...marketScanStatus } =
+      candidateSnapshot;
+    return {
+      version: "0.5.0",
+      executionMode: "TEST",
+      liveExecutionEnabled: false,
+      strategy: serializeState(strategy),
+      portfolio: serializePortfolio(strategy, positions, dependencies),
+      positions: positions.map((position) =>
+        serializePositionView(position, dependencies, new Date()),
+      ),
+      preferences: serializePreferences(preferences),
+      marketScan: {
+        ...marketScanStatus,
+        candidateCount: orderedCandidates.length,
+        candidates: orderedCandidates
+          .slice(0, query.limit)
+          .map(serializeCandidate),
+        displayedCandidateCount: Math.min(
+          query.limit,
+          orderedCandidates.length,
+        ),
+      },
+    };
+  });
+
+  app.get("/api/test/validation", async (_request, reply) => {
     // Keep GET side-effect free. The periodic service owns pause and audit.
     const validation = dependencies.database.validatePaperState();
     return reply.code(validation.passed ? 200 : 503).send({ validation });
   });
 
-  app.post("/api/paper/start", async () => {
+  app.post("/api/test/start", async () => {
     const strategy = dependencies.database.setStrategyStatus("RUNNING");
     dependencies.paperAutomation?.requestRun();
     dependencies.paperSettlement?.requestRun();
@@ -388,7 +482,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return { strategy: serializeState(strategy) };
   });
 
-  app.post("/api/paper/cycle/start", async (_request, reply) => {
+  app.post("/api/test/cycle/start", async (_request, reply) => {
     if (dependencies.database.getStrategyState().status === "RUNNING") {
       return reply
         .code(409)
@@ -404,11 +498,11 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     };
   });
 
-  app.post("/api/paper/pause", async () => ({
+  app.post("/api/test/pause", async () => ({
     strategy: serializeState(dependencies.database.setStrategyStatus("PAUSED")),
   }));
 
-  app.post("/api/paper/stop", async () => ({
+  app.post("/api/test/stop", async () => ({
     strategy: serializeState(dependencies.database.setStrategyStatus("STOPPED")),
   }));
 
@@ -423,29 +517,60 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return serializeSnapshot(snapshot, dependencies.tradingPreferences);
   });
 
-  app.get("/api/paper/preferences", async () => ({
+  app.get("/api/test/preferences", async () => ({
     preferences: serializePreferences(dependencies.tradingPreferences.getSnapshot()),
   }));
 
-  app.put("/api/paper/preferences", async (request) => {
+  app.put("/api/test/preferences", async (request) => {
     const body = z
       .object({
-        resultCounts: z.array(z.union([z.literal(2), z.literal(3)])),
+        resultCounts: z.array(z.union([z.literal(2), z.literal(3)])).min(1),
         maxBuyPriceCents: z.number().int().min(1).max(3),
         maxMarketDurationDays: z
           .number()
           .int()
           .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
-        maxMarketProgressPercent: z.number().int().min(1).max(100).optional(),
+        allCategories: z.boolean().optional(),
+        selectedCategories: z.array(z.string().trim().min(1).max(80)).optional(),
+        candidateSortDirection: z.enum(["ASC", "DESC"]).optional(),
+        orderAmount: z.number().finite().positive().max(1_000_000).optional(),
+        initialCapital: z.number().finite().positive().max(1_000_000).optional(),
       })
       .parse(request.body);
+    const currentStrategy = dependencies.database.getStrategyState();
+    const requestedInitialCapitalMicros =
+      body.initialCapital === undefined
+        ? currentStrategy.initialCapitalMicros
+        : unitsToMicros(body.initialCapital);
+    const requestedOrderBudgetMicros =
+      body.orderAmount === undefined
+        ? dependencies.tradingPreferences.getSnapshot().orderBudgetMicros
+        : unitsToMicros(body.orderAmount);
+    if (requestedOrderBudgetMicros > requestedInitialCapitalMicros) {
+      throw new Error("Per-order TEST amount cannot exceed total TEST capital");
+    }
+    const strategy =
+      requestedInitialCapitalMicros === currentStrategy.initialCapitalMicros
+        ? currentStrategy
+        : dependencies.database.updateTestInitialCapital(
+            requestedInitialCapitalMicros,
+          );
     const update = dependencies.tradingPreferences.updateMarketFilters({
       resultCounts: body.resultCounts,
       maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
       maxMarketDurationDays: body.maxMarketDurationDays,
-      maxMarketProgressPercent:
-        body.maxMarketProgressPercent ??
-        dependencies.tradingPreferences.getSnapshot().maxMarketProgressPercent,
+      ...(body.allCategories === undefined
+        ? {}
+        : { allCategories: body.allCategories }),
+      ...(body.selectedCategories === undefined
+        ? {}
+        : { selectedCategories: body.selectedCategories }),
+      ...(body.candidateSortDirection === undefined
+        ? {}
+        : { candidateSortDirection: body.candidateSortDirection }),
+      ...(body.orderAmount === undefined
+        ? {}
+        : { orderBudgetMicros: requestedOrderBudgetMicros }),
     });
     dependencies.paperAutomation?.requestRun();
     dependencies.marketStream?.refreshSubscriptions();
@@ -456,79 +581,30 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return {
       preferences: serializePreferences(update.preferences),
       cancelledBuyCount: update.cancelledBuyCount,
+      strategy: serializeState(strategy),
     };
   });
 
-  app.put("/api/paper/candidate-selection", async (request, reply) => {
-    const body = z
-      .discriminatedUnion("action", [
-        z.object({ action: z.literal("all") }),
-        z.object({ action: z.literal("none") }),
-        z.object({
-          action: z.literal("set"),
-          tokenId: z.string().min(1).max(256),
-          selected: z.boolean(),
-        }),
-      ])
-      .parse(request.body);
-    if (body.action === "all") {
-      dependencies.tradingPreferences.setAllCandidatesSelected(true);
-    } else if (body.action === "none") {
-      dependencies.tradingPreferences.setAllCandidatesSelected(false);
-    } else {
-      const candidate = dependencies.candidates
-        .getSnapshot()
-        .candidates.find(
-          (item) =>
-            item.tokenId === body.tokenId &&
-            dependencies.tradingPreferences.candidateMatchesMarketFilters(
-              item,
-              new Date(),
-            ),
-        );
-      if (candidate === undefined) {
-        return reply.code(404).send({ error: "Candidate is unavailable or stale" });
-      }
-      dependencies.tradingPreferences.setCandidateSelected(
-        body.tokenId,
-        body.selected,
-      );
-    }
-    dependencies.paperAutomation?.requestRun();
-    dependencies.marketStream?.refreshSubscriptions();
-    const candidates = dependencies.candidates
-      .getSnapshot()
-      .candidates.filter((candidate) =>
-        dependencies.tradingPreferences.candidateMatchesMarketFilters(candidate),
-      );
-    return {
-      selectedCandidateCount: candidates.filter((candidate) =>
-        dependencies.tradingPreferences.isTokenSelected(candidate.tokenId),
-      ).length,
-      candidateCount: candidates.length,
-    };
-  });
-
-  app.get("/api/paper/orders", async () => ({
+  app.get("/api/test/orders", async () => ({
     orders: dependencies.database.listPaperOrders().map(serializeOrder),
     activeBuyOrderCount: dependencies.database
       .listActivePaperOrders()
       .filter((order) => order.side === "BUY").length,
   }));
 
-  app.get("/api/paper/positions", async () => ({
+  app.get("/api/test/positions", async () => ({
     positions: dependencies.database
       .listCurrentPaperPositionViews()
       .map((position) => serializePositionView(position, dependencies, new Date())),
   }));
 
-  app.get("/api/paper/settlements", async () => ({
+  app.get("/api/test/settlements", async () => ({
     settlements: dependencies.database
       .listPaperSettlements()
       .map(serializeSettlement),
   }));
 
-  app.post("/api/paper/orders/buy", async (request, reply) => {
+  app.post("/api/test/orders/buy", async (request, reply) => {
     const body = z.object({ candidateId: z.string().min(1) }).parse(request.body);
     const candidate = dependencies.candidates.getCandidate(body.candidateId);
     if (candidate === null) {
@@ -542,12 +618,52 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       });
     }
 
-    const order = dependencies.database.placePaperBuy(
+    const book = dependencies.marketStream?.getOrderBook?.(candidate) ?? null;
+    if (book === null) {
+      return reply.code(409).send({ error: "Current TEST order book is incomplete" });
+    }
+    const execution = testExecutor.executeBuy({
       candidate,
-      dependencies.config.totalBudgetMicros,
+      book,
+      maxPriceMicros:
+        dependencies.tradingPreferences.getSnapshot().maxBuyPriceMicros,
+      orderBudgetMicros:
+        dependencies.tradingPreferences.getSnapshot().orderBudgetMicros,
+      feeRateMicros: candidate.feeRateMicros,
+      feeExponent: candidate.feeExponent,
+    });
+    if (execution.order === null) {
+      return reply.code(409).send({
+        error: `TEST FAK buy was not executed: ${execution.outcome}`,
+      });
+    }
+    dependencies.marketStream?.consumeTestBuyLiquidity?.(
+      candidate.tokenId,
+      execution.consumedAsks,
     );
     dependencies.marketStream?.refreshSubscriptions();
-    return reply.code(201).send({ order: serializeOrder(order) });
+    return reply.code(201).send({
+      outcome: execution.outcome,
+      order: serializeOrder(execution.order),
+      spent: microsToDecimalString(execution.spentMicros),
+      fee: microsToDecimalString(execution.feeMicros),
+    });
+  });
+
+  app.post("/api/test/reset", async (request) => {
+    z.object({
+      confirmation: z.literal("RESET TEST"),
+      finalConfirmation: z.literal("RESET TEST AGAIN"),
+    }).parse(request.body);
+    dependencies.tradingPreferences.resetTestState();
+    dependencies.marketStream?.refreshSubscriptions();
+    void dependencies.candidates.refresh();
+    return {
+      strategy: serializeState(dependencies.database.getStrategyState()),
+      preferences: serializePreferences(
+        dependencies.tradingPreferences.getSnapshot(),
+      ),
+    };
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -571,4 +687,12 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   }
 
   return app;
+}
+
+function unitsToMicros(value: number): number {
+  const micros = Math.round(value * 1_000_000);
+  if (!Number.isSafeInteger(micros) || micros <= 0) {
+    throw new Error("TEST amount is outside the supported range");
+  }
+  return micros;
 }

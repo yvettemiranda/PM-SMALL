@@ -48,7 +48,24 @@ describe("event filtering", () => {
     expect(eligible).toBeNull();
   });
 
-  it("requires at least one full day and treats the one-day slider value as exactly one day", () => {
+  it("uses lifecycle progress only for display and ordering", () => {
+    const almostFinished = makeEvent({
+      schedule: {
+        startDate: "2025-12-23T00:00:00.000Z",
+        endDate: "2026-01-02T01:00:00.000Z",
+      },
+    });
+
+    expect(
+      filterEligibleEvent(
+        almostFinished,
+        { ...testConfig, maxMarketProgressPercent: 20 },
+        now,
+      ),
+    ).toMatchObject({ progressPercent: expect.any(Number) });
+  });
+
+  it("requires a total duration from one day through the selected maximum", () => {
     const filterConfig = {
       ...testConfig,
       maxMarketDurationDays: 1,
@@ -124,6 +141,54 @@ describe("event filtering", () => {
       const event = makeEvent({ markets: [makeMarket({ state })] });
       const eligible = filterEligibleEvent(event, testConfig, now);
       expect(eligible).not.toBeNull();
+      expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+    }
+  });
+
+  it("carries the market fee schedule into every executable token", () => {
+    const event = makeEvent({
+      markets: [
+        makeMarket({
+          trading: {
+            feesEnabled: true,
+            feeSchedule: {
+              rate: "0.04",
+              exponent: 1,
+              takerOnly: true,
+              rebateRate: "0.25",
+            },
+          },
+        }),
+      ],
+    });
+    const eligible = filterEligibleEvent(event, testConfig, now);
+
+    expect(extractEligibleTokens(event, eligible!, now)).toEqual([
+      expect.objectContaining({
+        tokenId: "yes-token",
+        feesEnabled: true,
+        feeRateMicros: 40_000,
+        feeExponent: 1,
+      }),
+      expect.objectContaining({
+        tokenId: "no-token",
+        feesEnabled: true,
+        feeRateMicros: 40_000,
+        feeExponent: 1,
+      }),
+    ]);
+  });
+
+  it("fails closed when a fee-enabled market has no valid fee schedule", () => {
+    const invalidSchedules = [
+      { feesEnabled: true },
+      { feesEnabled: true, feeSchedule: { rate: "invalid", exponent: 1 } },
+      { feesEnabled: true, feeSchedule: { rate: "0.04", exponent: -1 } },
+    ];
+
+    for (const trading of invalidSchedules) {
+      const event = makeEvent({ markets: [makeMarket({ trading })] });
+      const eligible = filterEligibleEvent(event, testConfig, now);
       expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
     }
   });

@@ -8,9 +8,14 @@ import type {
 import { PaperAutomationService } from "../src/services/paper-automation-service.js";
 import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
 import { makeCandidate, testConfig } from "./helpers.js";
+import type { BookLevel, TokenOrderBook, TradeCandidate } from "../src/domain/types.js";
 
 class FakeMarketRuntime implements PaperMarketRuntime {
   public refreshCount = 0;
+  public bookRevision = 1;
+  public askSizeMicros = 100_000_000;
+  public asks: BookLevel[] | null = null;
+  public consumeLiquidity = false;
 
   public getStatus(): MarketStreamStatus {
     return {
@@ -41,6 +46,40 @@ class FakeMarketRuntime implements PaperMarketRuntime {
   public isTokenReady(): boolean {
     return true;
   }
+
+  public getOrderBook(candidate: TradeCandidate): TokenOrderBook {
+    return {
+      tokenId: candidate.tokenId,
+      conditionId: candidate.conditionId,
+      bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+      asks:
+        this.asks?.map((level) => ({ ...level })) ??
+        [{ priceMicros: candidate.executableBuyPriceMicros, sizeMicros: this.askSizeMicros }],
+      minOrderSizeMicros: candidate.minOrderSizeMicros,
+      tickSizeMicros: candidate.tickSizeMicros,
+      isNegativeRisk: candidate.isNegativeRisk,
+    };
+  }
+
+  public getOrderBookRevision(): number {
+    return this.bookRevision;
+  }
+
+  public consumeTestBuyLiquidity(
+    _tokenId: string,
+    consumedAsks: readonly BookLevel[],
+  ): void {
+    if (!this.consumeLiquidity || this.asks === null) return;
+    for (const consumed of consumedAsks) {
+      const level = this.asks.find(
+        (item) => item.priceMicros === consumed.priceMicros,
+      );
+      if (level !== undefined) {
+        level.sizeMicros = Math.max(0, level.sizeMicros - consumed.sizeMicros);
+      }
+    }
+    this.asks = this.asks.filter((level) => level.sizeMicros > 0);
+  }
 }
 
 describe("PaperAutomationService", () => {
@@ -56,7 +95,7 @@ describe("PaperAutomationService", () => {
     }
   });
 
-  it("places an eligible paper buy automatically while running", async () => {
+  it("executes an eligible TEST FAK buy automatically while running", async () => {
     const candidate = makeCurrentCandidate();
     const candidates = new CandidateService(
       { scan: async () => [candidate] },
@@ -75,13 +114,15 @@ describe("PaperAutomationService", () => {
     resources.push(database, automation);
 
     automation.start();
-    await waitFor(() => database.listActivePaperOrders().length === 1);
+    await waitFor(() => database.listPaperPositions().length === 1);
 
-    expect(database.listActivePaperOrders()[0]).toMatchObject({
+    expect(database.listPaperOrders().find((order) => order.side === "BUY")).toMatchObject({
       tokenId: candidate.tokenId,
       side: "BUY",
-      status: "OPEN",
+      executionKind: "FAK",
+      status: "CANCELLED",
     });
+    expect(database.listActivePaperOrders().filter((order) => order.side === "BUY")).toEqual([]);
     expect(automation.getStatus()).toMatchObject({
       running: true,
       lastError: null,
@@ -89,6 +130,43 @@ describe("PaperAutomationService", () => {
       recovery: { passed: true },
     });
     expect(marketStream.refreshCount).toBeGreaterThan(0);
+  });
+
+  it("buys a monitored market as soon as its streamed ask reaches the cap", async () => {
+    const candidate = makeCurrentCandidate({
+      bestAskMicros: 40_000,
+      executableBuyPriceMicros: 40_000,
+      makerBuyPriceMicros: 40_000,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    const marketStream = new FakeMarketRuntime();
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      preferences,
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+    expect(database.listPaperPositions()).toEqual([]);
+
+    marketStream.bookRevision += 1;
+    candidates.updateQuote(candidate.tokenId, 20_000, 30_000);
+
+    await waitFor(() => database.listPaperPositions().length === 1);
+    expect(database.listPaperPositions()[0]).toMatchObject({
+      tokenId: candidate.tokenId,
+    });
   });
 
   it("does not place automatic buys while stopped", async () => {
@@ -136,6 +214,99 @@ describe("PaperAutomationService", () => {
     expect(database.listPaperOrders()).toHaveLength(0);
   });
 
+  it("does not reuse the same order-book depth after a partial TEST FAK buy", async () => {
+    const candidate = makeCurrentCandidate();
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const marketStream = new FakeMarketRuntime();
+    marketStream.askSizeMicros = 10_000_000;
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => database.listPaperOrders().length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(
+      database.listPaperOrders().filter((order) => order.side === "BUY"),
+    ).toHaveLength(1);
+    expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(300_000);
+
+    marketStream.bookRevision += 1;
+    automation.requestRun();
+    await waitFor(
+      () =>
+        database.listPaperOrders().filter((order) => order.side === "BUY")
+          .length === 2,
+    );
+    expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(600_000);
+  });
+
+  it("re-evaluates the same book revision when the saved buy-price cap changes", async () => {
+    const candidate = makeCurrentCandidate({
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    preferences.updateMarketFilters({
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: 20_000,
+      maxMarketDurationDays: 30,
+      orderBudgetMicros: 1_000_000,
+    });
+    const marketStream = new FakeMarketRuntime();
+    marketStream.asks = [
+      { priceMicros: 20_000, sizeMicros: 5_000_000 },
+      { priceMicros: 30_000, sizeMicros: 30_000_000 },
+    ];
+    marketStream.consumeLiquidity = true;
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      preferences,
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(
+      () => database.listPaperOrders().filter((order) => order.side === "BUY").length === 1,
+    );
+    expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(100_000);
+
+    preferences.updateMarketFilters({
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: 30_000,
+      maxMarketDurationDays: 30,
+      orderBudgetMicros: 1_000_000,
+    });
+    automation.requestRun();
+
+    await waitFor(
+      () => database.listPaperOrders().filter((order) => order.side === "BUY").length === 2,
+    );
+    expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(1_000_000);
+  });
+
   it("does not place automatic buys for a token excluded in the TEST UI", async () => {
     const candidates = new CandidateService(
       { scan: async () => [makeCurrentCandidate()] },
@@ -159,13 +330,13 @@ describe("PaperAutomationService", () => {
     expect(database.listPaperOrders()).toHaveLength(0);
   });
 
-  it("uses the saved TEST progress filter instead of the startup default when placing buys", async () => {
+  it("does not use lifecycle progress as a hidden buy eligibility cut-off", async () => {
     const now = Date.now();
     const candidate = makeCandidate({
-      openedAt: new Date(now - 3 * 86_400_000).toISOString(),
-      endsAt: new Date(now + 7 * 86_400_000).toISOString(),
+      openedAt: new Date(now - 9.9 * 86_400_000).toISOString(),
+      endsAt: new Date(now + 0.1 * 86_400_000).toISOString(),
       durationDays: 10,
-      progressPercent: 30,
+      progressPercent: 99,
     });
     const candidates = new CandidateService(
       { scan: async () => [candidate] },
@@ -175,17 +346,15 @@ describe("PaperAutomationService", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     database.setStrategyStatus("RUNNING");
     const preferences = new PaperTradingPreferencesService(database, testConfig);
-    preferences.updateMarketFilters({
-      resultCounts: [2, 3],
-      maxBuyPriceMicros: 30_000,
-      maxMarketDurationDays: 30,
-      maxMarketProgressPercent: 35,
-    });
     const automation = new PaperAutomationService(
       candidates,
       database,
       new FakeMarketRuntime(),
-      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      {
+        ...testConfig,
+        paperSchedulerIntervalMs: 10,
+        stopBuyProgressPercent: 80,
+      },
       preferences,
     );
     resources.push(database, automation);
@@ -193,12 +362,12 @@ describe("PaperAutomationService", () => {
     automation.start();
     await waitFor(() => automation.getStatus().lastRunAt !== null);
 
-    expect(database.listActivePaperOrders()).toEqual([
-      expect.objectContaining({ tokenId: candidate.tokenId, side: "BUY" }),
+    expect(database.listPaperPositions()).toEqual([
+      expect.objectContaining({ tokenId: candidate.tokenId, quantityMicros: expect.any(Number) }),
     ]);
   });
 
-  it("cancels an existing buy once it falls outside the saved duration or progress filters", async () => {
+  it("cancels an existing buy whose total duration is less than one day", async () => {
     const now = Date.now();
     const shortCandidate = makeCandidate({
       openedAt: new Date(now - 5 * 60 * 60_000).toISOString(),
@@ -232,13 +401,16 @@ describe("PaperAutomationService", () => {
   });
 });
 
-function makeCurrentCandidate() {
+function makeCurrentCandidate(
+  overrides: Parameters<typeof makeCandidate>[0] = {},
+) {
   const now = Date.now();
   return makeCandidate({
     openedAt: new Date(now - 86_400_000).toISOString(),
     endsAt: new Date(now + 9 * 86_400_000).toISOString(),
     durationDays: 10,
     progressPercent: 10,
+    ...overrides,
   });
 }
 

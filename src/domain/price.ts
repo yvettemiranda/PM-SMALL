@@ -54,16 +54,67 @@ export function calculateFixedSellPriceMicros(
 
 function bestBid(bids: BookLevel[]): BookLevel | null {
   return bids.reduce<BookLevel | null>(
-    (best, level) => (best === null || level.priceMicros > best.priceMicros ? level : best),
+    (best, level) =>
+      level.sizeMicros > 0 &&
+      level.priceMicros > 0 &&
+      level.priceMicros < DECIMAL_SCALE &&
+      (best === null || level.priceMicros > best.priceMicros)
+        ? level
+        : best,
     null,
   );
 }
 
 function bestAsk(asks: BookLevel[]): BookLevel | null {
   return asks.reduce<BookLevel | null>(
-    (best, level) => (best === null || level.priceMicros < best.priceMicros ? level : best),
+    (best, level) =>
+      level.sizeMicros > 0 &&
+      level.priceMicros > 0 &&
+      level.priceMicros < DECIMAL_SCALE &&
+      (best === null || level.priceMicros < best.priceMicros)
+        ? level
+        : best,
     null,
   );
+}
+
+export function buildMonitoredCandidate(
+  token: MarketToken,
+  book: TokenOrderBook,
+  orderBudgetMicros: number,
+): TradeCandidate | null {
+  if (book.minOrderSizeMicros <= 0 || book.tickSizeMicros <= 0) {
+    return null;
+  }
+  const bid = bestBid(book.bids);
+  const ask = bestAsk(book.asks);
+  const executableBuyPriceMicros = ask?.priceMicros ?? 0;
+  const orderSizeMicros =
+    executableBuyPriceMicros === 0
+      ? 0
+      : calculateOrderSizeMicros(orderBudgetMicros, executableBuyPriceMicros);
+
+  return {
+    ...token,
+    candidateId: token.tokenId,
+    bestBidMicros: bid?.priceMicros ?? null,
+    bestAskMicros: ask?.priceMicros ?? null,
+    executableBuyPriceMicros,
+    // Retain the old property during the schema/API transition, but give it
+    // the executable taker price so no caller can accidentally post a maker bid.
+    makerBuyPriceMicros: executableBuyPriceMicros,
+    fixedSellPriceMicros:
+      executableBuyPriceMicros === 0
+        ? 0
+        : calculateFixedSellPriceMicros(
+            executableBuyPriceMicros,
+            book.tickSizeMicros,
+          ),
+    orderSizeMicros,
+    queueAheadSizeMicros: 0,
+    minOrderSizeMicros: book.minOrderSizeMicros,
+    tickSizeMicros: book.tickSizeMicros,
+  };
 }
 
 export function buildTradeCandidate(
@@ -73,46 +124,16 @@ export function buildTradeCandidate(
   minBuyPriceMicros: number,
   maxBuyPriceMicros: number,
 ): TradeCandidate | null {
-  const bid = bestBid(book.bids);
-  const ask = bestAsk(book.asks);
+  const candidate = buildMonitoredCandidate(token, book, orderBudgetMicros);
 
-  if (bid === null || bid.priceMicros > maxBuyPriceMicros) {
+  if (
+    candidate === null ||
+    candidate.bestAskMicros === null ||
+    candidate.bestAskMicros < minBuyPriceMicros ||
+    candidate.bestAskMicros > maxBuyPriceMicros ||
+    candidate.orderSizeMicros < candidate.minOrderSizeMicros
+  ) {
     return null;
   }
-
-  const improvedPrice = bid.priceMicros + book.tickSizeMicros;
-  const makerPrice =
-    improvedPrice <= maxBuyPriceMicros &&
-    (ask === null || improvedPrice < ask.priceMicros)
-      ? improvedPrice
-      : bid.priceMicros;
-
-  if (makerPrice < minBuyPriceMicros || makerPrice > maxBuyPriceMicros) {
-    return null;
-  }
-
-  const orderSizeMicros = calculateOrderSizeMicros(orderBudgetMicros, makerPrice);
-  if (orderSizeMicros < book.minOrderSizeMicros) {
-    return null;
-  }
-
-  const queueAheadSizeMicros = book.bids
-    .filter((level) => level.priceMicros === makerPrice)
-    .reduce((sum, level) => sum + level.sizeMicros, 0);
-
-  return {
-    ...token,
-    candidateId: `${token.tokenId}:${makerPrice}`,
-    bestBidMicros: bid.priceMicros,
-    bestAskMicros: ask?.priceMicros ?? null,
-    makerBuyPriceMicros: makerPrice,
-    fixedSellPriceMicros: calculateFixedSellPriceMicros(
-      makerPrice,
-      book.tickSizeMicros,
-    ),
-    orderSizeMicros,
-    queueAheadSizeMicros,
-    minOrderSizeMicros: book.minOrderSizeMicros,
-    tickSizeMicros: book.tickSizeMicros,
-  };
+  return candidate;
 }

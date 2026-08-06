@@ -67,8 +67,7 @@ export function filterEligibleEvent(
 
   if (
     durationMs < DAY_MS ||
-    durationDays > config.maxMarketDurationDays ||
-    progressPercent > config.maxMarketProgressPercent
+    durationDays > config.maxMarketDurationDays
   ) {
     return null;
   }
@@ -100,6 +99,29 @@ function marketIsOpen(market: Market): boolean {
   );
 }
 
+function marketFeeParameters(
+  market: Market,
+): { feesEnabled: boolean; feeRateMicros: number; feeExponent: number } | null {
+  if (market.trading.feesEnabled !== true) {
+    return { feesEnabled: false, feeRateMicros: 0, feeExponent: 1 };
+  }
+  const rate = Number(market.trading.feeSchedule?.rate);
+  const exponent = Number(market.trading.feeSchedule?.exponent);
+  if (
+    !Number.isFinite(rate) ||
+    rate < 0 ||
+    !Number.isSafeInteger(exponent) ||
+    exponent < 0
+  ) {
+    return null;
+  }
+  return {
+    feesEnabled: true,
+    feeRateMicros: Math.round(rate * 1_000_000),
+    feeExponent: exponent,
+  };
+}
+
 export function extractEligibleTokens(
   event: Event,
   eligibleEvent: EligibleEvent,
@@ -109,6 +131,10 @@ export function extractEligibleTokens(
 
   for (const market of event.markets) {
     if (!marketIsOpen(market) || market.conditionId === null) {
+      continue;
+    }
+    const feeParameters = marketFeeParameters(market);
+    if (feeParameters === null) {
       continue;
     }
 
@@ -133,6 +159,7 @@ export function extractEligibleTokens(
       durationDays: eligibleEvent.durationDays,
       progressPercent: eligibleEvent.progressPercent,
       gameStartsAt,
+      ...feeParameters,
     } as const;
 
     if (market.outcomes.yes.tokenId !== null) {

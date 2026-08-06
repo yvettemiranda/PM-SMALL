@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="color-scheme" content="light" />
     <title>PM-SMALL TEST</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -17,9 +17,7 @@
           <button id="live-mode" type="button" aria-pressed="false">LIVE</button>
         </div>
         <div class="topbar-actions">
-          <button id="run-toggle" class="button primary" type="button">
-            开始TEST
-          </button>
+          <button id="run-toggle" class="button primary" type="button">开始TEST</button>
           <button
             id="config-toggle"
             class="button secondary"
@@ -32,33 +30,40 @@
         </div>
       </header>
 
-      <div class="refresh-strip">
-        <span id="data-refresh-state" class="refresh-state" role="status" aria-live="polite">
-          数据加载中
-        </span>
-      </div>
-
       <p id="live-lock" class="inline-note" hidden>
-        LIVE 尚未开放；长期 TEST 验证完成前不能启用。
+        LIVE 尚未开放；纸面闭环和长期 TEST 验证完成前不能启用。
       </p>
 
       <section id="config-panel" class="config-panel" hidden>
         <form id="config-form">
           <div class="section-heading config-heading">
-            <h2>交易配置</h2>
-            <button id="config-close" class="text-button" type="button">关闭</button>
+            <div>
+              <span class="eyebrow">SETUP</span>
+              <h2>交易配置</h2>
+            </div>
+            <button id="config-close" class="icon-button" type="button" aria-label="关闭配置">×</button>
           </div>
 
           <div class="config-grid">
-            <fieldset>
+            <fieldset class="config-block category-block">
+              <legend>市场类别</legend>
+              <label class="all-category-option">
+                <input id="all-categories" type="checkbox" />
+                <span>全部符合条件</span>
+              </label>
+              <div id="category-options" class="chip-options" aria-label="选择市场类别"></div>
+              <p id="category-note" class="field-note">扫描完成后会显示可选类别。</p>
+            </fieldset>
+
+            <fieldset class="config-block">
               <legend>市场类型</legend>
               <div class="check-options">
-                <label><input id="binary-market" type="checkbox" value="2" />二元市场</label>
-                <label><input id="ternary-market" type="checkbox" value="3" />三元市场</label>
+                <label><input id="binary-market" type="checkbox" value="2" /><span>二元市场</span></label>
+                <label><input id="ternary-market" type="checkbox" value="3" /><span>三元市场</span></label>
               </div>
             </fieldset>
 
-            <label class="field">
+            <label class="field config-block">
               <span>最高买入价</span>
               <span class="price-input">
                 <span>≤</span>
@@ -75,10 +80,10 @@
               </span>
             </label>
 
-            <div class="range-fields">
+            <div class="range-fields config-block">
               <div class="duration-field">
                 <div class="range-heading">
-                  <span>市场总时长范围</span>
+                  <span>市场总时长</span>
                   <strong>1–<span id="duration-value">30</span>天</strong>
                 </div>
                 <input
@@ -93,105 +98,81 @@
                 />
                 <div id="duration-marks" class="range-marks" aria-hidden="true"></div>
               </div>
+            </div>
 
-              <div class="progress-filter-field">
-                <div class="range-heading">
-                  <span>市场进度上限</span>
-                  <strong>≤<span id="market-progress-value">20</span>%</strong>
-                </div>
-                <input
-                  id="market-progress-filter"
-                  type="range"
-                  min="1"
-                  max="100"
-                  step="1"
-                  value="20"
-                  aria-label="市场生命周期进度上限"
-                  aria-valuetext="不超过20%"
-                />
-                <div class="range-marks progress-marks" aria-hidden="true">
-                  <span>1</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span>
-                </div>
+            <div class="test-settings config-block">
+              <div class="subsection-heading">
+                <span>TEST 设置</span>
+                <small>仅影响模拟账户</small>
               </div>
+              <div class="money-fields">
+                <label class="field">
+                  <span>总模拟资金</span>
+                  <span class="unit-input">
+                    <input id="initial-capital" type="number" min="0.01" step="0.01" inputmode="decimal" />
+                    <span>U</span>
+                  </span>
+                </label>
+                <label class="field">
+                  <span>每单使用金额</span>
+                  <span class="unit-input">
+                    <input id="order-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
+                    <span>U</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">每单金额是同一结果、同一轮的累计现金上限，包含买入费用。</p>
+              <button id="reset-test" class="button danger" type="button">重置TEST</button>
             </div>
           </div>
 
           <div class="config-actions">
-            <button id="save-config" class="button primary save-config" type="submit">
-              保存并重新扫描
-            </button>
-            <button id="new-cycle" class="button secondary" type="button">
-              开始新一轮
-            </button>
+            <button id="save-config" class="button primary save-config" type="submit">保存配置</button>
           </div>
-          <p id="new-cycle-note" class="config-note">
-            新一轮只解锁已完成且尚未结算的市场；持仓、卖单和历史盈亏继续保留。
-          </p>
         </form>
       </section>
 
       <section id="portfolio" class="portfolio" aria-label="资金与盈亏">
-        <article>
-          <span>总资金</span>
-          <strong id="total-funds">—</strong>
-        </article>
-        <article>
-          <span>总盈亏</span>
-          <strong id="total-pnl">—</strong>
-        </article>
-        <article>
-          <span>已实现</span>
-          <strong id="realized-pnl">—</strong>
-        </article>
-        <article>
-          <span>未实现</span>
-          <strong id="unrealized-pnl">—</strong>
-        </article>
+        <article><span>总资金</span><strong id="total-funds">—</strong></article>
+        <article><span>总盈亏</span><strong id="total-pnl">—</strong></article>
+        <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
+        <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
       </section>
 
       <section class="panel">
         <div class="section-heading">
-          <h2>当前持仓</h2>
+          <div>
+            <span class="eyebrow">PORTFOLIO</span>
+            <h2>当前持仓</h2>
+          </div>
           <span id="position-count" class="count">0个</span>
         </div>
-        <div id="pending-buy-summary" class="order-summary" aria-live="polite"></div>
         <div id="positions" class="position-list" aria-live="polite"></div>
       </section>
 
       <section class="panel">
         <div class="section-heading scan-heading">
           <div class="scan-title">
-            <h2>扫描市场</h2>
-            <span id="scan-refresh-state" class="refresh-state" role="status" aria-live="polite">
-              等待首次扫描
-            </span>
+            <span class="eyebrow">DISCOVERY</span>
+            <div class="heading-line">
+              <h2>扫描市场</h2>
+              <span id="candidate-count" class="count">0个</span>
+            </div>
+            <span id="scan-refresh-state" class="scan-state" role="status" aria-live="polite">等待首次扫描</span>
           </div>
           <div class="sort-control">
-            <span>进度排序</span>
+            <span>进度</span>
             <div class="segmented" role="group" aria-label="市场进度排序">
-              <button type="button" data-sort="asc" aria-pressed="true">正序</button>
-              <button type="button" data-sort="desc" aria-pressed="false">倒序</button>
+              <button type="button" data-sort="ASC" aria-pressed="true">正序</button>
+              <button type="button" data-sort="DESC" aria-pressed="false">倒序</button>
             </div>
-          </div>
-        </div>
-
-        <div class="selection-toolbar">
-          <div class="selection-summary">
-            <strong>市场选择（可多选）</strong>
-            <span id="selection-count" class="count">已选0 / 0</span>
-          </div>
-          <div>
-            <button id="select-all" class="text-button" type="button">全选</button>
-            <button id="clear-all" class="text-button" type="button">清空</button>
           </div>
         </div>
 
         <div id="candidates" class="market-list" aria-live="polite"></div>
 
         <div class="load-more">
-          <button id="load-more" class="button secondary" type="button">
-            再显示20个
-          </button>
+          <button id="load-more" class="button secondary" type="button">再显示20个</button>
           <span id="display-count" class="count">当前显示0 / 0</span>
         </div>
       </section>

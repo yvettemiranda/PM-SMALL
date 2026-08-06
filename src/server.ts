@@ -3,6 +3,7 @@ import { loadConfig } from "./config.js";
 import { MarketScanner } from "./domain/market-scanner.js";
 import { PaperDatabase } from "./infrastructure/db/database.js";
 import { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
+import { TestExecutor } from "./infrastructure/execution/test-executor.js";
 import { PolymarketMarketDataSource } from "./infrastructure/polymarket/market-data.js";
 import { PolymarketMarketStreamSource } from "./infrastructure/polymarket/market-stream.js";
 import { CandidateService } from "./services/candidate-service.js";
@@ -25,7 +26,8 @@ const marketData = new PolymarketMarketDataSource();
 const tradingPreferences = new PaperTradingPreferencesService(database, config);
 const scanner = new MarketScanner(marketData, config, tradingPreferences);
 const candidates = new CandidateService(scanner, config.scanIntervalMs);
-const paperMarketProcessor = new PaperMarketProcessor(database);
+const testExecutor = new TestExecutor(database);
+const paperMarketProcessor = new PaperMarketProcessor(database, testExecutor);
 const marketStream = new MarketStreamService(
   new PolymarketMarketStreamSource(),
   candidates,
@@ -40,6 +42,7 @@ const paperAutomation = new PaperAutomationService(
   marketStream,
   config,
   tradingPreferences,
+  testExecutor,
 );
 const paperSettlement = new PaperSettlementService(
   marketData,
@@ -57,6 +60,7 @@ const app = buildApp({
   candidates,
   tradingPreferences,
   liveExecutor,
+  testExecutor,
   marketStream,
   paperAutomation,
   paperSettlement,

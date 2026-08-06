@@ -1,5 +1,10 @@
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 import type {
+  BookLevel,
+  TokenOrderBook,
+  TradeCandidate,
+} from "../domain/types.js";
+import type {
   MarketStreamHandle,
   MarketStreamSource,
 } from "../infrastructure/polymarket/market-stream.js";
@@ -31,6 +36,13 @@ export interface PaperMarketRuntime {
   refreshSubscriptions(): void;
   isTokenReady(tokenId: string): boolean;
   getBestBidMicros?(tokenId: string): number | null;
+  getBestAskMicros?(tokenId: string): number | null;
+  getOrderBookRevision?(tokenId: string): number | null;
+  getOrderBook?(candidate: TradeCandidate): TokenOrderBook | null;
+  consumeTestBuyLiquidity?(
+    tokenId: string,
+    consumedAsks: readonly BookLevel[],
+  ): void;
 }
 
 export class MarketStreamService implements PaperMarketRuntime {
@@ -155,6 +167,33 @@ export class MarketStreamService implements PaperMarketRuntime {
     return this.connected ? this.processor.getBestBidMicros(tokenId) : null;
   }
 
+  public getBestAskMicros(tokenId: string): number | null {
+    return this.connected ? this.processor.getBestAskMicros(tokenId) : null;
+  }
+
+  public getOrderBookRevision(tokenId: string): number | null {
+    return this.connected ? this.processor.getOrderBookRevision(tokenId) : null;
+  }
+
+  public getOrderBook(candidate: TradeCandidate): TokenOrderBook | null {
+    return this.connected ? this.processor.getOrderBook(candidate) : null;
+  }
+
+  public consumeTestBuyLiquidity(
+    tokenId: string,
+    consumedAsks: readonly BookLevel[],
+  ): void {
+    if (!this.connected) {
+      return;
+    }
+    this.processor.consumeTestBuyLiquidity(tokenId, consumedAsks);
+    this.candidates.updateQuote(
+      tokenId,
+      this.processor.getBestBidMicros(tokenId),
+      this.processor.getBestAskMicros(tokenId),
+    );
+  }
+
   private requestRestart(): void {
     this.restartRequested = true;
     if (this.restartLoop !== null) {
@@ -230,6 +269,11 @@ export class MarketStreamService implements PaperMarketRuntime {
           return;
         }
         this.processor.handle(event);
+        this.candidates.updateQuote(
+          event.tokenId,
+          this.processor.getBestBidMicros(event.tokenId),
+          this.processor.getBestAskMicros(event.tokenId),
+        );
         this.recordFullSnapshotIfReady(tokenIds);
       }
     } catch (error) {

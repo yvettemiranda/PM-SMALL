@@ -5,7 +5,7 @@ import type { MarketDataSource } from "../src/infrastructure/polymarket/market-d
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
 describe("MarketScanner", () => {
-  it("uses the current PAPER UI filters for each scan", async () => {
+  it("uses current duration/type filters while ignoring progress as an eligibility cut-off", async () => {
     const requestedWindows: unknown[] = [];
     const source: MarketDataSource = {
       listOpenEvents: async (request) => {
@@ -32,6 +32,10 @@ describe("MarketScanner", () => {
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 7,
       maxMarketProgressPercent: 5,
+      allCategories: true,
+      selectedCategories: [] as string[],
+      candidateSortDirection: "ASC" as const,
+      orderBudgetMicros: 1_000_000,
     };
     const scanner = new MarketScanner(source, testConfig, {
       getMarketScanPreferences: () => filters,
@@ -40,9 +44,7 @@ describe("MarketScanner", () => {
 
     expect(await scanner.scan(now)).toEqual([]);
     filters = { ...filters, maxMarketDurationDays: 14 };
-    expect(await scanner.scan(now)).toEqual([]);
-    filters = { ...filters, maxMarketProgressPercent: 20 };
-    expect(await scanner.scan(now)).toHaveLength(1);
+    expect(await scanner.scan(now)).toHaveLength(2);
     filters = { ...filters, resultCounts: [3] };
     expect(await scanner.scan(now)).toEqual([]);
 
@@ -76,7 +78,7 @@ describe("MarketScanner", () => {
     expect(signals).toEqual([controller.signal, controller.signal]);
   });
 
-  it("returns candidates from every eligible token", async () => {
+  it("monitors every structurally eligible token without a local market cap", async () => {
     const events = Array.from({ length: 121 }, (_, index) =>
       makeEvent({
         id: `event-${index}`,
@@ -151,9 +153,13 @@ describe("MarketScanner", () => {
       new Date("2026-01-02T00:00:00.000Z"),
     );
 
-    expect(candidates).toHaveLength(121);
-    expect(candidates[0]?.tokenId).toBe("yes-token-0");
-    expect(candidates.at(-1)?.tokenId).toBe("yes-token-120");
+    expect(candidates).toHaveLength(242);
+    expect(candidates.map((candidate) => candidate.tokenId)).toContain(
+      "yes-token-120",
+    );
+    expect(candidates.map((candidate) => candidate.tokenId)).toContain(
+      "no-token-120",
+    );
     expect(requestedWindow).toEqual({
       pageSize: 50,
       startDateMin: "2025-12-03T00:00:00.000Z",
@@ -195,6 +201,7 @@ describe("MarketScanner", () => {
       eligibleTokenCount: 242,
       orderBookCount: 242,
       candidateCount: 121,
+      monitoredTokenCount: 242,
       durationMs: expect.any(Number),
     });
   });
@@ -255,13 +262,20 @@ describe("MarketScanner", () => {
         ),
     };
 
-    const candidates = await new MarketScanner(source, testConfig).scan(
+    const scanner = new MarketScanner(source, testConfig);
+    const candidates = await scanner.scan(
       new Date("2026-01-02T00:00:00.000Z"),
     );
 
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]?.direction).toBe("YES");
-    expect(candidates[0]?.makerBuyPriceMicros).toBe(20_000);
-    expect(candidates[0]?.fixedSellPriceMicros).toBe(30_000);
+    expect(candidates).toHaveLength(2);
+    const yes = candidates.find((candidate) => candidate.direction === "YES");
+    const no = candidates.find((candidate) => candidate.direction === "NO");
+    expect(yes?.executableBuyPriceMicros).toBe(30_000);
+    expect(yes?.fixedSellPriceMicros).toBe(50_000);
+    expect(no?.executableBuyPriceMicros).toBe(990_000);
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      candidateCount: 1,
+      monitoredTokenCount: 2,
+    });
   });
 });

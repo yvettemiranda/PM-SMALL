@@ -3,6 +3,7 @@ import type {
   MarketScanDiagnostics,
 } from "../domain/market-scanner.js";
 import type { TradeCandidate } from "../domain/types.js";
+import { calculateFixedSellPriceMicros } from "../domain/price.js";
 
 export type CandidateSnapshot = {
   candidates: TradeCandidate[];
@@ -20,7 +21,9 @@ export class CandidateService {
   private activeScan: Promise<CandidateSnapshot> | null = null;
   private activeScanController: AbortController | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private started = false;
   private readonly listeners = new Set<(snapshot: CandidateSnapshot) => void>();
+  private readonly quoteListeners = new Set<(tokenId: string) => void>();
 
   public constructor(
     private readonly scanner: CandidateScanner,
@@ -28,23 +31,34 @@ export class CandidateService {
   ) {}
 
   public start(): void {
-    if (this.timer !== null) {
+    if (this.started) {
       return;
     }
-
-    void this.refresh();
-    this.timer = setInterval(() => void this.refresh(), this.intervalMs);
-    this.timer.unref();
+    this.started = true;
+    void this.runScheduledRefresh();
   }
 
   public stop(): void {
+    this.started = false;
     if (this.timer !== null) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
     this.activeScanController?.abort(
       new Error("Candidate market scan stopped"),
     );
+  }
+
+  private async runScheduledRefresh(): Promise<void> {
+    await this.refresh();
+    if (!this.started) {
+      return;
+    }
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.runScheduledRefresh();
+    }, this.intervalMs);
+    this.timer.unref();
   }
 
   public getSnapshot(): CandidateSnapshot {
@@ -67,10 +81,39 @@ export class CandidateService {
     );
   }
 
+  public updateQuote(
+    tokenId: string,
+    bestBidMicros: number | null,
+    bestAskMicros: number | null,
+  ): void {
+    const candidate = this.candidates.find((item) => item.tokenId === tokenId);
+    if (candidate === undefined) {
+      return;
+    }
+    candidate.bestBidMicros = bestBidMicros;
+    candidate.bestAskMicros = bestAskMicros;
+    if (bestAskMicros !== null) {
+      candidate.executableBuyPriceMicros = bestAskMicros;
+      candidate.makerBuyPriceMicros = bestAskMicros;
+      candidate.fixedSellPriceMicros = calculateFixedSellPriceMicros(
+        bestAskMicros,
+        candidate.tickSizeMicros,
+      );
+    }
+    for (const listener of this.quoteListeners) {
+      listener(tokenId);
+    }
+  }
+
   public subscribe(listener: (snapshot: CandidateSnapshot) => void): () => void {
     this.listeners.add(listener);
     listener(this.getSnapshot());
     return () => this.listeners.delete(listener);
+  }
+
+  public subscribeQuotes(listener: (tokenId: string) => void): () => void {
+    this.quoteListeners.add(listener);
+    return () => this.quoteListeners.delete(listener);
   }
 
   public refresh(): Promise<CandidateSnapshot> {

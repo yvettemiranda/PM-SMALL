@@ -1,0 +1,56 @@
+import type {
+  BookLevel,
+  PaperOrder,
+  TokenOrderBook,
+  TradeCandidate,
+} from "./types.js";
+
+export type ExecutionMode = "TEST" | "LIVE";
+export type ImmediateBuyOutcome = "FILLED" | "PARTIAL" | "NO_FILL" | "BLOCKED";
+
+export type ConsumedBookLevel = {
+  priceMicros: number;
+  sizeMicros: number;
+};
+
+export type ImmediateBuyIntent = {
+  candidate: TradeCandidate;
+  book: TokenOrderBook;
+  maxPriceMicros: number;
+  orderBudgetMicros: number;
+  feeRateMicros: number;
+  feeExponent: number;
+};
+
+export type ImmediateBuyExecution = {
+  outcome: ImmediateBuyOutcome;
+  order: PaperOrder | null;
+  createdSellOrders: PaperOrder[];
+  spentMicros: number;
+  feeMicros: number;
+  consumedAsks: ConsumedBookLevel[];
+};
+
+export type TargetSellIntent = {
+  tokenId: string;
+  bids: readonly BookLevel[];
+  minOrderSizeMicros: number;
+  feeRateMicros: number;
+  feeExponent: number;
+};
+
+export type TargetSellExecution = {
+  filledSizeMicros: number;
+  grossProceedsMicros: number;
+  netProceedsMicros: number;
+  feeMicros: number;
+  filledOrderCount: number;
+  consumedBids: ConsumedBookLevel[];
+};
+
+export interface TradingExecutionAdapter {
+  readonly mode: ExecutionMode;
+  readonly enabled: boolean;
+  executeBuy(intent: ImmediateBuyIntent): ImmediateBuyExecution;
+  executeTargetSells(intent: TargetSellIntent): TargetSellExecution;
+}

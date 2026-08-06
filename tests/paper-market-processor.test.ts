@@ -15,6 +15,145 @@ describe("PaperMarketProcessor", () => {
 
   afterEach(() => database.close());
 
+  it("executes a TEST target sell from the latest executable bid without waiting for a trade event", () => {
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: {
+        tokenId: candidate.tokenId,
+        conditionId: candidate.conditionId,
+        bids: [],
+        asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        tickSizeMicros: 10_000,
+        isNegativeRisk: false,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    processor.handle({
+      type: "book",
+      tokenId: candidate.tokenId,
+      bids: [{ priceMicros: 35_000, sizeMicros: 10_000_000 }],
+      asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
+      timestampMs: 100,
+    });
+
+    expect(database.listCurrentPaperPositionViews()).toEqual([]);
+    expect(database.listPaperOrders()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          side: "SELL",
+          executionKind: "TARGET",
+          status: "FILLED",
+        }),
+      ]),
+    );
+    expect(processor.getStatus().paperSellFillCount).toBe(1);
+  });
+
+  it("continues reducing an existing position after validation pauses new risk", () => {
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: {
+        tokenId: candidate.tokenId,
+        conditionId: candidate.conditionId,
+        bids: [],
+        asks: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        tickSizeMicros: 10_000,
+        isNegativeRisk: false,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+    database.pausePaperStrategyForValidationFailure([
+      "Injected validation fault",
+    ]);
+
+    processor.handle({
+      type: "book",
+      tokenId: candidate.tokenId,
+      bids: [{ priceMicros: 35_000, sizeMicros: 100_000_000 }],
+      asks: [],
+      timestampMs: 100,
+    });
+
+    expect(database.getStrategyState().status).toBe("PAUSED");
+    expect(database.listCurrentPaperPositionViews()).toEqual([]);
+    expect(database.listPaperOrders()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          side: "SELL",
+          executionKind: "TARGET",
+          status: "FILLED",
+        }),
+      ]),
+    );
+  });
+
+  it("does not reuse consumed bid depth when an unrelated quote changes", () => {
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: {
+        tokenId: candidate.tokenId,
+        conditionId: candidate.conditionId,
+        bids: [],
+        asks: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        tickSizeMicros: 10_000,
+        isNegativeRisk: false,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    processor.handle({
+      type: "book",
+      tokenId: candidate.tokenId,
+      bids: [{ priceMicros: 35_000, sizeMicros: 10_000_000 }],
+      asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
+      timestampMs: 100,
+    });
+    expect(database.listCurrentPaperPositionViews()[0]?.quantityMicros).toBe(
+      40_000_000,
+    );
+
+    processor.handle({
+      type: "price_change",
+      tokenId: candidate.tokenId,
+      side: "SELL",
+      priceMicros: 40_000,
+      sizeMicros: 9_000_000,
+      timestampMs: 101,
+    });
+
+    expect(database.listCurrentPaperPositionViews()[0]?.quantityMicros).toBe(
+      40_000_000,
+    );
+  });
+
   it("rebases from a book and creates one sell from a deduplicated buy fill", () => {
     const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
     processor.handle({

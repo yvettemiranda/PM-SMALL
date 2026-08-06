@@ -42,6 +42,8 @@ describe("PaperDatabase", () => {
       {
         tokenId: "yes-token",
         makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+        category: null,
         resultCount: 2,
         durationDays: 10,
         openedAt: "2026-01-01T00:00:00.000Z",
@@ -274,6 +276,10 @@ describe("PaperDatabase", () => {
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 20,
       candidatesSelectedByDefault: true,
+      allCategories: true,
+      selectedCategories: [],
+      candidateSortDirection: "ASC",
+      orderBudgetMicros: 1_000_000,
     });
     currentDatabase.close();
 
@@ -289,7 +295,7 @@ describe("PaperDatabase", () => {
     const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
-        maxMarketProgressPercent: 20,
+        maxMarketProgressPercent: 100,
       });
       const schemaVersion = new Database(databasePath, { readonly: true });
       try {
@@ -297,10 +303,78 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 8 });
+        ).toEqual({ version: 10 });
       } finally {
         schemaVersion.close();
       }
+    } finally {
+      upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels and refunds legacy maker buys when upgrading to TEST FAK execution", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-fak-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const legacyDatabase = new PaperDatabase(databasePath, 100_000_000);
+    legacyDatabase.setStrategyStatus("RUNNING");
+    const legacyBuy = legacyDatabase.placePaperBuy(
+      makeCandidate(),
+      100_000_000,
+    );
+    expect(legacyDatabase.getStrategyState()).toMatchObject({
+      availableCashMicros: 99_000_000,
+      reservedCashMicros: 1_000_000,
+    });
+    legacyDatabase.close();
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase.exec(`
+        DROP INDEX IF EXISTS idx_paper_orders_execution_active;
+        ALTER TABLE paper_orders DROP COLUMN execution_kind;
+        ALTER TABLE paper_orders DROP COLUMN cash_limit_micros;
+        ALTER TABLE paper_orders DROP COLUMN fee_micros;
+        ALTER TABLE paper_fills DROP COLUMN net_size_micros;
+        ALTER TABLE paper_fills DROP COLUMN fee_micros;
+        ALTER TABLE paper_positions DROP COLUMN cycle_spend_micros;
+        ALTER TABLE paper_positions DROP COLUMN gross_buy_size_micros;
+        ALTER TABLE paper_positions DROP COLUMN gross_buy_notional_micros;
+        ALTER TABLE paper_market_metadata DROP COLUMN category;
+        ALTER TABLE paper_market_metadata DROP COLUMN fees_enabled;
+        ALTER TABLE paper_market_metadata DROP COLUMN fee_rate_micros;
+        ALTER TABLE paper_market_metadata DROP COLUMN fee_exponent;
+        ALTER TABLE paper_market_metadata DROP COLUMN min_order_size_micros;
+        ALTER TABLE paper_market_metadata DROP COLUMN tick_size_micros;
+        ALTER TABLE paper_trading_preferences DROP COLUMN all_categories_enabled;
+        ALTER TABLE paper_trading_preferences DROP COLUMN selected_categories_json;
+        ALTER TABLE paper_trading_preferences DROP COLUMN candidate_sort_direction;
+        ALTER TABLE paper_trading_preferences DROP COLUMN order_budget_micros;
+        DELETE FROM schema_migrations WHERE version IN (9, 10);
+      `);
+    } finally {
+      rawDatabase.close();
+    }
+
+    const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(upgradedDatabase.getStrategyState()).toMatchObject({
+        status: "PAUSED",
+        availableCashMicros: 100_000_000,
+        reservedCashMicros: 0,
+      });
+      expect(upgradedDatabase.listPaperOrders()).toContainEqual(
+        expect.objectContaining({
+          id: legacyBuy.id,
+          executionKind: "LEGACY_MAKER",
+          status: "CANCELLED",
+        }),
+      );
+      expect(
+        upgradedDatabase
+          .listActivePaperOrders()
+          .filter((order) => order.side === "BUY"),
+      ).toEqual([]);
     } finally {
       upgradedDatabase.close();
       rmSync(directory, { recursive: true, force: true });

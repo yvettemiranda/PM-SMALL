@@ -1,5 +1,6 @@
 export type TradeDirection = "YES" | "NO";
 export type PaperOrderSide = "BUY" | "SELL";
+export type OrderExecutionKind = "LEGACY_MAKER" | "FAK" | "TARGET";
 export type PaperOrderStatus =
   | "OPEN"
   | "PARTIALLY_FILLED"
@@ -36,6 +37,9 @@ export type MarketToken = {
   durationDays: number;
   progressPercent: number;
   gameStartsAt: string | null;
+  feesEnabled: boolean;
+  feeRateMicros: number;
+  feeExponent: number;
 };
 
 export type BookLevel = {
@@ -55,11 +59,14 @@ export type TokenOrderBook = {
 
 export type TradeCandidate = MarketToken & {
   candidateId: string;
-  bestBidMicros: number;
+  bestBidMicros: number | null;
   bestAskMicros: number | null;
+  executableBuyPriceMicros: number;
+  /** @deprecated Kept only for database upgrade compatibility. */
   makerBuyPriceMicros: number;
   fixedSellPriceMicros: number;
   orderSizeMicros: number;
+  /** @deprecated FAK orders never wait behind a maker queue. */
   queueAheadSizeMicros: number;
   minOrderSizeMicros: number;
   tickSizeMicros: number;
@@ -84,6 +91,9 @@ export type PaperOrder = {
   queueBaselineFilledSizeMicros: number;
   observedTradeSizeMicros: number;
   status: PaperOrderStatus;
+  executionKind: OrderExecutionKind;
+  cashLimitMicros: number;
+  feeMicros: number;
   createdAt: string;
   updatedAt: string;
 };

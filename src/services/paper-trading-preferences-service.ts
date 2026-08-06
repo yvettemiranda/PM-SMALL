@@ -1,5 +1,10 @@
 import type { AppConfig } from "../config.js";
 import type { MarketScanPreferences } from "../domain/market-scanner.js";
+import { calculateOrderSizeMicros } from "../domain/price.js";
+import {
+  sortTradeCandidates,
+  type CandidateSortDirection,
+} from "../domain/trading-strategy.js";
 import type { TradeCandidate } from "../domain/types.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 
@@ -11,6 +16,10 @@ export type PaperMarketResultCount = 2 | 3;
 
 export type PaperTradingPreferencesSnapshot = {
   resultCounts: PaperMarketResultCount[];
+  allCategories: boolean;
+  selectedCategories: string[];
+  candidateSortDirection: CandidateSortDirection;
+  orderBudgetMicros: number;
   maxBuyPriceMicros: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
@@ -21,7 +30,12 @@ export type PaperTradingPreferencesSnapshot = {
 type MarketFilterUpdate = Pick<
   PaperTradingPreferencesSnapshot,
   "resultCounts" | "maxBuyPriceMicros" | "maxMarketDurationDays"
-> & { maxMarketProgressPercent?: number };
+> & {
+  allCategories?: boolean;
+  selectedCategories?: readonly string[];
+  candidateSortDirection?: CandidateSortDirection;
+  orderBudgetMicros?: number;
+};
 
 type NormalizedMarketFilters = Pick<
   PaperTradingPreferencesSnapshot,
@@ -29,6 +43,10 @@ type NormalizedMarketFilters = Pick<
   | "maxBuyPriceMicros"
   | "maxMarketDurationDays"
   | "maxMarketProgressPercent"
+  | "allCategories"
+  | "selectedCategories"
+  | "candidateSortDirection"
+  | "orderBudgetMicros"
 >;
 
 export type PaperMarketFilterUpdateResult = {
@@ -39,20 +57,29 @@ export type PaperMarketFilterUpdateResult = {
 export class PaperTradingPreferencesService {
   private snapshot: PaperTradingPreferencesSnapshot;
   private selectionOverrides: Map<string, boolean>;
+  private readonly defaults: Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
+  private readonly defaultInitialCapitalMicros: number;
 
   public constructor(
     private readonly database: PaperDatabase,
     config: AppConfig,
   ) {
-    const defaults = {
+    this.defaultInitialCapitalMicros = config.initialCapitalMicros;
+    this.defaults = {
       resultCounts: [2, 3],
+      allCategories: true,
+      selectedCategories: [],
+      candidateSortDirection: "ASC",
+      orderBudgetMicros: config.orderBudgetMicros,
       maxBuyPriceMicros: config.maxBuyPriceMicros,
       maxMarketDurationDays: config.maxMarketDurationDays,
-      maxMarketProgressPercent: config.maxMarketProgressPercent,
+      // Lifecycle progress is an ordering choice, not a hidden eligibility
+      // cut-off. Ended markets are already excluded independently.
+      maxMarketProgressPercent: 100,
       candidatesSelectedByDefault: true,
     } satisfies Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
-    validateMarketFilterValues(defaults);
-    this.snapshot = database.ensurePaperTradingPreferences(defaults);
+    validateMarketFilterValues(this.defaults);
+    this.snapshot = database.ensurePaperTradingPreferences(this.defaults);
     validateMarketFilterValues(this.snapshot);
     this.selectionOverrides = new Map(
       database
@@ -62,7 +89,25 @@ export class PaperTradingPreferencesService {
   }
 
   public getSnapshot(): PaperTradingPreferencesSnapshot {
-    return { ...this.snapshot, resultCounts: [...this.snapshot.resultCounts] };
+    return {
+      ...this.snapshot,
+      resultCounts: [...this.snapshot.resultCounts],
+      selectedCategories: [...this.snapshot.selectedCategories],
+    };
+  }
+
+  public resetTestState(): void {
+    const result = this.database.resetTestState(
+      this.defaultInitialCapitalMicros,
+      this.defaults,
+    );
+    this.snapshot = result.preferences;
+    this.selectionOverrides.clear();
+  }
+
+  public reload(): void {
+    this.snapshot = this.database.getPaperTradingPreferences();
+    this.selectionOverrides.clear();
   }
 
   public getMarketScanPreferences(): MarketScanPreferences {
@@ -71,7 +116,36 @@ export class PaperTradingPreferencesService {
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
       maxMarketDurationDays: this.snapshot.maxMarketDurationDays,
       maxMarketProgressPercent: this.snapshot.maxMarketProgressPercent,
+      allCategories: this.snapshot.allCategories,
+      selectedCategories: [...this.snapshot.selectedCategories],
+      candidateSortDirection: this.snapshot.candidateSortDirection,
+      orderBudgetMicros: this.snapshot.orderBudgetMicros,
     };
+  }
+
+  public getMaxBuyPriceMicros(): number {
+    return this.snapshot.maxBuyPriceMicros;
+  }
+
+  public getOrderBudgetMicros(): number {
+    return this.snapshot.orderBudgetMicros;
+  }
+
+  public getOrderedCandidates(
+    candidates: readonly TradeCandidate[],
+    now: Date = new Date(),
+  ): TradeCandidate[] {
+    const currentCandidates = candidates
+      .map((candidate) => ({
+        ...candidate,
+        progressPercent:
+          currentProgressPercent(candidate, now) ?? candidate.progressPercent,
+      }))
+      .filter((candidate) => this.candidateMatchesMarketFilters(candidate, now));
+    return sortTradeCandidates(
+      currentCandidates,
+      this.snapshot.candidateSortDirection,
+    );
   }
 
   public updateMarketFilters(
@@ -83,10 +157,23 @@ export class PaperTradingPreferencesService {
       resultCounts,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       maxMarketDurationDays: update.maxMarketDurationDays,
-      maxMarketProgressPercent:
-        update.maxMarketProgressPercent ?? this.snapshot.maxMarketProgressPercent,
+      maxMarketProgressPercent: 100,
+      allCategories: update.allCategories ?? this.snapshot.allCategories,
+      selectedCategories: normalizeCategories(
+        update.selectedCategories ?? this.snapshot.selectedCategories,
+      ),
+      candidateSortDirection:
+        update.candidateSortDirection ?? this.snapshot.candidateSortDirection,
+      orderBudgetMicros:
+        update.orderBudgetMicros ?? this.snapshot.orderBudgetMicros,
     };
     validateMarketFilterValues(normalizedUpdate);
+    if (
+      normalizedUpdate.orderBudgetMicros >
+      this.database.getStrategyState().initialCapitalMicros
+    ) {
+      throw new Error("Per-order TEST amount cannot exceed total TEST capital");
+    }
     const result = this.database.updatePaperTradingPreferences(
       {
         ...this.snapshot,
@@ -111,7 +198,12 @@ export class PaperTradingPreferencesService {
   public candidateMatchesMarketFilters(
     candidate: Pick<
       TradeCandidate,
-      "resultCount" | "makerBuyPriceMicros" | "durationDays" | "progressPercent"
+      | "resultCount"
+      | "category"
+      | "bestAskMicros"
+      | "durationDays"
+      | "progressPercent"
+      | "minOrderSizeMicros"
     >,
     now?: Date,
   ): boolean {
@@ -119,10 +211,7 @@ export class PaperTradingPreferencesService {
   }
 
   public isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean {
-    return (
-      this.candidateMatchesMarketFilters(candidate, now) &&
-      this.isTokenSelected(candidate.tokenId)
-    );
+    return this.candidateMatchesMarketFilters(candidate, now);
   }
 
   public reconcileActiveBuys(now: Date = new Date()): number {
@@ -170,9 +259,11 @@ export class PaperTradingPreferencesService {
 function marketMatchesFilters(
   market: {
     resultCount: PaperMarketResultCount | null;
-    makerBuyPriceMicros: number;
+    category?: string | null;
+    bestAskMicros: number | null;
     durationDays: number | null;
     progressPercent?: number | null;
+    minOrderSizeMicros?: number | null;
     openedAt?: string | null;
     endsAt?: string | null;
   },
@@ -184,9 +275,26 @@ function marketMatchesFilters(
       ? filters.resultCounts.includes(2) && filters.resultCounts.includes(3)
       : filters.resultCounts.includes(market.resultCount);
   const progressPercent = currentProgressPercent(market, now);
+  const categoryMatches =
+    filters.allCategories ||
+    (market.category !== null &&
+      market.category !== undefined &&
+      filters.selectedCategories.includes(market.category));
+  const orderSizeMatches =
+    market.bestAskMicros !== null &&
+    (market.minOrderSizeMicros === null ||
+      market.minOrderSizeMicros === undefined ||
+      calculateOrderSizeMicros(
+        filters.orderBudgetMicros,
+        market.bestAskMicros,
+      ) >= market.minOrderSizeMicros);
   return (
     resultCountMatches &&
-    market.makerBuyPriceMicros <= filters.maxBuyPriceMicros &&
+    categoryMatches &&
+    market.bestAskMicros !== null &&
+    market.bestAskMicros > 0 &&
+    market.bestAskMicros <= filters.maxBuyPriceMicros &&
+    orderSizeMatches &&
     market.durationDays !== null &&
     market.durationDays >= 1 &&
     market.durationDays <= filters.maxMarketDurationDays &&
@@ -226,6 +334,7 @@ function validateMarketFilterValues(
   values: Pick<
     PaperTradingPreferencesSnapshot,
     "maxBuyPriceMicros" | "maxMarketDurationDays" | "maxMarketProgressPercent"
+    | "orderBudgetMicros"
   >,
 ): void {
   if (
@@ -234,7 +343,7 @@ function validateMarketFilterValues(
     values.maxBuyPriceMicros < 10_000 ||
     values.maxBuyPriceMicros > 30_000
   ) {
-    throw new Error("Maximum PAPER buy price must be a whole cent between 1 and 3 cents");
+    throw new Error("Maximum TEST buy price must be a whole cent between 1 and 3 cents");
   }
   if (!MARKET_DURATION_DAY_OPTIONS.includes(values.maxMarketDurationDays as never)) {
     throw new Error("Market duration must use a supported slider value");
@@ -246,14 +355,26 @@ function validateMarketFilterValues(
   ) {
     throw new Error("Market progress must be a whole percent between 1 and 100");
   }
+  if (!Number.isSafeInteger(values.orderBudgetMicros) || values.orderBudgetMicros <= 0) {
+    throw new Error("Per-order TEST amount must be positive");
+  }
 }
 
 function normalizeResultCounts(
   resultCounts: readonly PaperMarketResultCount[],
 ): PaperMarketResultCount[] {
   const normalized = Array.from(new Set(resultCounts)).sort();
+  if (normalized.length === 0) {
+    throw new Error("Select at least one TEST market type");
+  }
   if (normalized.some((resultCount) => resultCount !== 2 && resultCount !== 3)) {
-    throw new Error("PAPER market types may only contain binary or ternary events");
+    throw new Error("TEST market types may only contain binary or ternary events");
   }
   return normalized;
+}
+
+function normalizeCategories(categories: readonly string[]): string[] {
+  return Array.from(
+    new Set(categories.map((category) => category.trim()).filter(Boolean)),
+  ).sort((left, right) => left.localeCompare(right));
 }

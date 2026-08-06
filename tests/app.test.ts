@@ -1,14 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { CandidateScanner } from "../src/domain/market-scanner.js";
+import type { TokenOrderBook, TradeCandidate } from "../src/domain/types.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { LiveExecutorDisabled } from "../src/infrastructure/execution/live-executor-disabled.js";
 import { CandidateService } from "../src/services/candidate-service.js";
-import type { PaperAutomationRuntime } from "../src/services/paper-automation-service.js";
 import type {
   MarketStreamStatus,
   PaperMarketRuntime,
@@ -20,335 +16,369 @@ describe("HTTP app", () => {
   const resources: Array<{ close: () => void | Promise<void> }> = [];
 
   afterEach(async () => {
-    for (const resource of resources.splice(0)) await resource.close();
+    for (const resource of resources.splice(0).reverse()) await resource.close();
   });
 
-  it("starts in paper mode and creates a virtual buy", async () => {
-    const scanner: CandidateScanner = {
-      scan: async () => [makeCurrentCandidate()],
-    };
-    const candidates = new CandidateService(scanner, 15_000);
-    const database = new PaperDatabase(":memory:", 100_000_000);
-    const tradingPreferences = new PaperTradingPreferencesService(
-      database,
-      testConfig,
-    );
-    const app = buildApp({
-      config: testConfig,
-      database,
-      candidates,
-      tradingPreferences,
-      liveExecutor: new LiveExecutorDisabled(),
-    });
-    resources.push(app, database);
+  it("exposes TEST as the only enabled execution mode and a compact dashboard", async () => {
+    const { app, candidates } = makeTestApp([makeCurrentCandidate()]);
+    await candidates.refresh();
+
+    const health = await app.inject({ method: "GET", url: "/api/health" });
+    expect(health.json()).toEqual({ status: "ok", mode: "TEST" });
 
     const status = await app.inject({ method: "GET", url: "/api/status" });
-    expect(status.statusCode).toBe(200);
-    expect(status.json().liveExecutionEnabled).toBe(false);
-    expect(status.json().version).toBe("0.4.0");
-    expect(status.json().paperSettlement).toMatchObject({
-      running: false,
-      settledMarketCount: 0,
-    });
-    expect(status.json().paperValidation).toMatchObject({
-      running: false,
-      validationCount: 0,
-      lastResult: null,
-    });
-    expect(status.json().runtime).toEqual({
-      uptimeSeconds: expect.any(Number),
-      rssBytes: expect.any(Number),
-      heapTotalBytes: expect.any(Number),
-      heapUsedBytes: expect.any(Number),
-      externalBytes: expect.any(Number),
+    expect(status.json()).toMatchObject({
+      version: "0.5.0",
+      executionMode: "TEST",
+      liveExecutionEnabled: false,
+      strategy: { mode: "TEST", status: "PAUSED" },
     });
 
-    const compactStatus = await app.inject({
+    const dashboard = await app.inject({
       method: "GET",
-      url: "/api/status?compact=true",
+      url: "/api/dashboard?limit=20",
     });
-    expect(compactStatus.statusCode).toBe(200);
-    expect(compactStatus.json().marketScan).toMatchObject({
-      candidateCount: 0,
-      lastScanAt: null,
-    });
-    expect(compactStatus.json().marketScan).not.toHaveProperty("candidates");
-    expect(compactStatus.json().runtime).toEqual({
-      uptimeSeconds: expect.any(Number),
-      rssBytes: expect.any(Number),
-      heapTotalBytes: expect.any(Number),
-      heapUsedBytes: expect.any(Number),
-      externalBytes: expect.any(Number),
-    });
-
-    const validation = await app.inject({
-      method: "GET",
-      url: "/api/paper/validation",
-    });
-    expect(validation.statusCode).toBe(200);
-    expect(validation.json().validation).toMatchObject({
-      passed: true,
-      sqliteIntegrity: "ok",
-    });
-
-    await app.inject({ method: "POST", url: "/api/paper/start" });
-    const refreshedCandidates = await app.inject({
-      method: "GET",
-      url: "/api/candidates?refresh=true",
-    });
-    expect(refreshedCandidates.statusCode).toBe(200);
-    expect(refreshedCandidates.json()).toMatchObject({
-      candidateCount: 1,
-      scanning: false,
-      lastError: null,
-    });
-    const orderResponse = await app.inject({
-      method: "POST",
-      url: "/api/paper/orders/buy",
-      payload: { candidateId: "yes-token:20000" },
-    });
-    expect(orderResponse.statusCode).toBe(201);
-    expect(orderResponse.json().order.status).toBe("OPEN");
-
-    const orders = await app.inject({
-      method: "GET",
-      url: "/api/paper/orders",
-    });
-    expect(orders.statusCode).toBe(200);
-    expect(orders.json().activeBuyOrderCount).toBe(1);
-
-    const positions = await app.inject({
-      method: "GET",
-      url: "/api/paper/positions",
-    });
-    const settlements = await app.inject({
-      method: "GET",
-      url: "/api/paper/settlements",
-    });
-    expect(positions.statusCode).toBe(200);
-    expect(settlements.statusCode).toBe(200);
-    expect(positions.json().positions).toEqual([]);
-    expect(settlements.json().settlements).toEqual([]);
-  });
-
-  it("rejects a stale candidate after its live progress crosses the saved limit", async () => {
-    const now = Date.now();
-    const staleCandidate = makeCandidate({
-      progressPercent: 10,
-      openedAt: new Date(now - 3 * 86_400_000).toISOString(),
-      endsAt: new Date(now + 7 * 86_400_000).toISOString(),
-      durationDays: 10,
-    });
-    const scanner: CandidateScanner = { scan: async () => [staleCandidate] };
-    const candidates = new CandidateService(scanner, 15_000);
-    await candidates.refresh();
-    const database = new PaperDatabase(":memory:", 100_000_000);
-    const tradingPreferences = new PaperTradingPreferencesService(
-      database,
-      testConfig,
-    );
-    const app = buildApp({
-      config: testConfig,
-      database,
-      candidates,
-      tradingPreferences,
-      liveExecutor: new LiveExecutorDisabled(),
-    });
-    resources.push(app, database);
-    database.setStrategyStatus("RUNNING");
-
-    const selection = await app.inject({
-      method: "PUT",
-      url: "/api/paper/candidate-selection",
-      payload: {
-        action: "set",
-        tokenId: staleCandidate.tokenId,
-        selected: false,
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.json()).toMatchObject({
+      executionMode: "TEST",
+      liveExecutionEnabled: false,
+      strategy: { mode: "TEST", status: "PAUSED" },
+      portfolio: {
+        totalFunds: "100",
+        totalPnl: "0",
+        realizedPnl: "0",
+        unrealizedPnl: "0",
+      },
+      marketScan: {
+        candidateCount: 1,
+        displayedCandidateCount: 1,
+        candidates: [
+          expect.objectContaining({
+            tokenId: "yes-token",
+            executableBuyPrice: "0.03",
+          }),
+        ],
       },
     });
-    expect(selection.statusCode).toBe(404);
 
-    const buy = await app.inject({
-      method: "POST",
-      url: "/api/paper/orders/buy",
-      payload: { candidateId: staleCandidate.candidateId },
-    });
-    expect(buy.statusCode).toBe(409);
-    expect(database.listPaperOrders()).toHaveLength(0);
-  });
-
-  it("reports an unhealthy ledger without mutating it during a GET check", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-api-"));
-    const databasePath = join(directory, "paper.db");
-    const scanner: CandidateScanner = { scan: async () => [] };
-    const candidates = new CandidateService(scanner, 15_000);
-    const database = new PaperDatabase(databasePath, 100_000_000);
-    const tradingPreferences = new PaperTradingPreferencesService(
-      database,
-      testConfig,
-    );
-    const app = buildApp({
-      config: { ...testConfig, databasePath },
-      database,
-      candidates,
-      tradingPreferences,
-      liveExecutor: new LiveExecutorDisabled(),
-    });
-    resources.push(app, database, {
-      close: () => rmSync(directory, { recursive: true, force: true }),
-    });
-
-    database.setStrategyStatus("RUNNING");
-    database.placePaperBuy(makeCandidate(), 100_000_000);
-    const rawDatabase = new Database(databasePath);
-    try {
-      rawDatabase
-        .prepare("UPDATE strategy_state SET reserved_cash_micros = 0 WHERE id = 1")
-        .run();
-    } finally {
-      rawDatabase.close();
-    }
-
-    const response = await app.inject({
+    const expandedDashboard = await app.inject({
       method: "GET",
-      url: "/api/paper/validation",
+      url: "/api/dashboard?limit=501",
     });
-
-    expect(response.statusCode).toBe(503);
-    expect(response.json().validation).toMatchObject({
-      passed: false,
-      errors: expect.arrayContaining([
-        "Reserved paper cash does not match active buy orders",
-      ]),
-    });
-    expect(database.getStrategyState().status).toBe("RUNNING");
+    expect(expandedDashboard.statusCode).toBe(200);
   });
 
-  it("applies TEST UI filters and candidate selection through PAPER APIs", async () => {
-    const scanner: CandidateScanner = {
-      scan: async () => [
-        makeCurrentCandidate(),
-        makeCurrentCandidate({
-          candidateId: "ternary-token:30000",
-          tokenId: "ternary-token",
-          resultCount: 3,
-          direction: "NO",
+  it("promotes a monitored market immediately when its live ask reaches the cap", async () => {
+    const monitored = makeCurrentCandidate({
+      bestAskMicros: 40_000,
+      executableBuyPriceMicros: 40_000,
+      makerBuyPriceMicros: 40_000,
+    });
+    const { app, candidates } = makeTestApp([monitored]);
+    await candidates.refresh();
+
+    const before = await app.inject({ method: "GET", url: "/api/dashboard" });
+    expect(before.json().marketScan).toMatchObject({ candidateCount: 0 });
+
+    candidates.updateQuote(monitored.tokenId, 20_000, 30_000);
+
+    const after = await app.inject({ method: "GET", url: "/api/dashboard" });
+    expect(after.json().marketScan).toMatchObject({
+      candidateCount: 1,
+      candidates: [
+        expect.objectContaining({
+          tokenId: monitored.tokenId,
+          executableBuyPrice: "0.03",
         }),
       ],
-    };
-    const candidates = new CandidateService(scanner, 15_000);
+    });
+  });
+
+  it("saves category, market, price, duration, ordering, capital, and order amount settings", async () => {
+    const { app, candidates } = makeTestApp([
+      makeCurrentCandidate({ tokenId: "tech", category: "Tech" }),
+      makeCurrentCandidate({ tokenId: "sports", category: "Sports" }),
+    ]);
     await candidates.refresh();
-    const database = new PaperDatabase(":memory:", 100_000_000);
-    const tradingPreferences = new PaperTradingPreferencesService(
-      database,
-      testConfig,
-    );
-    let automationRunRequests = 0;
-    const paperAutomation: PaperAutomationRuntime = {
-      getStatus: () => ({
-        running: true,
-        lastRunAt: null,
-        lastError: null,
-        placedBuyCount: 0,
-        cancelledFilterBuyCount: 0,
-        cancelledStartedBuyCount: 0,
-        cancelledProgressedBuyCount: 0,
-        recovery: null,
-      }),
-      requestRun: () => {
-        automationRunRequests += 1;
-      },
-    };
-    const app = buildApp({
-      config: testConfig,
-      database,
-      candidates,
-      tradingPreferences,
-      liveExecutor: new LiveExecutorDisabled(),
-      paperAutomation,
-    });
-    resources.push(app, database);
 
-    const updated = await app.inject({
+    const response = await app.inject({
       method: "PUT",
-      url: "/api/paper/preferences",
-      payload: {
-        resultCounts: [3],
-        maxBuyPriceCents: 3,
-        maxMarketDurationDays: 60,
-        maxMarketProgressPercent: 25,
-      },
-    });
-    expect(updated.statusCode).toBe(200);
-    expect(updated.json().preferences).toMatchObject({
-      resultCounts: [3],
-      maxBuyPriceCents: 3,
-      maxMarketDurationDays: 60,
-      maxMarketProgressPercent: 25,
-    });
-    expect(updated.json().cancelledBuyCount).toBe(0);
-    expect(automationRunRequests).toBe(1);
-
-    const invalidProgress = await app.inject({
-      method: "PUT",
-      url: "/api/paper/preferences",
+      url: "/api/test/preferences",
       payload: {
         resultCounts: [2, 3],
+        allCategories: false,
+        selectedCategories: ["Tech"],
         maxBuyPriceCents: 3,
         maxMarketDurationDays: 30,
-        maxMarketProgressPercent: 0,
+        candidateSortDirection: "DESC",
+        initialCapital: 120,
+        orderAmount: 2,
       },
     });
-    expect(invalidProgress.statusCode).toBe(400);
-    expect(automationRunRequests).toBe(1);
 
-    const cleared = await app.inject({
-      method: "PUT",
-      url: "/api/paper/candidate-selection",
-      payload: { action: "none" },
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      strategy: { initialCapital: "120", availableCash: "120" },
+      preferences: {
+        allCategories: false,
+        selectedCategories: ["Tech"],
+        candidateSortDirection: "DESC",
+        orderAmount: "2",
+        maxMarketProgressPercent: 100,
+      },
     });
-    expect(cleared.statusCode).toBe(200);
-    expect(cleared.json().selectedCandidateCount).toBe(0);
-
-    const selected = await app.inject({
-      method: "PUT",
-      url: "/api/paper/candidate-selection",
-      payload: { action: "set", tokenId: "ternary-token", selected: true },
-    });
-    expect(selected.statusCode).toBe(200);
-    expect(selected.json().selectedCandidateCount).toBe(1);
-
     const snapshot = await app.inject({ method: "GET", url: "/api/candidates" });
     expect(snapshot.json()).toMatchObject({
       candidateCount: 1,
-      selectedCandidateCount: 1,
-      candidates: [
-        expect.objectContaining({ tokenId: "ternary-token", selected: true }),
-      ],
+      candidates: [expect.objectContaining({ tokenId: "tech" })],
     });
+    expect(snapshot.json()).not.toHaveProperty("selectedCandidateCount");
+    expect(snapshot.body).not.toContain('"selected"');
 
-    await app.inject({ method: "POST", url: "/api/paper/start" });
-    const rejectedExcludedBuy = await app.inject({
-      method: "POST",
-      url: "/api/paper/orders/buy",
-      payload: { candidateId: "yes-token:20000" },
+    const status = await app.inject({ method: "GET", url: "/api/status?compact=true" });
+    expect(status.json()).toMatchObject({
+      configuration: { initialCapital: "120" },
     });
-    expect(rejectedExcludedBuy.statusCode).toBe(409);
-    expect(rejectedExcludedBuy.json().error).toMatch(/current TEST filters/);
-
-    const unknownSelection = await app.inject({
-      method: "PUT",
-      url: "/api/paper/candidate-selection",
-      payload: { action: "set", tokenId: "unknown-token", selected: false },
-    });
-    expect(unknownSelection.statusCode).toBe(404);
   });
 
-  it("exposes explicit TEST run controls and a guarded new-cycle action", async () => {
-    const candidates = new CandidateService(
-      { scan: async () => [] },
-      15_000,
-    );
+  it("saves running TEST filters when the submitted capital is unchanged", async () => {
+    const { app } = makeTestApp([]);
+    await app.inject({ method: "POST", url: "/api/test/start" });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/test/preferences",
+      payload: {
+        resultCounts: [2, 3],
+        allCategories: true,
+        selectedCategories: [],
+        maxBuyPriceCents: 2,
+        maxMarketDurationDays: 14,
+        candidateSortDirection: "ASC",
+        initialCapital: 100,
+        orderAmount: 1,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      strategy: { status: "RUNNING", initialCapital: "100" },
+      preferences: {
+        maxBuyPriceCents: 2,
+        maxMarketDurationDays: 14,
+      },
+    });
+  });
+
+  it("rejects a configuration that disables both binary and ternary markets", async () => {
+    const { app, tradingPreferences } = makeTestApp([]);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/test/preferences",
+      payload: {
+        resultCounts: [],
+        allCategories: true,
+        selectedCategories: [],
+        maxBuyPriceCents: 3,
+        maxMarketDurationDays: 30,
+        candidateSortDirection: "ASC",
+        initialCapital: 100,
+        orderAmount: 1,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(tradingPreferences.getSnapshot().resultCounts).toEqual([2, 3]);
+  });
+
+  it("executes a manual TEST request through the same FAK path without leaving an active buy", async () => {
+    const candidate = makeCurrentCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const { app, candidates, database } = makeTestApp([candidate], {
+      marketStream: marketRuntime(),
+    });
+    await candidates.refresh();
+    await app.inject({ method: "POST", url: "/api/test/start" });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/test/orders/buy",
+      payload: { candidateId: candidate.candidateId },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      outcome: "FILLED",
+      order: { executionKind: "FAK", status: "FILLED" },
+      spent: "1",
+    });
+    expect(
+      database.listActivePaperOrders().filter((order) => order.side === "BUY"),
+    ).toEqual([]);
+    expect(database.listCurrentPaperPositionViews()).toEqual([
+      expect.objectContaining({ tokenId: candidate.tokenId }),
+    ]);
+  });
+
+  it("marks a position at zero when the live book has no executable bid", async () => {
+    const candidate = makeCurrentCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+      bestBidMicros: 10_000,
+    });
+    const marketStream = marketRuntime();
+    marketStream.getBestBidMicros = () => null;
+    const { app, candidates } = makeTestApp([candidate], { marketStream });
+    await candidates.refresh();
+    await app.inject({ method: "POST", url: "/api/test/start" });
+    await app.inject({
+      method: "POST",
+      url: "/api/test/orders/buy",
+      payload: { candidateId: candidate.candidateId },
+    });
+
+    const dashboard = await app.inject({ method: "GET", url: "/api/dashboard" });
+
+    expect(dashboard.json()).toMatchObject({
+      portfolio: {
+        totalFunds: "99",
+        totalPnl: "-1",
+        unrealizedPnl: "-1",
+      },
+      positions: [
+        expect.objectContaining({
+          tokenId: candidate.tokenId,
+          currentSellPrice: null,
+          unrealizedPnl: "-1",
+        }),
+      ],
+    });
+  });
+
+  it("rejects a stale candidate after the market has ended", async () => {
+    const now = Date.now();
+    const staleCandidate = makeCandidate({
+      progressPercent: 10,
+      openedAt: new Date(now - 10 * 86_400_000).toISOString(),
+      endsAt: new Date(now - 1).toISOString(),
+      durationDays: 10,
+    });
+    const { app, candidates, database } = makeTestApp([staleCandidate], {
+      marketStream: marketRuntime(),
+    });
+    await candidates.refresh();
+    database.setStrategyStatus("RUNNING");
+
+    const buy = await app.inject({
+      method: "POST",
+      url: "/api/test/orders/buy",
+      payload: { candidateId: staleCandidate.candidateId },
+    });
+    expect(buy.statusCode).toBe(409);
+    expect(database.listPaperOrders()).toEqual([]);
+  });
+
+  it("requires pause and an exact confirmation before resetting all TEST data", async () => {
+    const candidate = makeCurrentCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const { app, candidates, database } = makeTestApp([candidate], {
+      marketStream: marketRuntime(),
+    });
+    await candidates.refresh();
+    await app.inject({ method: "POST", url: "/api/test/start" });
+    await app.inject({
+      method: "POST",
+      url: "/api/test/orders/buy",
+      payload: { candidateId: candidate.candidateId },
+    });
+
+    const whileRunning = await app.inject({
+      method: "POST",
+      url: "/api/test/reset",
+      payload: {
+        confirmation: "RESET TEST",
+        finalConfirmation: "RESET TEST AGAIN",
+      },
+    });
+    expect(whileRunning.statusCode).toBe(409);
+
+    await app.inject({ method: "POST", url: "/api/test/pause" });
+    const wrongConfirmation = await app.inject({
+      method: "POST",
+      url: "/api/test/reset",
+      payload: { confirmation: "reset", finalConfirmation: "reset" },
+    });
+    expect(wrongConfirmation.statusCode).toBe(400);
+
+    const reset = await app.inject({
+      method: "POST",
+      url: "/api/test/reset",
+      payload: { confirmation: "RESET TEST" },
+    });
+    expect(reset.statusCode).toBe(400);
+
+    const confirmedReset = await app.inject({
+      method: "POST",
+      url: "/api/test/reset",
+      payload: {
+        confirmation: "RESET TEST",
+        finalConfirmation: "RESET TEST AGAIN",
+      },
+    });
+    expect(confirmedReset.statusCode).toBe(200);
+    expect(confirmedReset.json()).toMatchObject({
+      strategy: {
+        status: "PAUSED",
+        initialCapital: "100",
+        availableCash: "100",
+        realizedPnl: "0",
+        positionCost: "0",
+      },
+      preferences: { orderAmount: "1", maxBuyPriceCents: 3 },
+    });
+    expect(database.listPaperOrders()).toEqual([]);
+    expect(database.listPaperPositions()).toEqual([]);
+  });
+
+  it("serves the compact single-column TEST UI without per-market participation controls", async () => {
+    const { app } = makeTestApp([]);
+    const page = await app.inject({ method: "GET", url: "/" });
+
+    expect(page.body).toContain("TEST");
+    expect(page.body).toContain("LIVE");
+    expect(page.body).toContain("交易配置");
+    expect(page.body).toContain("市场类别");
+    expect(page.body).toContain("总模拟资金");
+    expect(page.body).toContain("每单使用金额");
+    expect(page.body).toContain("重置TEST");
+    expect(page.body).toContain("总资金");
+    expect(page.body).toContain("当前持仓");
+    expect(page.body).toContain("扫描市场");
+    expect(page.body).toContain('id="scan-refresh-state"');
+    expect(page.body).not.toContain("市场选择（可多选）");
+    expect(page.body).not.toContain("全选");
+    expect(page.body).not.toContain("清空TEST交易范围");
+    expect(page.body).not.toContain("进入时市场进度");
+    expect(page.body).not.toContain('id="market-progress-filter"');
+    expect(page.body).not.toContain("开始新一轮");
+    expect(page.body).not.toContain('id="new-cycle"');
+    expect(page.body).not.toContain("PAPER");
+  });
+
+  function makeTestApp(
+    scannedCandidates: TradeCandidate[],
+    options: { marketStream?: PaperMarketRuntime } = {},
+  ) {
+    const scanner: CandidateScanner = { scan: async () => scannedCandidates };
+    const candidates = new CandidateService(scanner, 15_000);
     const database = new PaperDatabase(":memory:", 100_000_000);
     const tradingPreferences = new PaperTradingPreferencesService(
       database,
@@ -360,131 +390,18 @@ describe("HTTP app", () => {
       candidates,
       tradingPreferences,
       liveExecutor: new LiveExecutorDisabled(),
+      ...(options.marketStream === undefined
+        ? {}
+        : { marketStream: options.marketStream }),
     });
     resources.push(app, database);
-
-    const cycle = await app.inject({
-      method: "POST",
-      url: "/api/paper/cycle/start",
-    });
-    expect(cycle.statusCode).toBe(200);
-    expect(cycle.json()).toMatchObject({
-      resetTokenCount: 0,
-      strategy: { status: "RUNNING" },
-    });
-
-    const repeated = await app.inject({
-      method: "POST",
-      url: "/api/paper/cycle/start",
-    });
-    expect(repeated.statusCode).toBe(409);
-
-    const paused = await app.inject({ method: "POST", url: "/api/paper/pause" });
-    expect(paused.json().strategy.status).toBe("PAUSED");
-
-    const page = await app.inject({ method: "GET", url: "/" });
-    expect(page.body).toContain('id="run-toggle"');
-    expect(page.body).toContain('id="new-cycle"');
-  });
-
-  it("serves position display data, mark-to-market PnL, and the compact TEST UI", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "pm-small-dashboard-position-"));
-    const databasePath = join(directory, "paper.db");
-    const candidates = new CandidateService(
-      { scan: async () => [makeCandidate()] },
-      15_000,
-    );
-    await candidates.refresh();
-    const database = new PaperDatabase(databasePath, 100_000_000);
-    const tradingPreferences = new PaperTradingPreferencesService(
-      database,
-      testConfig,
-    );
-    database.setStrategyStatus("RUNNING");
-    const buy = database.placePaperBuy(makeCandidate({ queueAheadSizeMicros: 0 }), 100_000_000);
-    database.applyPaperTrade({
-      orderId: buy.id,
-      sourceTradeId: "dashboard-position-fill",
-      tradePriceMicros: 20_000,
-      tradeSizeMicros: 2_000_000,
-      dataComplete: true,
-    });
-    const rawDatabase = new Database(databasePath);
-    try {
-      rawDatabase
-        .prepare(
-          `UPDATE paper_market_metadata
-          SET event_slug = NULL, event_title = NULL,
-              market_question = NULL, direction = NULL
-          WHERE token_id = ?`,
-        )
-        .run("yes-token");
-    } finally {
-      rawDatabase.close();
-    }
-    const app = buildApp({
-      config: testConfig,
-      database,
-      candidates,
-      tradingPreferences,
-      liveExecutor: new LiveExecutorDisabled(),
-      marketStream: marketRuntimeWithBestBid(30_000),
-    });
-    resources.push(app, database, {
-      close: () => rmSync(directory, { recursive: true, force: true }),
-    });
-
-    const status = await app.inject({ method: "GET", url: "/api/status" });
-    expect(status.json().portfolio).toEqual({
-      totalFunds: "100.02",
-      totalPnl: "0.02",
-      realizedPnl: "0",
-      unrealizedPnl: "0.02",
-    });
-
-    const positions = await app.inject({
-      method: "GET",
-      url: "/api/paper/positions",
-    });
-    expect(positions.json().positions).toEqual([
-      expect.objectContaining({
-        marketQuestion: "Will this test pass?",
-        direction: "YES",
-        averageBuyPrice: "0.02",
-        markPrice: "0.03",
-        unrealizedPnl: "0.02",
-        marketUrl: "https://polymarket.com/event/test-event",
-      }),
-    ]);
-
-    const page = await app.inject({ method: "GET", url: "/" });
-    expect(page.body).toContain("TEST");
-    expect(page.body).toContain("LIVE");
-    expect(page.body).toContain("交易配置");
-    expect(page.body).toContain("总资金");
-    expect(page.body).toContain("当前持仓");
-    expect(page.body).toContain("扫描市场");
-    expect(page.body).toContain('max="3"');
-    expect(page.body).toContain("市场总时长范围");
-    expect(page.body).toContain('id="market-progress-filter"');
-    expect(page.body).toContain("市场选择（可多选）");
-    expect(page.body).toContain('id="scan-refresh-state"');
-    expect(page.body).toContain('id="data-refresh-state"');
-    expect(page.body).toContain('id="pending-buy-summary"');
-    expect(page.body).not.toContain("PAPER ONLY");
-    expect(page.body).not.toContain("测试订单");
-    expect(page.body).not.toContain("结算与纸面赎回");
-
-    const client = await app.inject({ method: "GET", url: "/app.js" });
-    expect(client.body).toContain("async function waitForCandidateRefresh()");
-    expect(client.body).toContain("await waitForCandidateRefresh();");
-    expect(client.body).toContain("orders.activeBuyOrderCount");
-  });
+    return { app, candidates, database, tradingPreferences };
+  }
 });
 
 function makeCurrentCandidate(
   overrides: Parameters<typeof makeCandidate>[0] = {},
-) {
+): TradeCandidate {
   const now = Date.now();
   return makeCandidate({
     openedAt: new Date(now - 86_400_000).toISOString(),
@@ -495,7 +412,7 @@ function makeCurrentCandidate(
   });
 }
 
-function marketRuntimeWithBestBid(bestBidMicros: number): PaperMarketRuntime {
+function marketRuntime(): PaperMarketRuntime {
   return {
     getStatus: (): MarketStreamStatus => ({
       running: true,
@@ -518,6 +435,16 @@ function marketRuntimeWithBestBid(bestBidMicros: number): PaperMarketRuntime {
     }),
     refreshSubscriptions: () => {},
     isTokenReady: () => true,
-    getBestBidMicros: () => bestBidMicros,
+    getBestBidMicros: () => 10_000,
+    getBestAskMicros: () => 20_000,
+    getOrderBook: (candidate: TradeCandidate): TokenOrderBook => ({
+      tokenId: candidate.tokenId,
+      conditionId: candidate.conditionId,
+      bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+      asks: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+      minOrderSizeMicros: candidate.minOrderSizeMicros,
+      tickSizeMicros: candidate.tickSizeMicros,
+      isNegativeRisk: candidate.isNegativeRisk,
+    }),
   };
 }

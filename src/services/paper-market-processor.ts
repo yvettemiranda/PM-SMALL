@@ -5,13 +5,18 @@ import type {
   MarketStreamEvent,
   MarketTrade,
   PaperOrderSide,
+  TokenOrderBook,
+  TradeCandidate,
 } from "../domain/types.js";
+import type { TradingExecutionAdapter } from "../domain/execution.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
+import { TestExecutor } from "../infrastructure/execution/test-executor.js";
 
 type BookState = {
   bids: Map<number, number>;
   asks: Map<number, number>;
   snapshotTimestampMs: number | null;
+  revision: number;
 };
 
 export type PaperMarketProcessorStatus = {
@@ -37,8 +42,18 @@ export class PaperMarketProcessor {
   private paperBuyFillCount = 0;
   private paperSellFillCount = 0;
   private createdPaperSellCount = 0;
+  private bookRevisionCounter = 0;
 
-  public constructor(private readonly database: PaperDatabase) {}
+  public constructor(
+    private readonly database: PaperDatabase,
+    private readonly executor: TradingExecutionAdapter = new TestExecutor(
+      database,
+    ),
+  ) {
+    if (executor.mode !== "TEST" || !executor.enabled) {
+      throw new Error("PaperMarketProcessor requires the enabled TEST executor");
+    }
+  }
 
   public handle(event: MarketStreamEvent): void {
     this.lastEventAt = new Date().toISOString();
@@ -79,6 +94,58 @@ export class PaperMarketProcessor {
     return bestBid;
   }
 
+  public getBestAskMicros(tokenId: string): number | null {
+    if (!this.readyTokens.has(tokenId)) {
+      return null;
+    }
+    const book = this.books.get(tokenId);
+    if (book === undefined) {
+      return null;
+    }
+    let bestAsk: number | null = null;
+    for (const [priceMicros, sizeMicros] of book.asks) {
+      if (sizeMicros > 0 && (bestAsk === null || priceMicros < bestAsk)) {
+        bestAsk = priceMicros;
+      }
+    }
+    return bestAsk;
+  }
+
+  public getOrderBookRevision(tokenId: string): number | null {
+    return this.readyTokens.has(tokenId)
+      ? (this.books.get(tokenId)?.revision ?? null)
+      : null;
+  }
+
+  public consumeTestBuyLiquidity(
+    tokenId: string,
+    consumedAsks: readonly BookLevel[],
+  ): void {
+    const book = this.books.get(tokenId);
+    if (book !== undefined && this.readyTokens.has(tokenId)) {
+      consumeBookLevels(book.asks, consumedAsks);
+    }
+  }
+
+  public getOrderBook(candidate: TradeCandidate): TokenOrderBook | null {
+    if (!this.readyTokens.has(candidate.tokenId)) {
+      return null;
+    }
+    const book = this.books.get(candidate.tokenId);
+    if (book === undefined) {
+      return null;
+    }
+    return {
+      tokenId: candidate.tokenId,
+      conditionId: candidate.conditionId,
+      bids: mapToLevels(book.bids),
+      asks: mapToLevels(book.asks),
+      minOrderSizeMicros: candidate.minOrderSizeMicros,
+      tickSizeMicros: candidate.tickSizeMicros,
+      isNegativeRisk: candidate.isNegativeRisk,
+    };
+  }
+
   public getStatus(): PaperMarketProcessorStatus {
     return {
       dataCompleteTokenCount: this.readyTokens.size,
@@ -97,6 +164,7 @@ export class PaperMarketProcessor {
       bids: levelsToMap(event.bids),
       asks: levelsToMap(event.asks),
       snapshotTimestampMs: event.timestampMs,
+      revision: ++this.bookRevisionCounter,
     });
     if (requiresRebase) {
       this.database.rebaseActivePaperOrderQueues(
@@ -106,6 +174,7 @@ export class PaperMarketProcessor {
       );
     }
     this.readyTokens.add(event.tokenId);
+    this.executeTargetSells(event.tokenId);
   }
 
   private handlePriceChange(event: MarketPriceChange): void {
@@ -120,6 +189,8 @@ export class PaperMarketProcessor {
     } else {
       levels.set(event.priceMicros, event.sizeMicros);
     }
+    book.revision = ++this.bookRevisionCounter;
+    this.executeTargetSells(event.tokenId);
   }
 
   private handleTrade(event: MarketTrade): void {
@@ -137,6 +208,7 @@ export class PaperMarketProcessor {
       .listActivePaperOrders(event.tokenId)
       .filter(
         (order) =>
+          order.executionKind === "LEGACY_MAKER" &&
           order.side === oppositeSide(event.takerSide) &&
           order.priceMicros === event.priceMicros,
       );
@@ -167,12 +239,55 @@ export class PaperMarketProcessor {
     this.processedTradeEvents += 1;
   }
 
+  private executeTargetSells(tokenId: string): void {
+    const book = this.books.get(tokenId);
+    const metadata = this.database.getTestMarketExecutionMetadata(tokenId);
+    if (
+      book === undefined ||
+      metadata === null ||
+      metadata.minOrderSizeMicros <= 0
+    ) {
+      return;
+    }
+    const result = this.executor.executeTargetSells({
+      tokenId,
+      bids: mapToLevels(book.bids),
+      minOrderSizeMicros: metadata.minOrderSizeMicros,
+      feeRateMicros: metadata.feeRateMicros,
+      feeExponent: metadata.feeExponent,
+    });
+    consumeBookLevels(book.bids, result.consumedBids);
+    this.paperSellFillCount += result.filledOrderCount;
+  }
+
   private isIncludedInSnapshot(event: MarketTrade, book: BookState): boolean {
     return (
       event.timestampMs !== null &&
       book.snapshotTimestampMs !== null &&
       event.timestampMs <= book.snapshotTimestampMs
     );
+  }
+}
+
+function mapToLevels(levels: ReadonlyMap<number, number>): BookLevel[] {
+  return Array.from(levels, ([priceMicros, sizeMicros]) => ({
+    priceMicros,
+    sizeMicros,
+  }));
+}
+
+function consumeBookLevels(
+  levels: Map<number, number>,
+  consumed: readonly BookLevel[],
+): void {
+  for (const fill of consumed) {
+    const available = levels.get(fill.priceMicros) ?? 0;
+    const remaining = Math.max(0, available - fill.sizeMicros);
+    if (remaining === 0) {
+      levels.delete(fill.priceMicros);
+    } else {
+      levels.set(fill.priceMicros, remaining);
+    }
   }
 }
 

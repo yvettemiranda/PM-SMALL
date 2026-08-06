@@ -11,7 +11,7 @@ const configSchema = z.object({
   TOTAL_BUDGET_USD: numberFromEnvironment(100),
   ORDER_BUDGET_USD: numberFromEnvironment(1),
   MAX_MARKET_DURATION_DAYS: numberFromEnvironment(30),
-  MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().min(1).max(100).default(20),
+  MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().min(1).max(100).default(100),
   STOP_BUY_PROGRESS_PERCENT: z.coerce.number().min(1).max(100).default(100),
   MIN_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.01),
   MAX_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.03),
