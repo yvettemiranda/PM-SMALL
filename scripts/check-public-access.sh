@@ -54,7 +54,7 @@ http_url="http://${base_url#https://}"
 read -r redirect_code redirect_url < <(
   curl "${curl_common[@]}" \
     --output /dev/null \
-    --write-out '%{http_code} %{redirect_url}' \
+    --write-out '%{http_code} %{redirect_url}\n' \
     "${http_url}/"
 )
 case "$redirect_code" in
