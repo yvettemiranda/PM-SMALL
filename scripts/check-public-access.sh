@@ -82,45 +82,47 @@ if [[ "$authenticated_code" != "200" ]]; then
 fi
 echo "PASS: authenticated homepage returned HTTP 200"
 
-node_bin="${PM_SMALL_NODE_BIN:-node}"
-if ! command -v "$node_bin" >/dev/null 2>&1; then
-  echo "Required Node.js executable is unavailable: $node_bin" >&2
+python_bin="${PM_SMALL_PYTHON_BIN:-python3}"
+if ! command -v "$python_bin" >/dev/null 2>&1; then
+  echo "Required Python 3 executable is unavailable: $python_bin" >&2
   exit 2
 fi
 
 status_json="$(curl "${curl_authenticated[@]}" "${base_url}/api/status?compact=true")"
-printf '%s' "$status_json" | "$node_bin" --input-type=module -e '
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
-  const status = JSON.parse(input);
-  const expectedStatus = process.env.PM_SMALL_EXPECTED_STRATEGY_STATUS ?? "PAUSED";
-  const failures = [];
-  if (status.executionMode !== "PAPER") {
-    failures.push(`executionMode=${JSON.stringify(status.executionMode)}`);
-  }
-  if (status.liveExecutionEnabled !== false) {
-    failures.push(`liveExecutionEnabled=${JSON.stringify(status.liveExecutionEnabled)}`);
-  }
-  if (status.strategy?.status !== expectedStatus) {
-    failures.push(`strategy.status=${JSON.stringify(status.strategy?.status)}`);
-  }
-  if (failures.length > 0) {
-    console.error(`FAIL: unsafe or unexpected status: ${failures.join(", ")}`);
-    process.exit(1);
-  }
-  console.log(`PASS: PAPER, LIVE disabled, strategy ${expectedStatus}`);
+printf '%s' "$status_json" | "$python_bin" -c '
+import json
+import os
+import sys
+
+status = json.load(sys.stdin)
+expected_status = os.environ.get("PM_SMALL_EXPECTED_STRATEGY_STATUS", "PAUSED")
+failures = []
+execution_mode = status.get("executionMode")
+live_enabled = status.get("liveExecutionEnabled")
+strategy_status = (status.get("strategy") or {}).get("status")
+if execution_mode != "PAPER":
+    failures.append(f"executionMode={execution_mode!r}")
+if live_enabled is not False:
+    failures.append(f"liveExecutionEnabled={live_enabled!r}")
+if strategy_status != expected_status:
+    failures.append(f"strategy.status={strategy_status!r}")
+if failures:
+    failure_text = ", ".join(failures)
+    print(f"FAIL: unsafe or unexpected status: {failure_text}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"PASS: PAPER, LIVE disabled, strategy {expected_status}")
 '
 
 validation_json="$(curl "${curl_authenticated[@]}" "${base_url}/api/paper/validation")"
-printf '%s' "$validation_json" | "$node_bin" --input-type=module -e '
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
-  const result = JSON.parse(input);
-  if (result.validation?.passed !== true || result.validation?.sqliteIntegrity !== "ok") {
-    console.error("FAIL: PAPER validation did not pass with SQLite integrity ok");
-    process.exit(1);
-  }
-  console.log("PASS: PAPER validation passed and SQLite integrity is ok");
+printf '%s' "$validation_json" | "$python_bin" -c '
+import json
+import sys
+
+validation = (json.load(sys.stdin).get("validation") or {})
+if validation.get("passed") is not True or validation.get("sqliteIntegrity") != "ok":
+    print("FAIL: PAPER validation did not pass with SQLite integrity ok", file=sys.stderr)
+    raise SystemExit(1)
+print("PASS: PAPER validation passed and SQLite integrity is ok")
 '
 
 echo "PASS: public TEST access is ready at ${base_url}/"
