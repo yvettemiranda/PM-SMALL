@@ -6,6 +6,7 @@ import type {
   PaperMarketRuntime,
 } from "../src/services/market-stream-service.js";
 import { PaperAutomationService } from "../src/services/paper-automation-service.js";
+import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
 import { makeCandidate, testConfig } from "./helpers.js";
 
 class FakeMarketRuntime implements PaperMarketRuntime {
@@ -157,14 +158,86 @@ describe("PaperAutomationService", () => {
 
     expect(database.listPaperOrders()).toHaveLength(0);
   });
+
+  it("uses the saved TEST progress filter instead of the startup default when placing buys", async () => {
+    const now = Date.now();
+    const candidate = makeCandidate({
+      openedAt: new Date(now - 3 * 86_400_000).toISOString(),
+      endsAt: new Date(now + 7 * 86_400_000).toISOString(),
+      durationDays: 10,
+      progressPercent: 30,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    preferences.updateMarketFilters({
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: 30_000,
+      maxMarketDurationDays: 30,
+      maxMarketProgressPercent: 35,
+    });
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      preferences,
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+
+    expect(database.listActivePaperOrders()).toEqual([
+      expect.objectContaining({ tokenId: candidate.tokenId, side: "BUY" }),
+    ]);
+  });
+
+  it("cancels an existing buy once it falls outside the saved duration or progress filters", async () => {
+    const now = Date.now();
+    const shortCandidate = makeCandidate({
+      openedAt: new Date(now - 5 * 60 * 60_000).toISOString(),
+      endsAt: new Date(now + 5 * 60 * 60_000).toISOString(),
+      durationDays: 10 / 24,
+      progressPercent: 50,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [] },
+      15_000,
+    );
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const buy = database.placePaperBuy(shortCandidate, 100_000_000);
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 10 },
+      preferences,
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+
+    expect(database.listPaperOrders()).toContainEqual(
+      expect.objectContaining({ id: buy.id, status: "CANCELLED" }),
+    );
+  });
 });
 
 function makeCurrentCandidate() {
   const now = Date.now();
   return makeCandidate({
-    openedAt: new Date(now - 60_000).toISOString(),
-    endsAt: new Date(now + 9 * 60_000).toISOString(),
-    durationDays: 10 / (24 * 60),
+    openedAt: new Date(now - 86_400_000).toISOString(),
+    endsAt: new Date(now + 9 * 86_400_000).toISOString(),
+    durationDays: 10,
     progressPercent: 10,
   });
 }

@@ -44,6 +44,8 @@ describe("PaperDatabase", () => {
         makerBuyPriceMicros: 20_000,
         resultCount: 2,
         durationDays: 10,
+        openedAt: "2026-01-01T00:00:00.000Z",
+        endsAt: "2026-01-11T00:00:00.000Z",
       },
     ]);
     expect(database.listPaperPositionViews()).toEqual([
@@ -236,7 +238,7 @@ describe("PaperDatabase", () => {
     const rawDatabase = new Database(databasePath);
     try {
       rawDatabase.exec(
-        "DROP TABLE paper_market_metadata; DELETE FROM schema_migrations WHERE version >= 6;",
+        "DROP TABLE paper_market_metadata; DELETE FROM schema_migrations WHERE version IN (6, 7);",
       );
     } finally {
       rawDatabase.close();
@@ -256,6 +258,49 @@ describe("PaperDatabase", () => {
           direction: null,
         }),
       ]);
+    } finally {
+      upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("adds the default progress preference when upgrading a version 7 database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-progress-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
+    currentDatabase.ensurePaperTradingPreferences({
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: 30_000,
+      maxMarketDurationDays: 30,
+      maxMarketProgressPercent: 20,
+      candidatesSelectedByDefault: true,
+    });
+    currentDatabase.close();
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase.exec(
+        "ALTER TABLE paper_trading_preferences DROP COLUMN max_market_progress_percent; DELETE FROM schema_migrations WHERE version = 8;",
+      );
+    } finally {
+      rawDatabase.close();
+    }
+
+    const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
+        maxMarketProgressPercent: 20,
+      });
+      const schemaVersion = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          schemaVersion
+            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .get(),
+        ).toEqual({ version: 8 });
+      } finally {
+        schemaVersion.close();
+      }
     } finally {
       upgradedDatabase.close();
       rmSync(directory, { recursive: true, force: true });

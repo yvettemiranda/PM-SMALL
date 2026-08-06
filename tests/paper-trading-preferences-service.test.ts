@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
 import { makeCandidate, testConfig } from "./helpers.js";
@@ -6,8 +6,14 @@ import { makeCandidate, testConfig } from "./helpers.js";
 describe("PaperTradingPreferencesService", () => {
   const databases: PaperDatabase[] = [];
 
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+  });
+
   afterEach(() => {
     for (const database of databases.splice(0)) database.close();
+    vi.useRealTimers();
   });
 
   it("persists market filters and candidate selection overrides", () => {
@@ -39,6 +45,28 @@ describe("PaperTradingPreferencesService", () => {
     });
     expect(restored.isTokenSelected("selected-token")).toBe(true);
     expect(restored.isTokenSelected("another-token")).toBe(false);
+  });
+
+  it("persists a 1-100 percent market-progress filter and applies it to candidates", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    const progressedCandidate = makeCandidate({ progressPercent: 35 });
+
+    expect(preferences.isCandidateEnabled(progressedCandidate)).toBe(false);
+    preferences.updateMarketFilters({
+      resultCounts: [2, 3],
+      maxBuyPriceMicros: 30_000,
+      maxMarketDurationDays: 30,
+      maxMarketProgressPercent: 35,
+    });
+
+    const restored = new PaperTradingPreferencesService(database, testConfig);
+    expect(restored.getSnapshot()).toMatchObject({
+      maxMarketProgressPercent: 35,
+      candidatesSelectedByDefault: true,
+    });
+    expect(restored.isCandidateEnabled(progressedCandidate)).toBe(true);
   });
 
   it("cancels an unfilled PAPER buy when its token is excluded", () => {
@@ -123,7 +151,7 @@ describe("PaperTradingPreferencesService", () => {
     });
   });
 
-  it("cancels active PAPER buys excluded by result count or total duration", () => {
+  it("cancels active PAPER buys excluded by result count, duration, or progress", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
     const preferences = new PaperTradingPreferencesService(database, testConfig);
@@ -152,6 +180,19 @@ describe("PaperTradingPreferencesService", () => {
       }),
       100_000_000,
     );
+    const excludedProgress = database.placePaperBuy(
+      makeCandidate({
+        candidateId: "progressed-token:20000",
+        tokenId: "progressed-token",
+        conditionId: "progressed-condition",
+        marketId: "progressed-market",
+        openedAt: "2026-01-01T00:00:00.000Z",
+        endsAt: "2026-01-02T01:00:00.000Z",
+        durationDays: 25 / 24,
+        progressPercent: 96,
+      }),
+      100_000_000,
+    );
 
     const update = preferences.updateMarketFilters({
       resultCounts: [2],
@@ -159,7 +200,7 @@ describe("PaperTradingPreferencesService", () => {
       maxMarketDurationDays: 30,
     });
 
-    expect(update.cancelledBuyCount).toBe(2);
+    expect(update.cancelledBuyCount).toBe(3);
     expect(database.listPaperOrders()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: retained.id, status: "OPEN" }),
@@ -169,6 +210,10 @@ describe("PaperTradingPreferencesService", () => {
         }),
         expect.objectContaining({
           id: excludedDuration.id,
+          status: "CANCELLED",
+        }),
+        expect.objectContaining({
+          id: excludedProgress.id,
           status: "CANCELLED",
         }),
       ]),

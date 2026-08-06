@@ -48,7 +48,7 @@ function publicConfig(
     orderBudget: microsToDecimalString(config.orderBudgetMicros),
     resultCounts: preferences.resultCounts,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
-    maxMarketProgressPercent: config.maxMarketProgressPercent,
+    maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     stopBuyProgressPercent: config.stopBuyProgressPercent,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
@@ -350,6 +350,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         lastRunAt: null,
         lastError: null,
         placedBuyCount: 0,
+        cancelledFilterBuyCount: 0,
         cancelledStartedBuyCount: 0,
         cancelledProgressedBuyCount: 0,
         recovery: null,
@@ -435,13 +436,19 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
           .number()
           .int()
           .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
+        maxMarketProgressPercent: z.number().int().min(1).max(100).optional(),
       })
       .parse(request.body);
     const update = dependencies.tradingPreferences.updateMarketFilters({
       resultCounts: body.resultCounts,
       maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
       maxMarketDurationDays: body.maxMarketDurationDays,
+      maxMarketProgressPercent:
+        body.maxMarketProgressPercent ??
+        dependencies.tradingPreferences.getSnapshot().maxMarketProgressPercent,
     });
+    dependencies.paperAutomation?.requestRun();
+    dependencies.marketStream?.refreshSubscriptions();
     const scanWasRunning = dependencies.candidates.getSnapshot().scanning;
     void dependencies.candidates.refresh().then(() => {
       if (scanWasRunning) void dependencies.candidates.refresh();
@@ -474,7 +481,10 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         .candidates.find(
           (item) =>
             item.tokenId === body.tokenId &&
-            dependencies.tradingPreferences.candidateMatchesMarketFilters(item),
+            dependencies.tradingPreferences.candidateMatchesMarketFilters(
+              item,
+              new Date(),
+            ),
         );
       if (candidate === undefined) {
         return reply.code(404).send({ error: "Candidate is unavailable or stale" });
@@ -501,6 +511,9 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/api/paper/orders", async () => ({
     orders: dependencies.database.listPaperOrders().map(serializeOrder),
+    activeBuyOrderCount: dependencies.database
+      .listActivePaperOrders()
+      .filter((order) => order.side === "BUY").length,
   }));
 
   app.get("/api/paper/positions", async () => ({
@@ -521,7 +534,9 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     if (candidate === null) {
       return reply.code(404).send({ error: "Candidate is unavailable or stale" });
     }
-    if (!dependencies.tradingPreferences.isCandidateEnabled(candidate)) {
+    if (
+      !dependencies.tradingPreferences.isCandidateEnabled(candidate, new Date())
+    ) {
       return reply.code(409).send({
         error: "Candidate is excluded by the current TEST filters or selection",
       });

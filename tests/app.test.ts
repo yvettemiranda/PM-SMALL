@@ -8,6 +8,7 @@ import type { CandidateScanner } from "../src/domain/market-scanner.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { LiveExecutorDisabled } from "../src/infrastructure/execution/live-executor-disabled.js";
 import { CandidateService } from "../src/services/candidate-service.js";
+import type { PaperAutomationRuntime } from "../src/services/paper-automation-service.js";
 import type {
   MarketStreamStatus,
   PaperMarketRuntime,
@@ -24,7 +25,7 @@ describe("HTTP app", () => {
 
   it("starts in paper mode and creates a virtual buy", async () => {
     const scanner: CandidateScanner = {
-      scan: async () => [makeCandidate()],
+      scan: async () => [makeCurrentCandidate()],
     };
     const candidates = new CandidateService(scanner, 15_000);
     const database = new PaperDatabase(":memory:", 100_000_000);
@@ -109,6 +110,13 @@ describe("HTTP app", () => {
     expect(orderResponse.statusCode).toBe(201);
     expect(orderResponse.json().order.status).toBe("OPEN");
 
+    const orders = await app.inject({
+      method: "GET",
+      url: "/api/paper/orders",
+    });
+    expect(orders.statusCode).toBe(200);
+    expect(orders.json().activeBuyOrderCount).toBe(1);
+
     const positions = await app.inject({
       method: "GET",
       url: "/api/paper/positions",
@@ -121,6 +129,52 @@ describe("HTTP app", () => {
     expect(settlements.statusCode).toBe(200);
     expect(positions.json().positions).toEqual([]);
     expect(settlements.json().settlements).toEqual([]);
+  });
+
+  it("rejects a stale candidate after its live progress crosses the saved limit", async () => {
+    const now = Date.now();
+    const staleCandidate = makeCandidate({
+      progressPercent: 10,
+      openedAt: new Date(now - 3 * 86_400_000).toISOString(),
+      endsAt: new Date(now + 7 * 86_400_000).toISOString(),
+      durationDays: 10,
+    });
+    const scanner: CandidateScanner = { scan: async () => [staleCandidate] };
+    const candidates = new CandidateService(scanner, 15_000);
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const tradingPreferences = new PaperTradingPreferencesService(
+      database,
+      testConfig,
+    );
+    const app = buildApp({
+      config: testConfig,
+      database,
+      candidates,
+      tradingPreferences,
+      liveExecutor: new LiveExecutorDisabled(),
+    });
+    resources.push(app, database);
+    database.setStrategyStatus("RUNNING");
+
+    const selection = await app.inject({
+      method: "PUT",
+      url: "/api/paper/candidate-selection",
+      payload: {
+        action: "set",
+        tokenId: staleCandidate.tokenId,
+        selected: false,
+      },
+    });
+    expect(selection.statusCode).toBe(404);
+
+    const buy = await app.inject({
+      method: "POST",
+      url: "/api/paper/orders/buy",
+      payload: { candidateId: staleCandidate.candidateId },
+    });
+    expect(buy.statusCode).toBe(409);
+    expect(database.listPaperOrders()).toHaveLength(0);
   });
 
   it("reports an unhealthy ledger without mutating it during a GET check", async () => {
@@ -173,8 +227,8 @@ describe("HTTP app", () => {
   it("applies TEST UI filters and candidate selection through PAPER APIs", async () => {
     const scanner: CandidateScanner = {
       scan: async () => [
-        makeCandidate(),
-        makeCandidate({
+        makeCurrentCandidate(),
+        makeCurrentCandidate({
           candidateId: "ternary-token:30000",
           tokenId: "ternary-token",
           resultCount: 3,
@@ -189,12 +243,29 @@ describe("HTTP app", () => {
       database,
       testConfig,
     );
+    let automationRunRequests = 0;
+    const paperAutomation: PaperAutomationRuntime = {
+      getStatus: () => ({
+        running: true,
+        lastRunAt: null,
+        lastError: null,
+        placedBuyCount: 0,
+        cancelledFilterBuyCount: 0,
+        cancelledStartedBuyCount: 0,
+        cancelledProgressedBuyCount: 0,
+        recovery: null,
+      }),
+      requestRun: () => {
+        automationRunRequests += 1;
+      },
+    };
     const app = buildApp({
       config: testConfig,
       database,
       candidates,
       tradingPreferences,
       liveExecutor: new LiveExecutorDisabled(),
+      paperAutomation,
     });
     resources.push(app, database);
 
@@ -205,6 +276,7 @@ describe("HTTP app", () => {
         resultCounts: [3],
         maxBuyPriceCents: 3,
         maxMarketDurationDays: 60,
+        maxMarketProgressPercent: 25,
       },
     });
     expect(updated.statusCode).toBe(200);
@@ -212,8 +284,23 @@ describe("HTTP app", () => {
       resultCounts: [3],
       maxBuyPriceCents: 3,
       maxMarketDurationDays: 60,
+      maxMarketProgressPercent: 25,
     });
     expect(updated.json().cancelledBuyCount).toBe(0);
+    expect(automationRunRequests).toBe(1);
+
+    const invalidProgress = await app.inject({
+      method: "PUT",
+      url: "/api/paper/preferences",
+      payload: {
+        resultCounts: [2, 3],
+        maxBuyPriceCents: 3,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 0,
+      },
+    });
+    expect(invalidProgress.statusCode).toBe(400);
+    expect(automationRunRequests).toBe(1);
 
     const cleared = await app.inject({
       method: "PUT",
@@ -378,12 +465,35 @@ describe("HTTP app", () => {
     expect(page.body).toContain("当前持仓");
     expect(page.body).toContain("扫描市场");
     expect(page.body).toContain('max="3"');
-    expect(page.body).toContain("市场总时长上限");
+    expect(page.body).toContain("市场总时长范围");
+    expect(page.body).toContain('id="market-progress-filter"');
+    expect(page.body).toContain("市场选择（可多选）");
+    expect(page.body).toContain('id="scan-refresh-state"');
+    expect(page.body).toContain('id="data-refresh-state"');
+    expect(page.body).toContain('id="pending-buy-summary"');
     expect(page.body).not.toContain("PAPER ONLY");
     expect(page.body).not.toContain("测试订单");
     expect(page.body).not.toContain("结算与纸面赎回");
+
+    const client = await app.inject({ method: "GET", url: "/app.js" });
+    expect(client.body).toContain("async function waitForCandidateRefresh()");
+    expect(client.body).toContain("await waitForCandidateRefresh();");
+    expect(client.body).toContain("orders.activeBuyOrderCount");
   });
 });
+
+function makeCurrentCandidate(
+  overrides: Parameters<typeof makeCandidate>[0] = {},
+) {
+  const now = Date.now();
+  return makeCandidate({
+    openedAt: new Date(now - 86_400_000).toISOString(),
+    endsAt: new Date(now + 9 * 86_400_000).toISOString(),
+    durationDays: 10,
+    progressPercent: 10,
+    ...overrides,
+  });
+}
 
 function marketRuntimeWithBestBid(bestBidMicros: number): PaperMarketRuntime {
   return {

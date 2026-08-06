@@ -11,8 +11,8 @@ const configSchema = z.object({
   TOTAL_BUDGET_USD: numberFromEnvironment(100),
   ORDER_BUDGET_USD: numberFromEnvironment(1),
   MAX_MARKET_DURATION_DAYS: numberFromEnvironment(30),
-  MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().min(0).max(100).default(20),
-  STOP_BUY_PROGRESS_PERCENT: z.coerce.number().min(0).max(100).default(90),
+  MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().min(1).max(100).default(20),
+  STOP_BUY_PROGRESS_PERCENT: z.coerce.number().min(1).max(100).default(100),
   MIN_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.01),
   MAX_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.03),
   SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
@@ -64,9 +64,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     throw new Error("MIN_BUY_PRICE cannot exceed MAX_BUY_PRICE");
   }
 
-  if (parsed.MAX_MARKET_PROGRESS_PERCENT >= parsed.STOP_BUY_PROGRESS_PERCENT) {
+  if (parsed.MAX_MARKET_PROGRESS_PERCENT > parsed.STOP_BUY_PROGRESS_PERCENT) {
     throw new Error(
-      "MAX_MARKET_PROGRESS_PERCENT must be below STOP_BUY_PROGRESS_PERCENT",
+      "MAX_MARKET_PROGRESS_PERCENT cannot exceed STOP_BUY_PROGRESS_PERCENT",
     );
   }
 

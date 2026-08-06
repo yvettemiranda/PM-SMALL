@@ -48,6 +48,32 @@ describe("event filtering", () => {
     expect(eligible).toBeNull();
   });
 
+  it("requires at least one full day and treats the one-day slider value as exactly one day", () => {
+    const filterConfig = {
+      ...testConfig,
+      maxMarketDurationDays: 1,
+      maxMarketProgressPercent: 100,
+    };
+    const halfwayThrough = new Date("2026-01-01T12:00:00.000Z");
+    const shorterThanOneDay = makeEvent({
+      schedule: {
+        startDate: "2026-01-01T00:00:00.000Z",
+        endDate: "2026-01-01T23:59:59.999Z",
+      },
+    });
+    const exactlyOneDay = makeEvent({
+      schedule: {
+        startDate: "2026-01-01T00:00:00.000Z",
+        endDate: "2026-01-02T00:00:00.000Z",
+      },
+    });
+
+    expect(filterEligibleEvent(shorterThanOneDay, filterConfig, halfwayThrough)).toBeNull();
+    expect(
+      filterEligibleEvent(exactlyOneDay, filterConfig, halfwayThrough),
+    ).toMatchObject({ durationDays: 1, progressPercent: 50 });
+  });
+
   it("does not return sports tokens after game start", () => {
     const event = makeEvent({
       markets: [

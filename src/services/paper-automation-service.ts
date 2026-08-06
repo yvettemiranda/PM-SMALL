@@ -12,6 +12,7 @@ export type PaperAutomationStatus = {
   lastRunAt: string | null;
   lastError: string | null;
   placedBuyCount: number;
+  cancelledFilterBuyCount: number;
   cancelledStartedBuyCount: number;
   cancelledProgressedBuyCount: number;
   recovery: PaperRecoveryResult | null;
@@ -23,7 +24,8 @@ export interface PaperAutomationRuntime {
 }
 
 export interface PaperCandidateSelection {
-  isCandidateEnabled(candidate: TradeCandidate): boolean;
+  isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean;
+  reconcileActiveBuys?(now?: Date): number;
 }
 
 export class PaperAutomationService implements PaperAutomationRuntime {
@@ -35,6 +37,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private lastRunAt: string | null = null;
   private lastError: string | null = null;
   private placedBuyCount = 0;
+  private cancelledFilterBuyCount = 0;
   private cancelledStartedBuyCount = 0;
   private cancelledProgressedBuyCount = 0;
   private recovery: PaperRecoveryResult | null = null;
@@ -96,6 +99,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       lastRunAt: this.lastRunAt,
       lastError: this.lastError,
       placedBuyCount: this.placedBuyCount,
+      cancelledFilterBuyCount: this.cancelledFilterBuyCount,
       cancelledStartedBuyCount: this.cancelledStartedBuyCount,
       cancelledProgressedBuyCount: this.cancelledProgressedBuyCount,
       recovery: this.recovery,
@@ -113,6 +117,9 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private runOnce(): void {
     const now = new Date();
     try {
+      const cancelledFiltered =
+        this.candidateSelection?.reconcileActiveBuys?.(now) ?? 0;
+      this.cancelledFilterBuyCount += cancelledFiltered;
       const cancelled = this.database.cancelStartedGameBuys(now);
       this.cancelledStartedBuyCount += cancelled;
       const cancelledProgressed = this.database.cancelProgressedMarketBuys(
@@ -125,7 +132,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       if (this.database.getStrategyState().status === "RUNNING") {
         for (const candidate of this.candidates.getSnapshot().candidates) {
           if (
-            this.candidateSelection?.isCandidateEnabled(candidate) === false ||
+            this.candidateSelection?.isCandidateEnabled(candidate, now) === false ||
             !candidateIsCurrent(candidate, now, this.config) ||
             !this.marketStream.isTokenReady(candidate.tokenId)
           ) {
@@ -146,7 +153,12 @@ export class PaperAutomationService implements PaperAutomationRuntime {
         }
       }
 
-      if (cancelled > 0 || cancelledProgressed > 0 || placedThisRun > 0) {
+      if (
+        cancelledFiltered > 0 ||
+        cancelled > 0 ||
+        cancelledProgressed > 0 ||
+        placedThisRun > 0
+      ) {
         this.marketStream.refreshSubscriptions();
       }
       this.lastError = null;
@@ -179,7 +191,10 @@ function candidateIsCurrent(
 
   const progressPercent =
     ((now.getTime() - openedAt) / (endsAt - openedAt)) * 100;
-  return progressPercent <= config.maxMarketProgressPercent;
+  // The user-selected progress filter is enforced by candidateSelection.
+  // Keep this independent hard cut-off here so a buy at the boundary is not
+  // cancelled and immediately recreated during the same automation pass.
+  return progressPercent < config.stopBuyProgressPercent;
 }
 
 function isExpectedPlacementRejection(error: unknown): boolean {

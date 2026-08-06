@@ -66,6 +66,7 @@ export function filterEligibleEvent(
   const progressPercent = ((nowMs - schedule.openedAt) / durationMs) * 100;
 
   if (
+    durationMs < DAY_MS ||
     durationDays > config.maxMarketDurationDays ||
     progressPercent > config.maxMarketProgressPercent
   ) {

@@ -32,6 +32,12 @@
         </div>
       </header>
 
+      <div class="refresh-strip">
+        <span id="data-refresh-state" class="refresh-state" role="status" aria-live="polite">
+          数据加载中
+        </span>
+      </div>
+
       <p id="live-lock" class="inline-note" hidden>
         LIVE 尚未开放；长期 TEST 验证完成前不能启用。
       </p>
@@ -69,27 +75,49 @@
               </span>
             </label>
 
-            <div class="duration-field">
-              <div class="duration-heading">
-                <span>市场总时长上限</span>
-                <strong>≤<span id="duration-value">30</span>天</strong>
+            <div class="range-fields">
+              <div class="duration-field">
+                <div class="range-heading">
+                  <span>市场总时长范围</span>
+                  <strong>1–<span id="duration-value">30</span>天</strong>
+                </div>
+                <input
+                  id="market-duration"
+                  type="range"
+                  min="0"
+                  max="9"
+                  step="1"
+                  value="3"
+                  aria-label="市场总时长范围，最短一天"
+                  aria-valuetext="1至30天"
+                />
+                <div id="duration-marks" class="range-marks" aria-hidden="true"></div>
               </div>
-              <input
-                id="market-duration"
-                type="range"
-                min="0"
-                max="9"
-                step="1"
-                value="3"
-                aria-label="市场总时长上限"
-                aria-valuetext="30天"
-              />
-              <div id="duration-marks" class="duration-marks" aria-hidden="true"></div>
+
+              <div class="progress-filter-field">
+                <div class="range-heading">
+                  <span>市场进度上限</span>
+                  <strong>≤<span id="market-progress-value">20</span>%</strong>
+                </div>
+                <input
+                  id="market-progress-filter"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="20"
+                  aria-label="市场生命周期进度上限"
+                  aria-valuetext="不超过20%"
+                />
+                <div class="range-marks progress-marks" aria-hidden="true">
+                  <span>1</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span>
+                </div>
+              </div>
             </div>
           </div>
 
           <div class="config-actions">
-            <button class="button primary save-config" type="submit">
+            <button id="save-config" class="button primary save-config" type="submit">
               保存并重新扫描
             </button>
             <button id="new-cycle" class="button secondary" type="button">
@@ -126,12 +154,18 @@
           <h2>当前持仓</h2>
           <span id="position-count" class="count">0个</span>
         </div>
+        <div id="pending-buy-summary" class="order-summary" aria-live="polite"></div>
         <div id="positions" class="position-list" aria-live="polite"></div>
       </section>
 
       <section class="panel">
         <div class="section-heading scan-heading">
-          <h2>扫描市场</h2>
+          <div class="scan-title">
+            <h2>扫描市场</h2>
+            <span id="scan-refresh-state" class="refresh-state" role="status" aria-live="polite">
+              等待首次扫描
+            </span>
+          </div>
           <div class="sort-control">
             <span>进度排序</span>
             <div class="segmented" role="group" aria-label="市场进度排序">
@@ -142,7 +176,10 @@
         </div>
 
         <div class="selection-toolbar">
-          <span id="selection-count" class="count">已选0 / 0</span>
+          <div class="selection-summary">
+            <strong>市场选择（可多选）</strong>
+            <span id="selection-count" class="count">已选0 / 0</span>
+          </div>
           <div>
             <button id="select-all" class="text-button" type="button">全选</button>
             <button id="clear-all" class="text-button" type="button">清空</button>

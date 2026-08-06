@@ -67,7 +67,7 @@ a { color: inherit; }
 .topbar,
 .section-heading,
 .selection-toolbar,
-.duration-heading,
+.range-heading,
 .position-meta,
 .market-progress-heading,
 .load-more {
@@ -87,6 +87,25 @@ a { color: inherit; }
 }
 
 .topbar-actions { display: flex; align-items: center; gap: 6px; }
+
+.refresh-strip {
+  display: flex;
+  min-height: 25px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 3px 4px 0;
+}
+
+.refresh-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.refresh-state.is-error { color: var(--negative); }
 
 .mode-switch,
 .segmented {
@@ -138,6 +157,28 @@ a { color: inherit; }
 .button.primary:hover { border-color: var(--accent-strong); background: var(--accent-strong); color: var(--on-accent); }
 .button.secondary { background: var(--surface); }
 
+.is-pending::before,
+.is-refreshing::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  flex: 0 0 11px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+button.is-pending {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.order-summary.is-refreshing { align-items: center; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
 button:focus-visible,
 input:focus-visible,
 a:focus-visible {
@@ -178,7 +219,7 @@ a:focus-visible {
 fieldset { min-width: 0; padding: 0; border: 0; }
 legend,
 .field > span:first-child,
-.duration-heading > span {
+.range-heading > span {
   display: block;
   margin-bottom: 6px;
   color: var(--muted);
@@ -227,11 +268,13 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   text-align: center;
 }
 
-.duration-heading { align-items: baseline; }
-.duration-heading > span { margin: 0; }
-.duration-heading strong { color: var(--accent-strong); font-size: 14px; }
-.duration-field input { width: 100%; margin: 3px 0 1px; }
-.duration-marks { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
+.range-fields { display: grid; gap: 9px; }
+.range-heading { align-items: baseline; }
+.range-heading > span { margin: 0; }
+.range-heading strong { color: var(--accent-strong); font-size: 14px; }
+.duration-field input,
+.progress-filter-field input { width: 100%; margin: 3px 0 1px; }
+.range-marks { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }
 .config-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(120px, 0.35fr);
@@ -274,6 +317,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .sort-control { display: flex; align-items: center; gap: 8px; }
 .sort-control > span { color: var(--muted); font-size: 11px; }
+.scan-title { display: flex; min-width: 0; align-items: center; gap: 8px; }
 
 .position-row { padding: 12px; }
 .position-row + .position-row { border-top: 1px solid var(--line); }
@@ -310,23 +354,49 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 
+.order-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.order-summary strong { flex: 0 0 auto; color: var(--text); font-size: 11px; }
+.order-summary span { color: var(--muted); }
+
 .selection-toolbar { min-height: 41px; padding: 5px 12px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
 .selection-toolbar > div { display: flex; gap: 2px; }
+.selection-summary { flex-direction: column; align-items: flex-start; gap: 1px !important; }
+.selection-summary strong { font-size: 11px; }
 .market-row {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 72px 52px;
+  grid-template-columns: 64px minmax(0, 1fr) 72px 52px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
 }
 .market-row + .market-row { border-top: 1px solid var(--line); }
 .candidate-toggle {
-  display: grid;
-  width: 36px;
+  display: flex;
+  width: 64px;
   height: 36px;
-  place-items: center;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   justify-self: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
 }
+.candidate-toggle.is-selected { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); color: var(--accent-strong); }
+.candidate-toggle.is-pending input,
+.candidate-toggle.is-pending span { display: none; }
 .market-outcome {
   justify-self: stretch;
   padding: 5px 7px;
@@ -374,7 +444,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 
 @media (max-width: 660px) {
   .config-grid { grid-template-columns: 1fr 0.65fr; }
-  .duration-field { grid-column: 1 / -1; }
+  .range-fields { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 560px) {
@@ -383,7 +453,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .button { min-height: 34px; }
   .config-panel { padding: 12px; }
   .config-grid { grid-template-columns: 1fr; gap: 12px; }
-  .duration-field { grid-column: auto; }
+  .range-fields { grid-column: auto; grid-template-columns: 1fr; }
   .portfolio { grid-template-columns: repeat(2, 1fr); }
   .portfolio article { padding: 11px; }
   .portfolio article:nth-child(3) { border-left: 0; }
@@ -391,10 +461,12 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .portfolio strong { font-size: 18px; }
   .section-heading { min-height: 42px; padding: 7px 10px; }
   .position-row { padding: 10px; }
+  .order-summary { align-items: flex-start; flex-direction: column; gap: 2px; padding: 8px 10px; }
   .position-main { grid-template-columns: minmax(0, 1fr) 76px; gap: 8px; }
   .outcome-badge { min-width: 74px; padding: 5px 7px; }
   .selection-toolbar { padding-left: 10px; padding-right: 10px; }
-  .market-row { grid-template-columns: 36px minmax(0, 1fr) 48px; gap: 7px; padding: 9px 10px; }
+  .market-row { grid-template-columns: 58px minmax(0, 1fr) 48px; gap: 7px; padding: 9px 10px; }
+  .candidate-toggle { width: 58px; }
   .market-outcome { display: none; }
   .market-price { grid-column: 3; }
   .market-progress { grid-column: 2 / -1; }
@@ -412,5 +484,5 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .config-actions { grid-template-columns: 1fr; }
   .scan-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
   .sort-control { width: 100%; justify-content: space-between; }
-  .duration-marks { font-size: 9px; }
+  .range-marks { font-size: 9px; }
 }

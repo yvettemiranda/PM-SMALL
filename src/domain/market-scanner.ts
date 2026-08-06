@@ -29,6 +29,7 @@ export type MarketScanPreferences = {
   resultCounts: readonly (2 | 3)[];
   maxBuyPriceMicros: number;
   maxMarketDurationDays: number;
+  maxMarketProgressPercent: number;
 };
 
 export interface MarketScanPreferencesProvider {
@@ -89,11 +90,13 @@ export class MarketScanner implements CandidateScanner {
       resultCounts: [2, 3],
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
+      maxMarketProgressPercent: this.config.maxMarketProgressPercent,
     };
     const scanConfig: AppConfig = {
       ...this.config,
       maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
       maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
+      maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
     };
     const startedAt = new Date();
     const startedAtMs = Date.now();

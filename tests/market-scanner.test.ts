@@ -31,6 +31,7 @@ describe("MarketScanner", () => {
       resultCounts: [2] as Array<2 | 3>,
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 7,
+      maxMarketProgressPercent: 5,
     };
     const scanner = new MarketScanner(source, testConfig, {
       getMarketScanPreferences: () => filters,
@@ -39,6 +40,8 @@ describe("MarketScanner", () => {
 
     expect(await scanner.scan(now)).toEqual([]);
     filters = { ...filters, maxMarketDurationDays: 14 };
+    expect(await scanner.scan(now)).toEqual([]);
+    filters = { ...filters, maxMarketProgressPercent: 20 };
     expect(await scanner.scan(now)).toHaveLength(1);
     filters = { ...filters, resultCounts: [3] };
     expect(await scanner.scan(now)).toEqual([]);

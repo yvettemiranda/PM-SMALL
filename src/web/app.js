@@ -14,6 +14,11 @@ const ui = {
   reloadRequested: false,
   mutationVersion: 0,
   controlPending: false,
+  dataRefreshStartedAt: null,
+  dataRefreshCompletedAt: null,
+  dataRefreshFailed: false,
+  scanStatus: null,
+  scanObservedStartedAt: null,
 };
 
 async function api(path, options = {}) {
@@ -53,6 +58,88 @@ function showMessage(message, error = false) {
   }, 4_000);
 }
 
+function formatClock(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).format(date)
+    : "—";
+}
+
+function elapsedSeconds(startedAt) {
+  return Math.max(0, Math.floor((Date.now() - startedAt) / 1_000));
+}
+
+function setButtonPending(button, pending, label = "处理中") {
+  if (!button) return;
+  if (pending) {
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.textContent.trim();
+    button.dataset.pendingStartedAt = String(Date.now());
+    button.dataset.pendingLabel = label;
+    button.classList.add("is-pending");
+    button.setAttribute("aria-busy", "true");
+    button.disabled = true;
+  } else {
+    button.classList.remove("is-pending");
+    button.removeAttribute("aria-busy");
+    button.disabled = false;
+    if (button.dataset.idleLabel) button.textContent = button.dataset.idleLabel;
+    delete button.dataset.pendingStartedAt;
+    delete button.dataset.pendingLabel;
+    delete button.dataset.idleLabel;
+  }
+  renderLiveRefreshStates();
+}
+
+function renderDataRefreshState() {
+  const element = $("#data-refresh-state");
+  element.classList.toggle("is-refreshing", ui.dataRefreshStartedAt !== null);
+  element.classList.toggle("is-error", ui.dataRefreshFailed);
+  if (ui.dataRefreshStartedAt !== null) {
+    element.textContent = `数据刷新中 · ${elapsedSeconds(ui.dataRefreshStartedAt)}秒`;
+  } else if (ui.dataRefreshCompletedAt !== null) {
+    element.textContent = `${ui.dataRefreshFailed ? "刷新失败" : "数据更新于"} ${formatClock(ui.dataRefreshCompletedAt)}`;
+  } else {
+    element.textContent = "数据加载中";
+  }
+}
+
+function renderScanRefreshState() {
+  const element = $("#scan-refresh-state");
+  const status = ui.scanStatus;
+  const scanning = status?.scanning === true;
+  element.classList.toggle("is-refreshing", scanning);
+  element.classList.toggle("is-error", !scanning && Boolean(status?.lastError));
+  if (scanning) {
+    const diagnosticsStartedAt = Date.parse(status?.diagnostics?.startedAt ?? "");
+    const startedAt = Number.isFinite(diagnosticsStartedAt)
+      ? diagnosticsStartedAt
+      : (ui.scanObservedStartedAt ?? Date.now());
+    element.textContent = `扫描中 · ${elapsedSeconds(startedAt)}秒`;
+  } else if (status?.lastError) {
+    const completedAt = status?.diagnostics?.completedAt ?? new Date();
+    element.textContent = `刷新失败 · ${formatClock(completedAt)}`;
+  } else if (status?.lastScanAt) {
+    element.textContent = `更新于 ${formatClock(status.lastScanAt)}`;
+  } else {
+    element.textContent = "等待首次扫描";
+  }
+}
+
+function renderLiveRefreshStates() {
+  document.querySelectorAll("[data-pending-started-at]").forEach((button) => {
+    const startedAt = Number(button.dataset.pendingStartedAt);
+    const label = button.dataset.pendingLabel || "处理中";
+    button.textContent = `${label} · ${elapsedSeconds(startedAt)}秒`;
+  });
+  renderDataRefreshState();
+  renderScanRefreshState();
+}
+
 function formatMoney(value, signed = false) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) return "—";
@@ -83,7 +170,9 @@ function renderPortfolio(portfolio) {
 function renderRunControls() {
   const running = ui.strategyStatus === "RUNNING";
   const runToggle = $("#run-toggle");
-  runToggle.textContent = running ? "暂停TEST" : "开始TEST";
+  if (!runToggle.classList.contains("is-pending")) {
+    runToggle.textContent = running ? "暂停TEST" : "开始TEST";
+  }
   runToggle.disabled = ui.controlPending;
   runToggle.setAttribute(
     "aria-label",
@@ -118,11 +207,34 @@ function progressMarkup(progressPercent, label = "市场进度") {
   return `<div class="progress-track" role="progressbar" aria-label="${label}${clamped.toFixed(1)}%" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamped.toFixed(1)}"><span style="width:${clamped.toFixed(1)}%"></span></div>`;
 }
 
-function renderPositions(positions) {
+function renderPositions(positions, orders, activeBuyOrderCount) {
   const currentPositions = positions.filter(
     (position) => Number(position.quantity) > 0,
   );
+  const activeBuyCount = Number.isInteger(activeBuyOrderCount)
+    ? activeBuyOrderCount
+    : orders.filter(
+        (order) =>
+          order.side === "BUY" &&
+          (order.status === "OPEN" || order.status === "PARTIALLY_FILLED"),
+      ).length;
   $("#position-count").textContent = `${currentPositions.length}个`;
+  const summary = $("#pending-buy-summary");
+  summary.classList.toggle(
+    "is-refreshing",
+    activeBuyCount === 0 &&
+      ui.strategyStatus === "RUNNING" &&
+      ui.scanStatus?.scanning === true,
+  );
+  if (activeBuyCount > 0) {
+    summary.innerHTML = `<strong>${activeBuyCount.toLocaleString("zh-CN")}张买入委托等待成交</strong><span>筛选后已经自动挂单；未成交委托不算持仓，公开成交确认后才会显示在下方。</span>`;
+  } else if (ui.strategyStatus === "RUNNING" && ui.scanStatus?.scanning === true) {
+    summary.innerHTML = "<strong>正在扫描并准备买入委托</strong><span>扫描完成且盘口就绪后会自动挂单。</span>";
+  } else if (ui.strategyStatus === "RUNNING") {
+    summary.innerHTML = "<strong>当前没有等待成交的买入委托</strong><span>程序会在符合筛选条件且盘口就绪时自动挂单。</span>";
+  } else {
+    summary.innerHTML = "<strong>TEST尚未开始</strong><span>筛选只决定交易范围；点击“开始TEST”后才会自动挂单，成交后才形成持仓。</span>";
+  }
   $("#positions").innerHTML = currentPositions.length
     ? currentPositions
         .map((position) => {
@@ -149,7 +261,7 @@ function renderPositions(positions) {
           </article>`;
         })
         .join("")
-    : '<p class="empty-state">暂无当前持仓</p>';
+    : '<p class="empty-state">暂无已成交持仓</p>';
 }
 
 function sortedCandidates() {
@@ -163,7 +275,10 @@ function sortedCandidates() {
 function renderCandidates() {
   const sorted = sortedCandidates();
   const visible = sorted.slice(0, ui.visibleCandidateCount);
-  $("#selection-count").textContent = `已选${ui.selectedCandidateCount.toLocaleString("zh-CN")} / ${sorted.length.toLocaleString("zh-CN")}`;
+  const selectionDefault = ui.preferences?.candidatesSelectedByDefault
+    ? "新市场默认勾选"
+    : "新市场默认不勾选";
+  $("#selection-count").textContent = `${selectionDefault} · 已选${ui.selectedCandidateCount.toLocaleString("zh-CN")} / ${sorted.length.toLocaleString("zh-CN")}`;
   $("#display-count").textContent = `当前显示${visible.length.toLocaleString("zh-CN")} / ${sorted.length.toLocaleString("zh-CN")}`;
   $("#load-more").disabled = visible.length >= sorted.length;
   $("#load-more").textContent = visible.length >= sorted.length ? "已全部显示" : "再显示20个";
@@ -172,13 +287,14 @@ function renderCandidates() {
     ? visible
         .map(
           (candidate) => `<article class="market-row" data-market-token="${escapeHtml(candidate.tokenId)}">
-            <label class="candidate-toggle">
+            <label class="candidate-toggle ${candidate.selected ? "is-selected" : ""}">
               <input
                 type="checkbox"
                 data-candidate-token="${escapeHtml(candidate.tokenId)}"
                 aria-label="允许TEST交易：${escapeHtml(candidate.marketQuestion)}—${escapeHtml(candidate.direction)}"
                 ${candidate.selected ? "checked" : ""}
               />
+              <span>参与</span>
             </label>
             <div>
               ${marketTitleMarkup(candidate)}
@@ -210,11 +326,23 @@ function renderPreferences(preferences) {
   $("#duration-value").textContent = String(ui.durationOptions[durationIndex]);
   $("#market-duration").setAttribute(
     "aria-valuetext",
-    `${ui.durationOptions[durationIndex]}天`,
+    ui.durationOptions[durationIndex] === 1
+      ? "1天"
+      : `1至${ui.durationOptions[durationIndex]}天`,
   );
   $("#duration-marks").innerHTML = ui.durationOptions
     .map((duration) => `<span>${duration}</span>`)
     .join("");
+  $("#market-progress-filter").value = String(
+    preferences.maxMarketProgressPercent,
+  );
+  $("#market-progress-value").textContent = String(
+    preferences.maxMarketProgressPercent,
+  );
+  $("#market-progress-filter").setAttribute(
+    "aria-valuetext",
+    `不超过${preferences.maxMarketProgressPercent}%`,
+  );
 }
 
 async function loadAll() {
@@ -223,36 +351,76 @@ async function loadAll() {
     return;
   }
   ui.loading = true;
+  ui.dataRefreshStartedAt = Date.now();
+  ui.dataRefreshFailed = false;
+  renderLiveRefreshStates();
   const mutationVersion = ui.mutationVersion;
   try {
-    const [status, candidates, positions, preferences] = await Promise.all([
+    const [status, candidates, positions, orders, preferences] = await Promise.all([
       api("/api/status?compact=true"),
       api("/api/candidates"),
       api("/api/paper/positions"),
+      api("/api/paper/orders"),
       api("/api/paper/preferences"),
     ]);
     if (mutationVersion !== ui.mutationVersion) return;
     ui.strategyStatus = status.strategy.status;
+    ui.scanStatus = candidates;
+    if (candidates.scanning && ui.scanObservedStartedAt === null) {
+      ui.scanObservedStartedAt = Date.now();
+    } else if (!candidates.scanning) {
+      ui.scanObservedStartedAt = null;
+    }
     renderRunControls();
     renderPortfolio(status.portfolio);
-    renderPositions(positions.positions);
+    renderPositions(
+      positions.positions,
+      orders.orders,
+      orders.activeBuyOrderCount,
+    );
     ui.candidates = candidates.candidates;
     ui.selectedCandidateCount = candidates.selectedCandidateCount;
+    ui.preferences = preferences.preferences;
     ui.visibleCandidateCount = Math.max(
       20,
       Math.min(ui.visibleCandidateCount, Math.max(20, ui.candidates.length)),
     );
     renderCandidates();
-    ui.preferences = preferences.preferences;
     if (!ui.configDirty) {
       renderPreferences(preferences.preferences);
     }
+    ui.dataRefreshCompletedAt = new Date();
+  } catch (error) {
+    ui.dataRefreshFailed = true;
+    ui.dataRefreshCompletedAt = new Date();
+    throw error;
   } finally {
+    ui.dataRefreshStartedAt = null;
     ui.loading = false;
+    renderLiveRefreshStates();
     if (ui.reloadRequested) {
       ui.reloadRequested = false;
       void loadAll().catch((error) => showMessage(error.message, true));
     }
+  }
+}
+
+async function waitForCandidateRefresh() {
+  let snapshot = await api("/api/candidates");
+  while (snapshot.scanning) {
+    ui.scanStatus = snapshot;
+    if (ui.scanObservedStartedAt === null) {
+      ui.scanObservedStartedAt = Date.now();
+    }
+    renderScanRefreshState();
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    snapshot = await api("/api/candidates");
+  }
+  ui.scanStatus = snapshot;
+  ui.scanObservedStartedAt = null;
+  renderScanRefreshState();
+  if (snapshot.lastError) {
+    throw new Error(`市场扫描失败：${snapshot.lastError}`);
   }
 }
 
@@ -282,13 +450,23 @@ $("#config-form").addEventListener("input", () => {
 $("#market-duration").addEventListener("input", (event) => {
   const index = Number(event.target.value);
   $("#duration-value").textContent = String(ui.durationOptions[index]);
-  event.target.setAttribute("aria-valuetext", `${ui.durationOptions[index]}天`);
+  event.target.setAttribute(
+    "aria-valuetext",
+    ui.durationOptions[index] === 1
+      ? "1天"
+      : `1至${ui.durationOptions[index]}天`,
+  );
+});
+
+$("#market-progress-filter").addEventListener("input", (event) => {
+  $("#market-progress-value").textContent = event.target.value;
+  event.target.setAttribute("aria-valuetext", `不超过${event.target.value}%`);
 });
 
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const submit = event.submitter;
-  if (submit) submit.disabled = true;
+  setButtonPending(submit, true, "保存中");
   try {
     const resultCounts = [];
     if ($("#binary-market").checked) resultCounts.push(2);
@@ -300,6 +478,7 @@ $("#config-form").addEventListener("submit", async (event) => {
         resultCounts,
         maxBuyPriceCents: Number($("#max-buy-price").value),
         maxMarketDurationDays: ui.durationOptions[durationIndex],
+        maxMarketProgressPercent: Number($("#market-progress-filter").value),
       }),
     });
     recordMutation();
@@ -307,17 +486,24 @@ $("#config-form").addEventListener("submit", async (event) => {
     ui.configDirty = false;
     renderPreferences(response.preferences);
     ui.visibleCandidateCount = 20;
-    setConfigOpen(false);
     showMessage(
       response.cancelledBuyCount > 0
         ? `配置已保存，已撤销${response.cancelledBuyCount}张不再合格的买单`
         : "配置已保存，正在重新扫描市场",
     );
     await loadAll();
+    await waitForCandidateRefresh();
+    await loadAll();
+    setConfigOpen(false);
+    showMessage(
+      response.cancelledBuyCount > 0
+        ? `配置已保存，已撤销${response.cancelledBuyCount}张买单，市场扫描已更新`
+        : "配置已保存，市场扫描已更新",
+    );
   } catch (error) {
     showMessage(error.message, true);
   } finally {
-    if (submit) submit.disabled = false;
+    setButtonPending(submit, false);
   }
 });
 
@@ -325,6 +511,11 @@ $("#run-toggle").addEventListener("click", async () => {
   const wasRunning = ui.strategyStatus === "RUNNING";
   ui.controlPending = true;
   renderRunControls();
+  setButtonPending(
+    $("#run-toggle"),
+    true,
+    wasRunning ? "暂停中" : "启动中",
+  );
   try {
     const response = await api(
       wasRunning ? "/api/paper/pause" : "/api/paper/start",
@@ -338,6 +529,7 @@ $("#run-toggle").addEventListener("click", async () => {
     showMessage(error.message, true);
   } finally {
     ui.controlPending = false;
+    setButtonPending($("#run-toggle"), false);
     renderRunControls();
   }
 });
@@ -352,6 +544,7 @@ $("#new-cycle").addEventListener("click", async () => {
   }
   ui.controlPending = true;
   renderRunControls();
+  setButtonPending($("#new-cycle"), true, "启动新一轮中");
   try {
     const response = await api("/api/paper/cycle/start", { method: "POST" });
     recordMutation();
@@ -367,6 +560,7 @@ $("#new-cycle").addEventListener("click", async () => {
     showMessage(error.message, true);
   } finally {
     ui.controlPending = false;
+    setButtonPending($("#new-cycle"), false);
     renderRunControls();
   }
 });
@@ -401,7 +595,10 @@ $("#candidates").addEventListener("change", async (event) => {
     (item) => item.tokenId === input.dataset.candidateToken,
   );
   if (!candidate) return;
+  const toggle = input.closest(".candidate-toggle");
   input.disabled = true;
+  toggle?.classList.add("is-pending");
+  toggle?.setAttribute("aria-busy", "true");
   try {
     await api("/api/paper/candidate-selection", {
       method: "PUT",
@@ -420,11 +617,14 @@ $("#candidates").addEventListener("change", async (event) => {
   } catch (error) {
     input.checked = !input.checked;
     input.disabled = false;
+    toggle?.classList.remove("is-pending");
+    toggle?.removeAttribute("aria-busy");
     showMessage(error.message, true);
   }
 });
 
-async function setAllCandidates(action) {
+async function setAllCandidates(action, button) {
+  setButtonPending(button, true, action === "all" ? "全选中" : "清空中");
   try {
     await api("/api/paper/candidate-selection", {
       method: "PUT",
@@ -432,6 +632,9 @@ async function setAllCandidates(action) {
     });
     recordMutation();
     const selected = action === "all";
+    if (ui.preferences !== null) {
+      ui.preferences.candidatesSelectedByDefault = selected;
+    }
     ui.candidates.forEach((candidate) => {
       candidate.selected = selected;
     });
@@ -440,11 +643,17 @@ async function setAllCandidates(action) {
     showMessage(selected ? "已选择全部扫描市场" : "已清空TEST交易范围");
   } catch (error) {
     showMessage(error.message, true);
+  } finally {
+    setButtonPending(button, false);
   }
 }
 
-$("#select-all").addEventListener("click", () => setAllCandidates("all"));
-$("#clear-all").addEventListener("click", () => setAllCandidates("none"));
+$("#select-all").addEventListener("click", (event) =>
+  setAllCandidates("all", event.currentTarget),
+);
+$("#clear-all").addEventListener("click", (event) =>
+  setAllCandidates("none", event.currentTarget),
+);
 
 $("#load-more").addEventListener("click", () => {
   ui.visibleCandidateCount = Math.min(
@@ -455,6 +664,7 @@ $("#load-more").addEventListener("click", () => {
 });
 
 loadAll().catch((error) => showMessage(error.message, true));
+window.setInterval(renderLiveRefreshStates, 1_000);
 window.setInterval(() => {
   loadAll().catch(() => {});
 }, 10_000);

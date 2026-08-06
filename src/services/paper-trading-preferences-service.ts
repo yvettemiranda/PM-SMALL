@@ -13,6 +13,7 @@ export type PaperTradingPreferencesSnapshot = {
   resultCounts: PaperMarketResultCount[];
   maxBuyPriceMicros: number;
   maxMarketDurationDays: number;
+  maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
   updatedAt: string;
 };
@@ -20,6 +21,14 @@ export type PaperTradingPreferencesSnapshot = {
 type MarketFilterUpdate = Pick<
   PaperTradingPreferencesSnapshot,
   "resultCounts" | "maxBuyPriceMicros" | "maxMarketDurationDays"
+> & { maxMarketProgressPercent?: number };
+
+type NormalizedMarketFilters = Pick<
+  PaperTradingPreferencesSnapshot,
+  | "resultCounts"
+  | "maxBuyPriceMicros"
+  | "maxMarketDurationDays"
+  | "maxMarketProgressPercent"
 >;
 
 export type PaperMarketFilterUpdateResult = {
@@ -39,6 +48,7 @@ export class PaperTradingPreferencesService {
       resultCounts: [2, 3],
       maxBuyPriceMicros: config.maxBuyPriceMicros,
       maxMarketDurationDays: config.maxMarketDurationDays,
+      maxMarketProgressPercent: config.maxMarketProgressPercent,
       candidatesSelectedByDefault: true,
     } satisfies Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
     validateMarketFilterValues(defaults);
@@ -60,6 +70,7 @@ export class PaperTradingPreferencesService {
       resultCounts: [...this.snapshot.resultCounts],
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
       maxMarketDurationDays: this.snapshot.maxMarketDurationDays,
+      maxMarketProgressPercent: this.snapshot.maxMarketProgressPercent,
     };
   }
 
@@ -67,22 +78,21 @@ export class PaperTradingPreferencesService {
     update: MarketFilterUpdate,
   ): PaperMarketFilterUpdateResult {
     const resultCounts = normalizeResultCounts(update.resultCounts);
-    validateMarketFilterValues(update);
 
-    const normalizedUpdate = {
+    const normalizedUpdate: NormalizedMarketFilters = {
       resultCounts,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       maxMarketDurationDays: update.maxMarketDurationDays,
+      maxMarketProgressPercent:
+        update.maxMarketProgressPercent ?? this.snapshot.maxMarketProgressPercent,
     };
+    validateMarketFilterValues(normalizedUpdate);
     const result = this.database.updatePaperTradingPreferences(
       {
         ...this.snapshot,
         ...normalizedUpdate,
       },
-      this.database
-        .listActivePaperBuyMarkets()
-        .filter((market) => !marketMatchesFilters(market, normalizedUpdate))
-        .map((market) => market.tokenId),
+      this.ineligibleActiveBuyTokenIds(normalizedUpdate, new Date()),
     );
     this.snapshot = result.preferences;
     return {
@@ -101,17 +111,31 @@ export class PaperTradingPreferencesService {
   public candidateMatchesMarketFilters(
     candidate: Pick<
       TradeCandidate,
-      "resultCount" | "makerBuyPriceMicros" | "durationDays"
+      "resultCount" | "makerBuyPriceMicros" | "durationDays" | "progressPercent"
     >,
+    now?: Date,
   ): boolean {
-    return marketMatchesFilters(candidate, this.snapshot);
+    return marketMatchesFilters(candidate, this.snapshot, now);
   }
 
-  public isCandidateEnabled(candidate: TradeCandidate): boolean {
+  public isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean {
     return (
-      this.candidateMatchesMarketFilters(candidate) &&
+      this.candidateMatchesMarketFilters(candidate, now) &&
       this.isTokenSelected(candidate.tokenId)
     );
+  }
+
+  public reconcileActiveBuys(now: Date = new Date()): number {
+    const tokenIds = this.ineligibleActiveBuyTokenIds(this.snapshot, now);
+    if (tokenIds.length === 0) {
+      return 0;
+    }
+    const result = this.database.updatePaperTradingPreferences(
+      this.snapshot,
+      tokenIds,
+    );
+    this.snapshot = result.preferences;
+    return result.cancelledBuyCount;
   }
 
   public setCandidateSelected(tokenId: string, selected: boolean): void {
@@ -131,6 +155,16 @@ export class PaperTradingPreferencesService {
     this.snapshot = this.database.setAllPaperCandidatesSelected(selected);
     this.selectionOverrides.clear();
   }
+
+  private ineligibleActiveBuyTokenIds(
+    filters: NormalizedMarketFilters,
+    now: Date,
+  ): string[] {
+    return this.database
+      .listActivePaperBuyMarkets()
+      .filter((market) => !marketMatchesFilters(market, filters, now))
+      .map((market) => market.tokenId);
+  }
 }
 
 function marketMatchesFilters(
@@ -138,25 +172,60 @@ function marketMatchesFilters(
     resultCount: PaperMarketResultCount | null;
     makerBuyPriceMicros: number;
     durationDays: number | null;
+    progressPercent?: number | null;
+    openedAt?: string | null;
+    endsAt?: string | null;
   },
-  filters: MarketFilterUpdate,
+  filters: NormalizedMarketFilters,
+  now?: Date,
 ): boolean {
   const resultCountMatches =
     market.resultCount === null
       ? filters.resultCounts.includes(2) && filters.resultCounts.includes(3)
       : filters.resultCounts.includes(market.resultCount);
+  const progressPercent = currentProgressPercent(market, now);
   return (
     resultCountMatches &&
     market.makerBuyPriceMicros <= filters.maxBuyPriceMicros &&
     market.durationDays !== null &&
-    market.durationDays <= filters.maxMarketDurationDays
+    market.durationDays >= 1 &&
+    market.durationDays <= filters.maxMarketDurationDays &&
+    progressPercent !== null &&
+    progressPercent >= 0 &&
+    progressPercent <= filters.maxMarketProgressPercent
   );
+}
+
+function currentProgressPercent(
+  market: {
+    progressPercent?: number | null;
+    openedAt?: string | null;
+    endsAt?: string | null;
+  },
+  now?: Date,
+): number | null {
+  if (now === undefined && Number.isFinite(market.progressPercent)) {
+    return market.progressPercent as number;
+  }
+  const openedAt = Date.parse(market.openedAt ?? "");
+  const endsAt = Date.parse(market.endsAt ?? "");
+  if (
+    now === undefined ||
+    !Number.isFinite(openedAt) ||
+    !Number.isFinite(endsAt) ||
+    endsAt <= openedAt
+  ) {
+    return Number.isFinite(market.progressPercent)
+      ? (market.progressPercent as number)
+      : null;
+  }
+  return ((now.getTime() - openedAt) / (endsAt - openedAt)) * 100;
 }
 
 function validateMarketFilterValues(
   values: Pick<
     PaperTradingPreferencesSnapshot,
-    "maxBuyPriceMicros" | "maxMarketDurationDays"
+    "maxBuyPriceMicros" | "maxMarketDurationDays" | "maxMarketProgressPercent"
   >,
 ): void {
   if (
@@ -169,6 +238,13 @@ function validateMarketFilterValues(
   }
   if (!MARKET_DURATION_DAY_OPTIONS.includes(values.maxMarketDurationDays as never)) {
     throw new Error("Market duration must use a supported slider value");
+  }
+  if (
+    !Number.isInteger(values.maxMarketProgressPercent) ||
+    values.maxMarketProgressPercent < 1 ||
+    values.maxMarketProgressPercent > 100
+  ) {
+    throw new Error("Market progress must be a whole percent between 1 and 100");
   }
 }
 
