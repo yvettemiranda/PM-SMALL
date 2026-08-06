@@ -1,6 +1,6 @@
 # Linux服务器部署
 
-本部署只运行`PAPER + LIVE_DISABLED`。它不会接入钱包、签名、真实订单或链上操作，也不得计入正式长期PAPER验收。
+本部署只运行`TEST + LIVE_DISABLED`。内部数据库仍保留`paper_*`兼容命名，但公开状态和接口统一使用TEST。它不会接入钱包、签名、真实订单或链上操作，也不得计入正式长期TEST验收。
 
 ## 访问边界
 
@@ -29,10 +29,10 @@ docker compose ps
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:3000/api/status?compact=true
-curl --fail --silent --show-error http://127.0.0.1:3000/api/paper/validation
+curl --fail --silent --show-error http://127.0.0.1:3000/api/test/validation
 ```
 
-新数据库的策略状态应为`STOPPED`，`executionMode`必须为`PAPER`，`liveExecutionEnabled`必须为`false`。只有人工点击`开始TEST`或调用对应接口后，才会进入`RUNNING`。
+新数据库的策略状态应为`PAUSED`，`executionMode`必须为`TEST`，`liveExecutionEnabled`必须为`false`。只有人工点击`开始TEST`或调用`POST /api/test/start`后，才会进入`RUNNING`。
 
 ## 手机和电脑直接访问
 
@@ -99,7 +99,7 @@ docker compose ps
 sudo ss -ltnp | grep -E ':(80|443|3000)[[:space:]]'
 ```
 
-预期只有Nginx监听公网80/443，应用3000只监听`127.0.0.1`。浏览器登录后仍必须确认`executionMode=PAPER`、`liveExecutionEnabled=false`以及策略处于预期状态。
+预期只有Nginx监听公网80/443，应用3000只监听`127.0.0.1`。浏览器登录后仍必须确认`executionMode=TEST`、`liveExecutionEnabled=false`以及策略处于预期状态。
 
 仓库提供`scripts/check-public-access.sh`做严格验收；不得添加`--insecure`绕过证书名称检查：
 
@@ -113,15 +113,20 @@ unset username password
 
 ## 更新与回滚
 
-更新前先确认GitHub `main`的目标提交并备份`data/`。数据库备份必须在容器停止后完成：
+更新前先确认GitHub `main`的目标提交并盘点工作树、容器、数据库路径和配置引用。数据库与部署配置备份必须在容器停止后完成，并保存校验值：
 
 ```bash
 docker compose stop bot
-cp -a data "data.backup-$(date -u +%Y%m%dT%H%M%SZ)"
+BACKUP_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "../pm-small-backup-${BACKUP_STAMP}"
+cp -a data .env docker-compose.yml "../pm-small-backup-${BACKUP_STAMP}/"
+(cd "../pm-small-backup-${BACKUP_STAMP}" && \
+  find . -type f ! -name SHA256SUMS -exec sha256sum {} \;) \
+  > "../pm-small-backup-${BACKUP_STAMP}/SHA256SUMS"
 docker compose start bot
 git fetch origin main
 git pull --ff-only origin main
 docker compose up -d --build
 ```
 
-更新后必须复核网页、`/api/status?compact=true`、`/api/paper/validation`、SQLite持久化和同库重启恢复。失败时保留数据库及日志现场，不得通过删除数据库或关闭验证绕过安全门槛。
+更新后必须复核运行提交、网页、`/api/status?compact=true`、`/api/test/validation`、SQLite迁移/持久化和同库重启恢复；状态保持`TEST + LIVE_DISABLED + PAUSED`。失败时保留数据库、备份及日志现场，不得通过删除数据库或关闭验证绕过安全门槛。

@@ -108,7 +108,7 @@ describe("paper soak CLI", () => {
       type: "summary",
       result: "FAILED",
       sampleCount: 0,
-      criticalErrors: ["No valid PAPER soak sample was recorded"],
+      criticalErrors: ["No valid TEST soak sample was recorded"],
     });
   });
 
@@ -259,7 +259,7 @@ function makeLiveStatus() {
   return {
     executionMode: "LIVE",
     liveExecutionEnabled: true,
-    strategy: { mode: "PAPER", status: "RUNNING" },
+    strategy: { mode: "TEST", status: "RUNNING" },
     paperAutomation: { running: true },
     paperSettlement: { running: true },
     marketStream: { running: true },
@@ -280,10 +280,10 @@ function makeHealthyStatus(callCount: number) {
   const beforeRestart = callCount === 1;
   return {
     version: "0.4.0",
-    executionMode: "PAPER",
+    executionMode: "TEST",
     liveExecutionEnabled: false,
     strategy: {
-      mode: "PAPER",
+      mode: "TEST",
       status: "RUNNING",
       initialCapitalMicros: 100_000_000,
       availableCashMicros: 99_000_000,

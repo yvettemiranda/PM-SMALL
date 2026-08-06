@@ -13,7 +13,7 @@ import { decimalStringToMicros } from "../../domain/price.js";
 import type { PaperMarketResolution } from "../../domain/paper-settlement.js";
 
 export interface MarketDataSource {
-  /** Returns every page inside a scan window; exact filtering happens downstream. */
+  /** Returns every open-event page; exact market filtering happens downstream. */
   listOpenEvents(
     request: OpenEventScanRequest,
     reportProgress?: (progress: OpenEventScanProgress) => void,
@@ -28,10 +28,6 @@ export interface MarketDataSource {
 
 export type OpenEventScanRequest = {
   pageSize: number;
-  startDateMin: string;
-  startDateMax: string;
-  endDateMin: string;
-  endDateMax: string;
 };
 
 export type OpenEventScanProgress = {
@@ -72,8 +68,8 @@ export class PolymarketMarketDataSource
     reportProgress?: (progress: OpenEventScanProgress) => void,
     signal?: AbortSignal,
   ): Promise<Event[]> {
-    // Do not impose a local page or token cap. The date bounds are a safe
-    // superset of the configured duration rule; exact checks remain downstream.
+    // Do not impose a local page, token, or event-date cap. Child-market dates
+    // can differ from their event, so exact schedule checks remain downstream.
     const events: Event[] = [];
     const paginator = this.client.listEvents({
       closed: false,

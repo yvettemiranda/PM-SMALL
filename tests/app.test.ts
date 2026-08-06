@@ -124,7 +124,6 @@ describe("HTTP app", () => {
         selectedCategories: ["Tech"],
         candidateSortDirection: "DESC",
         orderAmount: "2",
-        maxMarketProgressPercent: 100,
       },
     });
     const snapshot = await app.inject({ method: "GET", url: "/api/candidates" });
@@ -371,6 +370,17 @@ describe("HTTP app", () => {
     expect(page.body).not.toContain("开始新一轮");
     expect(page.body).not.toContain('id="new-cycle"');
     expect(page.body).not.toContain("PAPER");
+  });
+
+  it("does not expose a manual new-cycle endpoint", async () => {
+    const { app } = makeTestApp([]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/test/cycle/start",
+    });
+
+    expect(response.statusCode).toBe(404);
   });
 
   function makeTestApp(

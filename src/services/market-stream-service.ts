@@ -43,6 +43,7 @@ export interface PaperMarketRuntime {
     tokenId: string,
     consumedAsks: readonly BookLevel[],
   ): void;
+  executeTargetSells?(tokenId: string): void;
 }
 
 export class MarketStreamService implements PaperMarketRuntime {
@@ -187,6 +188,18 @@ export class MarketStreamService implements PaperMarketRuntime {
       return;
     }
     this.processor.consumeTestBuyLiquidity(tokenId, consumedAsks);
+    this.candidates.updateQuote(
+      tokenId,
+      this.processor.getBestBidMicros(tokenId),
+      this.processor.getBestAskMicros(tokenId),
+    );
+  }
+
+  public executeTargetSells(tokenId: string): void {
+    if (!this.connected) {
+      return;
+    }
+    this.processor.executeTargetSells(tokenId);
     this.candidates.updateQuote(
       tokenId,
       this.processor.getBestBidMicros(tokenId),

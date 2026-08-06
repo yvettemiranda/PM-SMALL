@@ -1,6 +1,6 @@
 import type {
   BookLevel,
-  PaperOrder,
+  PaperOrderSide,
   TokenOrderBook,
   TradeCandidate,
 } from "./types.js";
@@ -11,6 +11,12 @@ export type ImmediateBuyOutcome = "FILLED" | "PARTIAL" | "NO_FILL" | "BLOCKED";
 export type ConsumedBookLevel = {
   priceMicros: number;
   sizeMicros: number;
+};
+
+export type ExecutionOrderReference = {
+  id: string;
+  tokenId: string;
+  side: PaperOrderSide;
 };
 
 export type ImmediateBuyIntent = {
@@ -24,8 +30,8 @@ export type ImmediateBuyIntent = {
 
 export type ImmediateBuyExecution = {
   outcome: ImmediateBuyOutcome;
-  order: PaperOrder | null;
-  createdSellOrders: PaperOrder[];
+  order: ExecutionOrderReference | null;
+  createdSellOrders: ExecutionOrderReference[];
   spentMicros: number;
   feeMicros: number;
   consumedAsks: ConsumedBookLevel[];

@@ -13,8 +13,6 @@ import {
 } from "./trading-strategy.js";
 import type { TokenOrderBook, TradeCandidate } from "./types.js";
 
-const DAY_MS = 86_400_000;
-
 export type MarketScanDiagnostics = {
   phase: "EVENTS" | "ORDER_BOOKS" | "COMPLETE" | "FAILED";
   startedAt: string;
@@ -39,7 +37,6 @@ export type MarketScanPreferences = {
   resultCounts: readonly (2 | 3)[];
   maxBuyPriceMicros: number;
   maxMarketDurationDays: number;
-  maxMarketProgressPercent: number;
   allCategories: boolean;
   selectedCategories: readonly string[];
   candidateSortDirection: CandidateSortDirection;
@@ -104,7 +101,6 @@ export class MarketScanner implements CandidateScanner {
       resultCounts: [2, 3],
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
-      maxMarketProgressPercent: this.config.maxMarketProgressPercent,
       allCategories: true,
       selectedCategories: [],
       candidateSortDirection: "ASC",
@@ -114,7 +110,6 @@ export class MarketScanner implements CandidateScanner {
       ...this.config,
       maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
       maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
-      maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
     };
     const startedAt = new Date();
     const startedAtMs = Date.now();
@@ -138,22 +133,17 @@ export class MarketScanner implements CandidateScanner {
       rateLimitCount: 0,
       transientErrorCount: 0,
     };
-    // The time window is only a safe upstream reduction. Every page inside it
-    // is traversed, then the exact domain and order-book rules run locally.
+    // Event and child-market schedules can differ. Traverse every open-event
+    // page, then apply the exact per-market duration rule locally so a valid
+    // child market cannot be lost to an event-level date bound.
     try {
       signal?.throwIfAborted();
-      const scanWindowMs = scanPreferences.maxMarketDurationDays * DAY_MS;
-      const nowMs = now.getTime();
       let eventRetryCount = 0;
       let eventRateLimitCount = 0;
       let eventTransientErrorCount = 0;
       const events = await this.marketData.listOpenEvents(
         {
           pageSize: this.config.scanEventPageSize,
-          startDateMin: new Date(nowMs - scanWindowMs).toISOString(),
-          startDateMax: now.toISOString(),
-          endDateMin: now.toISOString(),
-          endDateMax: new Date(nowMs + scanWindowMs).toISOString(),
         },
         ({
           pageCount,
@@ -180,21 +170,21 @@ export class MarketScanner implements CandidateScanner {
       );
       signal?.throwIfAborted();
       const eligibleEvents = events.flatMap((event) => {
-        const eligibleEvent = filterEligibleEvent(event, scanConfig, now);
+        const eligibleEvent = filterEligibleEvent(event);
         return eligibleEvent === null ? [] : [{ event, eligibleEvent }];
       });
+      const eligibleTokens = eligibleEvents.flatMap(({ event, eligibleEvent }) =>
+        extractEligibleTokens(event, eligibleEvent, scanConfig, now),
+      );
       const availableCategories = Array.from(
-        new Set(eligibleEvents.map(({ eligibleEvent }) => eligibleEvent.category)),
+        new Set(eligibleTokens.map((token) => token.category)),
       ).sort((left, right) => left.localeCompare(right));
-      const tokens = eligibleEvents.flatMap(({ event, eligibleEvent }) => {
-        const categoryAllowed =
-          scanPreferences.allCategories ||
-          scanPreferences.selectedCategories.includes(eligibleEvent.category);
-        return !categoryAllowed ||
-          !scanPreferences.resultCounts.includes(eligibleEvent.resultCount)
-          ? []
-          : extractEligibleTokens(event, eligibleEvent, now);
-      });
+      const tokens = eligibleTokens.filter(
+        (token) =>
+          scanPreferences.resultCounts.includes(token.resultCount) &&
+          (scanPreferences.allCategories ||
+            scanPreferences.selectedCategories.includes(token.category)),
+      );
 
       this.updateDiagnostics({
         phase: "ORDER_BOOKS",

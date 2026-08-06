@@ -53,8 +53,6 @@ function publicConfig(
     orderBudget: microsToDecimalString(preferences.orderBudgetMicros),
     resultCounts: preferences.resultCounts,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
-    maxMarketProgressPercent: preferences.maxMarketProgressPercent,
-    stopBuyProgressPercent: config.stopBuyProgressPercent,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     scanIntervalMs: config.scanIntervalMs,
@@ -159,7 +157,12 @@ function serializeSnapshot(
 
 function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
   return {
-    ...preferences,
+    resultCounts: preferences.resultCounts,
+    allCategories: preferences.allCategories,
+    selectedCategories: preferences.selectedCategories,
+    candidateSortDirection: preferences.candidateSortDirection,
+    maxMarketDurationDays: preferences.maxMarketDurationDays,
+    updatedAt: preferences.updatedAt,
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     maxBuyPriceCents: preferences.maxBuyPriceMicros / 10_000,
     orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
@@ -482,22 +485,6 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     return { strategy: serializeState(strategy) };
   });
 
-  app.post("/api/test/cycle/start", async (_request, reply) => {
-    if (dependencies.database.getStrategyState().status === "RUNNING") {
-      return reply
-        .code(409)
-        .send({ error: "Pause TEST before starting a new cycle" });
-    }
-    const cycle = dependencies.database.startNewPaperCycle();
-    dependencies.paperAutomation?.requestRun();
-    dependencies.paperSettlement?.requestRun();
-    dependencies.marketStream?.refreshSubscriptions();
-    return {
-      strategy: serializeState(cycle.strategy),
-      resetTokenCount: cycle.resetTokenCount,
-    };
-  });
-
   app.post("/api/test/pause", async () => ({
     strategy: serializeState(dependencies.database.setStrategyStatus("PAUSED")),
   }));
@@ -614,7 +601,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       !dependencies.tradingPreferences.isCandidateEnabled(candidate, new Date())
     ) {
       return reply.code(409).send({
-        error: "Candidate is excluded by the current TEST filters or selection",
+        error: "Candidate is excluded by the current TEST filters",
       });
     }
 
@@ -641,10 +628,13 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       candidate.tokenId,
       execution.consumedAsks,
     );
+    dependencies.marketStream?.executeTargetSells?.(candidate.tokenId);
     dependencies.marketStream?.refreshSubscriptions();
     return reply.code(201).send({
       outcome: execution.outcome,
-      order: serializeOrder(execution.order),
+      order: serializeOrder(
+        dependencies.database.getPaperOrder(execution.order.id),
+      ),
       spent: microsToDecimalString(execution.spentMicros),
       fee: microsToDecimalString(execution.feeMicros),
     });

@@ -351,17 +351,17 @@ function collectStatusCriticalErrors(
   if (httpStatus !== 200) {
     errors.push(`Status endpoint returned HTTP ${httpStatus}`);
   }
-  if (status.executionMode !== "PAPER") {
-    errors.push(`Execution mode is not PAPER: ${status.executionMode}`);
+  if (status.executionMode !== "TEST") {
+    errors.push(`Execution mode is not TEST: ${status.executionMode}`);
   }
   if (status.liveExecutionEnabled) {
     errors.push("Live execution is enabled");
   }
-  if (status.strategy.mode !== "PAPER") {
-    errors.push(`Strategy mode is not PAPER: ${status.strategy.mode}`);
+  if (status.strategy.mode !== "TEST") {
+    errors.push(`Strategy mode is not TEST: ${status.strategy.mode}`);
   }
   if (requireRunning && status.strategy.status !== "RUNNING") {
-    errors.push(`Paper strategy is not RUNNING: ${status.strategy.status}`);
+    errors.push(`TEST strategy is not RUNNING: ${status.strategy.status}`);
   }
   if (!status.paperValidation.running) {
     errors.push("Periodic paper validation service is not running");

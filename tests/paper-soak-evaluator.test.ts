@@ -5,7 +5,7 @@ import {
 } from "../src/services/paper-soak-evaluator.js";
 
 describe("evaluatePaperSoakSample", () => {
-  it("compacts a healthy PAPER snapshot without warnings", () => {
+  it("compacts a healthy TEST snapshot without warnings", () => {
     const sample = evaluatePaperSoakSample({
       sampledAt: "2026-08-04T00:00:00.000Z",
       requestDurationMs: 25,
@@ -25,9 +25,9 @@ describe("evaluatePaperSoakSample", () => {
         validationStatusCode: 200,
       },
       safety: {
-        executionMode: "PAPER",
+        executionMode: "TEST",
         liveExecutionEnabled: false,
-        strategyMode: "PAPER",
+        strategyMode: "TEST",
         strategyStatus: "RUNNING",
       },
       runtime: {
@@ -155,9 +155,9 @@ describe("evaluatePaperSoakSample", () => {
 
     expect(sample.criticalErrors).toEqual(
       expect.arrayContaining([
-        "Execution mode is not PAPER: LIVE",
+        "Execution mode is not TEST: LIVE",
         "Live execution is enabled",
-        "Paper strategy is not RUNNING: PAUSED",
+        "TEST strategy is not RUNNING: PAUSED",
         "Paper ledger validation failed: ledger mismatch",
         "SQLite integrity check failed: malformed",
         "Periodic paper validation failed: periodic mismatch",
@@ -178,7 +178,7 @@ describe("evaluatePaperSoakSample", () => {
       }),
     ).toEqual(
       expect.arrayContaining([
-        "Execution mode is not PAPER: LIVE",
+        "Execution mode is not TEST: LIVE",
         "Live execution is enabled",
       ]),
     );
@@ -209,10 +209,10 @@ describe("evaluatePaperSoakSample", () => {
 function makeStatus() {
   return {
     version: "0.4.0",
-    executionMode: "PAPER",
+    executionMode: "TEST",
     liveExecutionEnabled: false,
     strategy: {
-      mode: "PAPER",
+      mode: "TEST",
       status: "RUNNING",
       initialCapitalMicros: 100_000_000,
       availableCashMicros: 99_000_000,

@@ -31,7 +31,6 @@ describe("MarketScanner", () => {
       resultCounts: [2] as Array<2 | 3>,
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 7,
-      maxMarketProgressPercent: 5,
       allCategories: true,
       selectedCategories: [] as string[],
       candidateSortDirection: "ASC" as const,
@@ -48,14 +47,7 @@ describe("MarketScanner", () => {
     filters = { ...filters, resultCounts: [3] };
     expect(await scanner.scan(now)).toEqual([]);
 
-    expect(requestedWindows[0]).toMatchObject({
-      startDateMin: "2025-12-26T00:00:00.000Z",
-      endDateMax: "2026-01-09T00:00:00.000Z",
-    });
-    expect(requestedWindows[1]).toMatchObject({
-      startDateMin: "2025-12-19T00:00:00.000Z",
-      endDateMax: "2026-01-16T00:00:00.000Z",
-    });
+    expect(requestedWindows).toEqual([{ pageSize: 50 }, { pageSize: 50 }, { pageSize: 50 }]);
   });
 
   it("passes the cancellation signal through both scan stages", async () => {
@@ -160,13 +152,7 @@ describe("MarketScanner", () => {
     expect(candidates.map((candidate) => candidate.tokenId)).toContain(
       "no-token-120",
     );
-    expect(requestedWindow).toEqual({
-      pageSize: 50,
-      startDateMin: "2025-12-03T00:00:00.000Z",
-      startDateMax: "2026-01-02T00:00:00.000Z",
-      endDateMin: "2026-01-02T00:00:00.000Z",
-      endDateMax: "2026-02-01T00:00:00.000Z",
-    });
+    expect(requestedWindow).toEqual({ pageSize: 50 });
     expect(eventsProgress).toMatchObject({
       phase: "EVENTS",
       completedAt: null,

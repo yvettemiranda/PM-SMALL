@@ -34,18 +34,25 @@ describe("event filtering", () => {
   });
 
   it("calculates duration and progress", () => {
-    const eligible = filterEligibleEvent(makeEvent(), testConfig, now);
-    expect(eligible?.durationDays).toBe(10);
-    expect(eligible?.progressPercent).toBe(10);
+    const event = makeEvent();
+    const eligible = filterEligibleEvent(event);
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)[0]).toMatchObject({
+      durationDays: 10,
+      progressPercent: 10,
+    });
   });
 
   it("uses the configured maximum duration as a filter", () => {
-    const eligible = filterEligibleEvent(
-      makeEvent(),
-      { ...testConfig, maxMarketDurationDays: 5 },
-      now,
-    );
-    expect(eligible).toBeNull();
+    const event = makeEvent();
+    const eligible = filterEligibleEvent(event);
+    expect(
+      extractEligibleTokens(
+        event,
+        eligible!,
+        { ...testConfig, maxMarketDurationDays: 5 },
+        now,
+      ),
+    ).toEqual([]);
   });
 
   it("uses lifecycle progress only for display and ordering", () => {
@@ -56,12 +63,14 @@ describe("event filtering", () => {
       },
     });
 
+    const eligible = filterEligibleEvent(almostFinished);
     expect(
-      filterEligibleEvent(
+      extractEligibleTokens(
         almostFinished,
-        { ...testConfig, maxMarketProgressPercent: 20 },
+        eligible!,
+        testConfig,
         now,
-      ),
+      )[0],
     ).toMatchObject({ progressPercent: expect.any(Number) });
   });
 
@@ -69,7 +78,6 @@ describe("event filtering", () => {
     const filterConfig = {
       ...testConfig,
       maxMarketDurationDays: 1,
-      maxMarketProgressPercent: 100,
     };
     const halfwayThrough = new Date("2026-01-01T12:00:00.000Z");
     const shorterThanOneDay = makeEvent({
@@ -85,10 +93,81 @@ describe("event filtering", () => {
       },
     });
 
-    expect(filterEligibleEvent(shorterThanOneDay, filterConfig, halfwayThrough)).toBeNull();
     expect(
-      filterEligibleEvent(exactlyOneDay, filterConfig, halfwayThrough),
+      extractEligibleTokens(
+        shorterThanOneDay,
+        filterEligibleEvent(shorterThanOneDay)!,
+        filterConfig,
+        halfwayThrough,
+      ),
+    ).toEqual([]);
+    expect(
+      extractEligibleTokens(
+        exactlyOneDay,
+        filterEligibleEvent(exactlyOneDay)!,
+        filterConfig,
+        halfwayThrough,
+      )[0],
     ).toMatchObject({ durationDays: 1, progressPercent: 50 });
+  });
+
+  it("uses each market's own schedule for the one-to-maximum-day rule", () => {
+    const event = makeEvent({
+      schedule: {
+        startDate: "2025-12-01T00:00:00.000Z",
+        endDate: "2026-02-01T00:00:00.000Z",
+      },
+      markets: [
+        makeMarket({
+          state: {
+            active: true,
+            closed: false,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            startDate: "2026-01-01T00:00:00.000Z",
+            endDate: "2026-01-11T00:00:00.000Z",
+          },
+        }),
+      ],
+    });
+
+    const eligible = filterEligibleEvent(event);
+
+    expect(eligible).not.toBeNull();
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([
+      expect.objectContaining({
+        tokenId: "yes-token",
+        openedAt: "2026-01-01T00:00:00.000Z",
+        endsAt: "2026-01-11T00:00:00.000Z",
+        durationDays: 10,
+        progressPercent: 10,
+      }),
+      expect.objectContaining({
+        tokenId: "no-token",
+        durationDays: 10,
+      }),
+    ]);
+  });
+
+  it("rejects a child market whose own total duration is under one day", () => {
+    const event = makeEvent({
+      markets: [
+        makeMarket({
+          state: {
+            active: true,
+            closed: false,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            startDate: "2026-01-01T18:00:00.000Z",
+            endDate: "2026-01-02T06:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    const eligible = filterEligibleEvent(event);
+
+    expect(eligible).not.toBeNull();
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
   });
 
   it("does not return sports tokens after game start", () => {
@@ -97,9 +176,9 @@ describe("event filtering", () => {
         makeMarket({ sports: { gameStartTime: "2026-01-01T12:00:00.000Z" } }),
       ],
     });
-    const eligible = filterEligibleEvent(event, testConfig, now);
+    const eligible = filterEligibleEvent(event);
     expect(eligible).not.toBeNull();
-    expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
   });
 
   it("requires every market to be open and orderable", () => {
@@ -139,9 +218,9 @@ describe("event filtering", () => {
 
     for (const state of states) {
       const event = makeEvent({ markets: [makeMarket({ state })] });
-      const eligible = filterEligibleEvent(event, testConfig, now);
+      const eligible = filterEligibleEvent(event);
       expect(eligible).not.toBeNull();
-      expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+      expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
     }
   });
 
@@ -161,9 +240,9 @@ describe("event filtering", () => {
         }),
       ],
     });
-    const eligible = filterEligibleEvent(event, testConfig, now);
+    const eligible = filterEligibleEvent(event);
 
-    expect(extractEligibleTokens(event, eligible!, now)).toEqual([
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([
       expect.objectContaining({
         tokenId: "yes-token",
         feesEnabled: true,
@@ -188,8 +267,8 @@ describe("event filtering", () => {
 
     for (const trading of invalidSchedules) {
       const event = makeEvent({ markets: [makeMarket({ trading })] });
-      const eligible = filterEligibleEvent(event, testConfig, now);
-      expect(extractEligibleTokens(event, eligible!, now)).toEqual([]);
+      const eligible = filterEligibleEvent(event);
+      expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
     }
   });
 });

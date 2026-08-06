@@ -10,8 +10,6 @@ export const testConfig: AppConfig = {
   totalBudgetMicros: 100_000_000,
   orderBudgetMicros: 1_000_000,
   maxMarketDurationDays: 30,
-  maxMarketProgressPercent: 100,
-  stopBuyProgressPercent: 100,
   minBuyPriceMicros: 10_000,
   maxBuyPriceMicros: 30_000,
   scanIntervalMs: 15_000,

@@ -50,8 +50,8 @@ export class PaperMarketProcessor {
       database,
     ),
   ) {
-    if (executor.mode !== "TEST" || !executor.enabled) {
-      throw new Error("PaperMarketProcessor requires the enabled TEST executor");
+    if (!executor.enabled) {
+      throw new Error("PaperMarketProcessor requires an enabled execution adapter");
     }
   }
 
@@ -239,7 +239,7 @@ export class PaperMarketProcessor {
     this.processedTradeEvents += 1;
   }
 
-  private executeTargetSells(tokenId: string): void {
+  public executeTargetSells(tokenId: string): void {
     const book = this.books.get(tokenId);
     const metadata = this.database.getTestMarketExecutionMetadata(tokenId);
     if (

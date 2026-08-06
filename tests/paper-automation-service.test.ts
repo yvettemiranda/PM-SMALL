@@ -16,6 +16,10 @@ class FakeMarketRuntime implements PaperMarketRuntime {
   public askSizeMicros = 100_000_000;
   public asks: BookLevel[] | null = null;
   public consumeLiquidity = false;
+  public bids: BookLevel[] = [
+    { priceMicros: 10_000, sizeMicros: 100_000_000 },
+  ];
+  public executeTargetSellsForToken: ((tokenId: string) => void) | null = null;
 
   public getStatus(): MarketStreamStatus {
     return {
@@ -51,7 +55,7 @@ class FakeMarketRuntime implements PaperMarketRuntime {
     return {
       tokenId: candidate.tokenId,
       conditionId: candidate.conditionId,
-      bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+      bids: this.bids.map((level) => ({ ...level })),
       asks:
         this.asks?.map((level) => ({ ...level })) ??
         [{ priceMicros: candidate.executableBuyPriceMicros, sizeMicros: this.askSizeMicros }],
@@ -79,6 +83,10 @@ class FakeMarketRuntime implements PaperMarketRuntime {
       }
     }
     this.asks = this.asks.filter((level) => level.sizeMicros > 0);
+  }
+
+  public executeTargetSells(tokenId: string): void {
+    this.executeTargetSellsForToken?.(tokenId);
   }
 }
 
@@ -130,6 +138,50 @@ describe("PaperAutomationService", () => {
       recovery: { passed: true },
     });
     expect(marketStream.refreshCount).toBeGreaterThan(0);
+  });
+
+  it("rechecks the same book for an immediately executable target after buying", async () => {
+    const candidate = makeCurrentCandidate({
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const marketStream = new FakeMarketRuntime();
+    marketStream.bids = [
+      { priceMicros: 35_000, sizeMicros: 100_000_000 },
+    ];
+    marketStream.executeTargetSellsForToken = (tokenId) => {
+      database.executeTestFakSells({
+        tokenId,
+        bids: marketStream.bids,
+        minOrderSizeMicros: candidate.minOrderSizeMicros,
+        feeRateMicros: candidate.feeRateMicros,
+        feeExponent: candidate.feeExponent,
+      });
+    };
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() =>
+      database
+        .listPaperOrders()
+        .some((order) => order.side === "SELL" && order.status === "FILLED"),
+    );
+
+    expect(database.listCurrentPaperPositionViews()).toEqual([]);
   });
 
   it("buys a monitored market as soon as its streamed ask reaches the cap", async () => {
@@ -353,7 +405,6 @@ describe("PaperAutomationService", () => {
       {
         ...testConfig,
         paperSchedulerIntervalMs: 10,
-        stopBuyProgressPercent: 80,
       },
       preferences,
     );

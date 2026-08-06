@@ -16,7 +16,7 @@ describe("PaperTradingPreferencesService", () => {
     vi.useRealTimers();
   });
 
-  it("persists market filters and candidate selection overrides", () => {
+  it("persists market filters", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
     const preferences = new PaperTradingPreferencesService(database, testConfig);
@@ -33,18 +33,13 @@ describe("PaperTradingPreferencesService", () => {
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 60,
     });
-    preferences.setAllCandidatesSelected(false);
-    preferences.setCandidateSelected("selected-token", true);
-
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
       resultCounts: [3],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 60,
-      candidatesSelectedByDefault: false,
+      candidatesSelectedByDefault: true,
     });
-    expect(restored.isTokenSelected("selected-token")).toBe(true);
-    expect(restored.isTokenSelected("another-token")).toBe(false);
   });
 
   it("rejects a market whose total duration is less than one day", () => {
@@ -53,7 +48,6 @@ describe("PaperTradingPreferencesService", () => {
     const preferences = new PaperTradingPreferencesService(database, {
       ...testConfig,
       maxMarketDurationDays: 1,
-      maxMarketProgressPercent: 100,
     });
     const now = new Date("2026-01-02T00:00:00.000Z");
     const candidate = makeCandidate({
@@ -127,24 +121,6 @@ describe("PaperTradingPreferencesService", () => {
     expect(restored.isCandidateEnabled(progressedCandidate)).toBe(true);
   });
 
-  it("cancels an unfilled PAPER buy when its token is excluded", () => {
-    const database = new PaperDatabase(":memory:", 100_000_000);
-    databases.push(database);
-    const preferences = new PaperTradingPreferencesService(database, testConfig);
-    database.setStrategyStatus("RUNNING");
-    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
-
-    preferences.setCandidateSelected("yes-token", false);
-
-    expect(database.listPaperOrders()).toContainEqual(
-      expect.objectContaining({ id: buy.id, status: "CANCELLED" }),
-    );
-    expect(database.getStrategyState()).toMatchObject({
-      availableCashMicros: 100_000_000,
-      reservedCashMicros: 0,
-    });
-  });
-
   it("applies changed market filters before a replacement scan finishes", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
@@ -165,10 +141,6 @@ describe("PaperTradingPreferencesService", () => {
     });
 
     expect(preferences.isCandidateEnabled(binary)).toBe(false);
-    expect(preferences.isCandidateEnabled(ternary)).toBe(true);
-    preferences.setCandidateSelected("ternary-token", false);
-    // Per-token participation switches are legacy data only; the confirmed
-    // product scope is controlled by category and market filters.
     expect(preferences.isCandidateEnabled(ternary)).toBe(true);
   });
 
@@ -277,23 +249,6 @@ describe("PaperTradingPreferencesService", () => {
           status: "OPEN",
         }),
       ]),
-    );
-  });
-
-  it("fails closed instead of persisting an exclusion whose buy cannot be cancelled", () => {
-    const database = new PaperDatabase(":memory:", 100_000_000);
-    databases.push(database);
-    const preferences = new PaperTradingPreferencesService(database, testConfig);
-    database.setStrategyStatus("RUNNING");
-    const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
-    database.pausePaperStrategyForValidationFailure(["Injected validation fault"]);
-
-    expect(() => preferences.setCandidateSelected("yes-token", false)).toThrow(
-      /blocked by failed validation/,
-    );
-    expect(preferences.isTokenSelected("yes-token")).toBe(true);
-    expect(database.listPaperOrders()).toContainEqual(
-      expect.objectContaining({ id: buy.id, status: "OPEN" }),
     );
   });
 

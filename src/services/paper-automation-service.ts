@@ -63,8 +63,8 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       database,
     ),
   ) {
-    if (executor.mode !== "TEST" || !executor.enabled) {
-      throw new Error("PaperAutomationService requires the enabled TEST executor");
+    if (!executor.enabled) {
+      throw new Error("PaperAutomationService requires an enabled execution adapter");
     }
   }
 
@@ -228,6 +228,9 @@ export class PaperAutomationService implements PaperAutomationRuntime {
                 candidate.tokenId,
                 execution.consumedAsks,
               );
+              // The same book may already satisfy the newly created exit
+              // target. Recheck it now instead of waiting for another tick.
+              this.marketStream.executeTargetSells?.(candidate.tokenId);
               this.placedBuyCount += 1;
               placedThisRun += 1;
             }

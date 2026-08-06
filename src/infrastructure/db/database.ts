@@ -45,11 +45,6 @@ export type StrategyState = {
   updatedAt: string;
 };
 
-export type PaperNewCycleResult = {
-  strategy: StrategyState;
-  resetTokenCount: number;
-};
-
 export type TestResetResult = {
   strategy: StrategyState;
   preferences: PaperTradingPreferences;
@@ -176,11 +171,6 @@ export type TestMarketExecutionMetadata = {
   feeExponent: number;
   minOrderSizeMicros: number;
   tickSizeMicros: number;
-};
-
-export type PaperCandidateSelectionOverride = {
-  tokenId: string;
-  selected: boolean;
 };
 
 type PaperOrderRow = {
@@ -429,6 +419,7 @@ export class PaperDatabase {
       { version: 8, file: "008_market_progress_preference.sql" },
       { version: 9, file: "009_test_fak_execution.sql" },
       { version: 10, file: "010_test_strategy_preferences.sql" },
+      { version: 11, file: "011_legacy_target_exit_metadata.sql" },
     ];
 
     for (const migration of migrations) {
@@ -544,45 +535,6 @@ export class PaperDatabase {
       }
       this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", { status });
       return this.getStrategyState();
-    });
-  }
-
-  public startNewPaperCycle(): PaperNewCycleResult {
-    if (this.getStrategyState().status === "RUNNING") {
-      throw new Error("Pause TEST before starting a new paper cycle");
-    }
-    return this.enterRunningState((now) => {
-      this.cancelClosedCycleBuys(now, "NEW_CYCLE_STARTED");
-      const resetTokenCount = this.database
-        .prepare(
-          `UPDATE paper_positions
-          SET first_sell_at = NULL, cycle_closed_at = NULL,
-              cycle_spend_micros = 0, gross_buy_size_micros = 0,
-              gross_buy_notional_micros = 0, updated_at = ?
-          WHERE quantity_micros = 0 AND cost_micros = 0
-            AND (first_sell_at IS NOT NULL OR cycle_closed_at IS NOT NULL)
-            AND NOT EXISTS (
-              SELECT 1 FROM paper_settlements ps
-              WHERE ps.condition_id = paper_positions.condition_id
-                AND ps.status = 'SETTLED'
-            )`,
-        )
-        .run(now).changes;
-      this.database
-        .prepare(
-          "UPDATE strategy_state SET status = 'RUNNING', updated_at = ? WHERE id = 1",
-        )
-        .run(now);
-      this.writeAudit("PAPER_NEW_CYCLE_STARTED", "strategy", "1", {
-        resetTokenCount,
-      });
-      this.writeAudit("STRATEGY_STATUS_CHANGED", "strategy", "1", {
-        status: "RUNNING",
-      });
-      return {
-        strategy: this.getStrategyState(),
-        resetTokenCount,
-      };
     });
   }
 
@@ -836,19 +788,6 @@ export class PaperDatabase {
     }));
   }
 
-  public listPaperCandidateSelectionOverrides(): PaperCandidateSelectionOverride[] {
-    const rows = this.database
-      .prepare(
-        `SELECT token_id, selected
-        FROM paper_candidate_selection_overrides ORDER BY token_id`,
-      )
-      .all() as unknown as Array<{ token_id: string; selected: number }>;
-    return rows.map((row) => ({
-      tokenId: row.token_id,
-      selected: row.selected === 1,
-    }));
-  }
-
   public getTestMarketExecutionMetadata(
     tokenId: string,
   ): TestMarketExecutionMetadata | null {
@@ -876,82 +815,6 @@ export class PaperDatabase {
           minOrderSizeMicros: row.min_order_size_micros,
           tickSizeMicros: row.tick_size_micros,
         };
-  }
-
-  public setPaperCandidateSelected(
-    tokenId: string,
-    selected: boolean,
-    selectedByDefault: boolean,
-  ): void {
-    if (
-      !selected &&
-      this.listActivePaperOrders(tokenId).some((order) => order.side === "BUY")
-    ) {
-      this.assertPaperAccountingMutationAllowed();
-    }
-    this.transaction(() => {
-      const now = new Date().toISOString();
-      if (selected === selectedByDefault) {
-        this.database
-          .prepare(
-            "DELETE FROM paper_candidate_selection_overrides WHERE token_id = ?",
-          )
-          .run(tokenId);
-      } else {
-        this.database
-          .prepare(
-            `INSERT INTO paper_candidate_selection_overrides(token_id, selected, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(token_id) DO UPDATE SET
-              selected = excluded.selected, updated_at = excluded.updated_at`,
-          )
-          .run(tokenId, selected ? 1 : 0, now);
-      }
-      const cancelledBuyCount = selected
-        ? 0
-        : this.cancelActiveBuysForToken(
-            tokenId,
-            now,
-            "CANDIDATE_SELECTION_EXCLUDED",
-          );
-      this.writeAudit("PAPER_CANDIDATE_SELECTION_UPDATED", "market_token", tokenId, {
-        selected,
-        cancelledBuyCount,
-      });
-    });
-  }
-
-  public setAllPaperCandidatesSelected(selected: boolean): PaperTradingPreferences {
-    if (
-      !selected &&
-      this.listActivePaperOrders().some((order) => order.side === "BUY")
-    ) {
-      this.assertPaperAccountingMutationAllowed();
-    }
-    return this.transaction(() => {
-      const now = new Date().toISOString();
-      this.database
-        .prepare(
-          `UPDATE paper_trading_preferences
-          SET candidates_selected_by_default = ?, updated_at = ? WHERE id = 1`,
-        )
-        .run(selected ? 1 : 0, now);
-      this.database.prepare("DELETE FROM paper_candidate_selection_overrides").run();
-      let cancelledBuyCount = 0;
-      if (!selected) {
-        for (const order of this.listActivePaperOrders().filter(
-          (paperOrder) => paperOrder.side === "BUY",
-        )) {
-          this.cancelPaperBuy(order, now, "CANDIDATE_SELECTION_CLEARED");
-          cancelledBuyCount += 1;
-        }
-      }
-      this.writeAudit("PAPER_CANDIDATE_SELECTION_RESET", "strategy", "1", {
-        selected,
-        cancelledBuyCount,
-      });
-      return this.getPaperTradingPreferences();
-    });
   }
 
   public listPaperPositions(limit = 100): PaperPosition[] {
@@ -2900,7 +2763,7 @@ export class PaperDatabase {
     }
   }
 
-  private getPaperOrder(id: string): PaperOrder {
+  public getPaperOrder(id: string): PaperOrder {
     const row = this.database
       .prepare(
         `SELECT id, token_id, condition_id, event_id, market_id, game_starts_at,

@@ -17,17 +17,4 @@ describe("loadConfig", () => {
       loadConfig({ ORDER_BUDGET_USD: "101", TOTAL_BUDGET_USD: "100" }),
     ).toThrow("ORDER_BUDGET_USD cannot exceed TOTAL_BUDGET_USD");
   });
-
-  it("rejects a startup progress default outside the 1-100 percent UI range", () => {
-    expect(() => loadConfig({ MAX_MARKET_PROGRESS_PERCENT: "0" })).toThrow();
-  });
-
-  it("allows the saved filter and final buy cutoff to meet at 100 percent", () => {
-    const config = loadConfig({
-      MAX_MARKET_PROGRESS_PERCENT: "100",
-      STOP_BUY_PROGRESS_PERCENT: "100",
-    });
-    expect(config.maxMarketProgressPercent).toBe(100);
-    expect(config.stopBuyProgressPercent).toBe(100);
-  });
 });

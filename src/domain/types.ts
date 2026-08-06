@@ -14,10 +14,6 @@ export type EligibleEvent = {
   category: string;
   resultCount: 2 | 3;
   isNegativeRisk: boolean;
-  openedAt: string;
-  endsAt: string;
-  durationDays: number;
-  progressPercent: number;
 };
 
 export type MarketToken = {

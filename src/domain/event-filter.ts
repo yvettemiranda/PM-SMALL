@@ -28,9 +28,15 @@ export function normalizeEventResultCount(event: Event): 2 | 3 | null {
   return null;
 }
 
-function resolveSchedule(event: Event): { openedAt: number; endsAt: number } | null {
-  const openedAt = parseTimestamp(event.schedule.startDate);
-  const endsAt = parseTimestamp(event.schedule.endDate);
+function resolveMarketSchedule(
+  event: Event,
+  market: Market,
+): { openedAt: number; endsAt: number } | null {
+  const openedAt =
+    parseTimestamp(market.state.startDate) ??
+    parseTimestamp(event.schedule.startDate);
+  const endsAt =
+    parseTimestamp(market.state.endDate) ?? parseTimestamp(event.schedule.endDate);
   if (openedAt === null || endsAt === null || endsAt <= openedAt) {
     return null;
   }
@@ -39,8 +45,6 @@ function resolveSchedule(event: Event): { openedAt: number; endsAt: number } | n
 
 export function filterEligibleEvent(
   event: Event,
-  config: AppConfig,
-  now: Date,
 ): EligibleEvent | null {
   if (
     event.state.active !== true ||
@@ -51,24 +55,7 @@ export function filterEligibleEvent(
   }
 
   const resultCount = normalizeEventResultCount(event);
-  const schedule = resolveSchedule(event);
-  if (resultCount === null || schedule === null) {
-    return null;
-  }
-
-  const nowMs = now.getTime();
-  if (nowMs < schedule.openedAt || nowMs >= schedule.endsAt) {
-    return null;
-  }
-
-  const durationMs = schedule.endsAt - schedule.openedAt;
-  const durationDays = durationMs / DAY_MS;
-  const progressPercent = ((nowMs - schedule.openedAt) / durationMs) * 100;
-
-  if (
-    durationMs < DAY_MS ||
-    durationDays > config.maxMarketDurationDays
-  ) {
+  if (resultCount === null) {
     return null;
   }
 
@@ -82,10 +69,6 @@ export function filterEligibleEvent(
     category: event.category ?? "Other",
     resultCount,
     isNegativeRisk: event.trading.negRisk === true,
-    openedAt: new Date(schedule.openedAt).toISOString(),
-    endsAt: new Date(schedule.endsAt).toISOString(),
-    durationDays,
-    progressPercent,
   };
 }
 
@@ -125,6 +108,7 @@ function marketFeeParameters(
 export function extractEligibleTokens(
   event: Event,
   eligibleEvent: EligibleEvent,
+  config: AppConfig,
   now: Date,
 ): MarketToken[] {
   const tokens: MarketToken[] = [];
@@ -133,6 +117,23 @@ export function extractEligibleTokens(
     if (!marketIsOpen(market) || market.conditionId === null) {
       continue;
     }
+    const schedule = resolveMarketSchedule(event, market);
+    if (schedule === null) {
+      continue;
+    }
+    const durationMs = schedule.endsAt - schedule.openedAt;
+    const durationDays = durationMs / DAY_MS;
+    const nowMs = now.getTime();
+    if (
+      nowMs < schedule.openedAt ||
+      nowMs >= schedule.endsAt ||
+      durationMs < DAY_MS ||
+      durationDays > config.maxMarketDurationDays
+    ) {
+      continue;
+    }
+    const progressPercent =
+      ((nowMs - schedule.openedAt) / durationMs) * 100;
     const feeParameters = marketFeeParameters(market);
     if (feeParameters === null) {
       continue;
@@ -154,10 +155,10 @@ export function extractEligibleTokens(
       marketId: String(market.id),
       conditionId: String(market.conditionId),
       marketQuestion: market.question ?? "Untitled market",
-      openedAt: eligibleEvent.openedAt,
-      endsAt: eligibleEvent.endsAt,
-      durationDays: eligibleEvent.durationDays,
-      progressPercent: eligibleEvent.progressPercent,
+      openedAt: new Date(schedule.openedAt).toISOString(),
+      endsAt: new Date(schedule.endsAt).toISOString(),
+      durationDays,
+      progressPercent,
       gameStartsAt,
       ...feeParameters,
     } as const;

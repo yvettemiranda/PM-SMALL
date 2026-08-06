@@ -42,7 +42,6 @@ type NormalizedMarketFilters = Pick<
   | "resultCounts"
   | "maxBuyPriceMicros"
   | "maxMarketDurationDays"
-  | "maxMarketProgressPercent"
   | "allCategories"
   | "selectedCategories"
   | "candidateSortDirection"
@@ -56,7 +55,6 @@ export type PaperMarketFilterUpdateResult = {
 
 export class PaperTradingPreferencesService {
   private snapshot: PaperTradingPreferencesSnapshot;
-  private selectionOverrides: Map<string, boolean>;
   private readonly defaults: Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
   private readonly defaultInitialCapitalMicros: number;
 
@@ -81,11 +79,6 @@ export class PaperTradingPreferencesService {
     validateMarketFilterValues(this.defaults);
     this.snapshot = database.ensurePaperTradingPreferences(this.defaults);
     validateMarketFilterValues(this.snapshot);
-    this.selectionOverrides = new Map(
-      database
-        .listPaperCandidateSelectionOverrides()
-        .map((override) => [override.tokenId, override.selected]),
-    );
   }
 
   public getSnapshot(): PaperTradingPreferencesSnapshot {
@@ -102,12 +95,10 @@ export class PaperTradingPreferencesService {
       this.defaults,
     );
     this.snapshot = result.preferences;
-    this.selectionOverrides.clear();
   }
 
   public reload(): void {
     this.snapshot = this.database.getPaperTradingPreferences();
-    this.selectionOverrides.clear();
   }
 
   public getMarketScanPreferences(): MarketScanPreferences {
@@ -115,7 +106,6 @@ export class PaperTradingPreferencesService {
       resultCounts: [...this.snapshot.resultCounts],
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
       maxMarketDurationDays: this.snapshot.maxMarketDurationDays,
-      maxMarketProgressPercent: this.snapshot.maxMarketProgressPercent,
       allCategories: this.snapshot.allCategories,
       selectedCategories: [...this.snapshot.selectedCategories],
       candidateSortDirection: this.snapshot.candidateSortDirection,
@@ -157,7 +147,6 @@ export class PaperTradingPreferencesService {
       resultCounts,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       maxMarketDurationDays: update.maxMarketDurationDays,
-      maxMarketProgressPercent: 100,
       allCategories: update.allCategories ?? this.snapshot.allCategories,
       selectedCategories: normalizeCategories(
         update.selectedCategories ?? this.snapshot.selectedCategories,
@@ -178,6 +167,9 @@ export class PaperTradingPreferencesService {
       {
         ...this.snapshot,
         ...normalizedUpdate,
+        // Retained only for backwards-compatible persistence. Lifecycle
+        // progress is not an eligibility setting.
+        maxMarketProgressPercent: 100,
       },
       this.ineligibleActiveBuyTokenIds(normalizedUpdate, new Date()),
     );
@@ -186,13 +178,6 @@ export class PaperTradingPreferencesService {
       preferences: this.getSnapshot(),
       cancelledBuyCount: result.cancelledBuyCount,
     };
-  }
-
-  public isTokenSelected(tokenId: string): boolean {
-    return (
-      this.selectionOverrides.get(tokenId) ??
-      this.snapshot.candidatesSelectedByDefault
-    );
   }
 
   public candidateMatchesMarketFilters(
@@ -225,24 +210,6 @@ export class PaperTradingPreferencesService {
     );
     this.snapshot = result.preferences;
     return result.cancelledBuyCount;
-  }
-
-  public setCandidateSelected(tokenId: string, selected: boolean): void {
-    this.database.setPaperCandidateSelected(
-      tokenId,
-      selected,
-      this.snapshot.candidatesSelectedByDefault,
-    );
-    if (selected === this.snapshot.candidatesSelectedByDefault) {
-      this.selectionOverrides.delete(tokenId);
-    } else {
-      this.selectionOverrides.set(tokenId, selected);
-    }
-  }
-
-  public setAllCandidatesSelected(selected: boolean): void {
-    this.snapshot = this.database.setAllPaperCandidatesSelected(selected);
-    this.selectionOverrides.clear();
   }
 
   private ineligibleActiveBuyTokenIds(
@@ -300,7 +267,7 @@ function marketMatchesFilters(
     market.durationDays <= filters.maxMarketDurationDays &&
     progressPercent !== null &&
     progressPercent >= 0 &&
-    progressPercent <= filters.maxMarketProgressPercent
+    progressPercent < 100
   );
 }
 
@@ -333,8 +300,7 @@ function currentProgressPercent(
 function validateMarketFilterValues(
   values: Pick<
     PaperTradingPreferencesSnapshot,
-    "maxBuyPriceMicros" | "maxMarketDurationDays" | "maxMarketProgressPercent"
-    | "orderBudgetMicros"
+    "maxBuyPriceMicros" | "maxMarketDurationDays" | "orderBudgetMicros"
   >,
 ): void {
   if (
@@ -347,13 +313,6 @@ function validateMarketFilterValues(
   }
   if (!MARKET_DURATION_DAY_OPTIONS.includes(values.maxMarketDurationDays as never)) {
     throw new Error("Market duration must use a supported slider value");
-  }
-  if (
-    !Number.isInteger(values.maxMarketProgressPercent) ||
-    values.maxMarketProgressPercent < 1 ||
-    values.maxMarketProgressPercent > 100
-  ) {
-    throw new Error("Market progress must be a whole percent between 1 and 100");
   }
   if (!Number.isSafeInteger(values.orderBudgetMicros) || values.orderBudgetMicros <= 0) {
     throw new Error("Per-order TEST amount must be positive");

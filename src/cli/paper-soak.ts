@@ -189,7 +189,7 @@ async function run(): Promise<void> {
   let consecutiveTransportErrors = 0;
   let result: RunResult = "COMPLETED";
 
-  console.log(`PAPER soak monitor: ${baseUrl}`);
+  console.log(`TEST soak monitor: ${baseUrl}`);
   console.log(`Evidence file: ${outputPath}`);
   console.log(
     `Duration: ${durationSeconds}s; interval: ${intervalSeconds}s; require RUNNING: ${requireRunning}`,
@@ -209,7 +209,7 @@ async function run(): Promise<void> {
         ]);
         const [statusResult, validationResult] = await Promise.allSettled([
           fetchJson(`${baseUrl}/api/status?compact=true`, requestSignal),
-          fetchJson(`${baseUrl}/api/paper/validation`, requestSignal),
+          fetchJson(`${baseUrl}/api/test/validation`, requestSignal),
         ]);
         const availableCriticalErrors = evaluateAvailablePaperSoakSafety({
           ...(statusResult.status === "fulfilled"
@@ -363,7 +363,7 @@ async function run(): Promise<void> {
   }
   if (result === "COMPLETED" && statistics.sampleCount === 0) {
     result = "FAILED";
-    statistics.criticalErrors = ["No valid PAPER soak sample was recorded"];
+    statistics.criticalErrors = ["No valid TEST soak sample was recorded"];
   }
   const finishedAtDate = new Date();
   const { counterWindows, ...summaryStatistics } = statistics;

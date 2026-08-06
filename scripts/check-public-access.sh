@@ -100,7 +100,7 @@ failures = []
 execution_mode = status.get("executionMode")
 live_enabled = status.get("liveExecutionEnabled")
 strategy_status = (status.get("strategy") or {}).get("status")
-if execution_mode != "PAPER":
+if execution_mode != "TEST":
     failures.append(f"executionMode={execution_mode!r}")
 if live_enabled is not False:
     failures.append(f"liveExecutionEnabled={live_enabled!r}")
@@ -110,19 +110,19 @@ if failures:
     failure_text = ", ".join(failures)
     print(f"FAIL: unsafe or unexpected status: {failure_text}", file=sys.stderr)
     raise SystemExit(1)
-print(f"PASS: PAPER, LIVE disabled, strategy {expected_status}")
+print(f"PASS: TEST, LIVE disabled, strategy {expected_status}")
 '
 
-validation_json="$(curl "${curl_authenticated[@]}" "${base_url}/api/paper/validation")"
+validation_json="$(curl "${curl_authenticated[@]}" "${base_url}/api/test/validation")"
 printf '%s' "$validation_json" | "$python_bin" -c '
 import json
 import sys
 
 validation = (json.load(sys.stdin).get("validation") or {})
 if validation.get("passed") is not True or validation.get("sqliteIntegrity") != "ok":
-    print("FAIL: PAPER validation did not pass with SQLite integrity ok", file=sys.stderr)
+    print("FAIL: TEST validation did not pass with SQLite integrity ok", file=sys.stderr)
     raise SystemExit(1)
-print("PASS: PAPER validation passed and SQLite integrity is ok")
+print("PASS: TEST validation passed and SQLite integrity is ok")
 '
 
 echo "PASS: public TEST access is ready at ${base_url}/"
