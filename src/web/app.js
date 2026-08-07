@@ -7,13 +7,31 @@ const ui = {
   candidates: [],
   candidateCount: 0,
   visibleCandidateCount: 20,
-  durationOptions: [1, 7, 14, 30, 60, 90, 120, 180, 360, 365],
+  positionsExpanded: false,
   configDirty: false,
   loading: false,
   reloadRequested: false,
   mutationVersion: 0,
   controlPending: false,
   messageTimer: null,
+};
+
+const POSITION_PREVIEW_LIMIT = 20;
+const CATEGORY_LABELS_ZH = {
+  Politics: "政治",
+  Sports: "体育",
+  Crypto: "加密",
+  Esports: "电竞",
+  Iran: "伊朗",
+  Finance: "财务",
+  Geopolitics: "地缘政治",
+  Tech: "科技",
+  Culture: "文化",
+  Economy: "经济",
+  Weather: "天气",
+  Mentions: "提及",
+  Elections: "选举",
+  Art: "艺术",
 };
 
 async function api(path, options = {}) {
@@ -160,11 +178,17 @@ function progressMarkup(progressPercent, label = "市场进度") {
   return `<div class="progress-track" role="progressbar" aria-label="${escapeHtml(label)} ${clamped.toFixed(1)}%" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${clamped.toFixed(1)}"><span style="width:${clamped.toFixed(1)}%"></span></div>`;
 }
 
-function renderPortfolio(portfolio) {
+function currentPositions(positions = []) {
+  return positions.filter((position) => Number(position.quantity) > 0);
+}
+
+function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#total-funds", portfolio?.totalFunds);
-  setMoneyValue("#total-pnl", portfolio?.totalPnl, true);
-  setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
-  setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
+  setMoneyValue("#position-value", portfolio?.positionValue);
+  const positionCount = currentPositions(positions).length;
+  const count = $("#portfolio-position-count");
+  count.textContent = `${formatCount(positionCount)}单`;
+  count.dataset.tone = "neutral";
 }
 
 function renderRunControls() {
@@ -191,10 +215,23 @@ function renderRunControls() {
 }
 
 function renderPositions(positions = []) {
-  const current = positions.filter((position) => Number(position.quantity) > 0);
-  $("#position-count").textContent = `${formatCount(current.length)}个`;
-  $("#positions").innerHTML = current.length
+  const current = currentPositions(positions);
+  if (current.length <= POSITION_PREVIEW_LIMIT) ui.positionsExpanded = false;
+  const visible = ui.positionsExpanded
     ? current
+    : current.slice(0, POSITION_PREVIEW_LIMIT);
+  $("#position-count").textContent = `${formatCount(current.length)}个`;
+  const controls = $("#position-list-controls");
+  const toggle = $("#toggle-positions");
+  controls.hidden = current.length <= POSITION_PREVIEW_LIMIT;
+  $("#position-display-count").textContent =
+    `当前显示 ${formatCount(visible.length)} / ${formatCount(current.length)}`;
+  toggle.textContent = ui.positionsExpanded
+    ? "收起至前20个"
+    : `展开其余${formatCount(current.length - POSITION_PREVIEW_LIMIT)}个`;
+  toggle.setAttribute("aria-expanded", String(ui.positionsExpanded));
+  $("#positions").innerHTML = visible.length
+    ? visible
         .map((position) => {
           const progress = Number(position.progressPercent);
           const progressText = Number.isFinite(progress) ? `${progress.toFixed(1)}%` : "待更新";
@@ -312,18 +349,16 @@ function renderScanStatus(status) {
 
 function availableCategories(preferences) {
   const scanned = ui.dashboard?.marketScan?.diagnostics?.availableCategories ?? [];
-  const selectedIds = preferences?.selectedCategoryIds ?? preferences?.selectedCategories ?? [];
   const categories = new Map();
   for (const item of scanned) {
     const category = typeof item === "string" ? { id: item, label: item } : item;
     if (category?.id) categories.set(category.id, { id: category.id, label: category.label || category.id });
   }
-  for (const id of selectedIds) {
-    if (!categories.has(id)) categories.set(id, { id, label: id });
-  }
-  return Array.from(categories.values()).sort((left, right) =>
-    left.label.localeCompare(right.label, "zh-CN"),
-  );
+  return Array.from(categories.values());
+}
+
+function categoryDisplayLabel(category) {
+  return CATEGORY_LABELS_ZH[category.label] || category.label;
 }
 
 function renderCategories(preferences) {
@@ -333,20 +368,19 @@ function renderCategories(preferences) {
   $("#all-categories").checked = all;
   $("#category-options").innerHTML = categories
     .map((category) => `<label class="category-chip">
-      <input type="checkbox" data-category-id="${escapeHtml(category.id)}" ${selectedIds.includes(category.id) ? "checked" : ""} ${all ? "disabled" : ""} />
-      <span>${escapeHtml(category.label)}</span>
+      <input type="checkbox" data-category-id="${escapeHtml(category.id)}" ${all || selectedIds.includes(category.id) ? "checked" : ""} />
+      <span>${escapeHtml(categoryDisplayLabel(category))}</span>
     </label>`)
     .join("");
   $("#category-note").textContent = categories.length
     ? all
-      ? `当前扫描到 ${categories.length} 个类别，已选择全部。`
-      : `已选择 ${selectedIds.length} / ${categories.length} 个类别。`
-    : "扫描完成后会显示可选类别。";
+      ? `已全选 Polymarket 首页的 ${categories.length} 个栏目；新栏目会自动纳入。`
+      : `已选择 ${selectedIds.length} / ${categories.length} 个首页栏目。`
+    : "正在同步 Polymarket 首页栏目。";
 }
 
 function renderPreferences(preferences, strategy, force = false) {
   if (ui.configDirty && !force) return;
-  ui.durationOptions = preferences.durationOptions ?? ui.durationOptions;
   $("#binary-market").checked = preferences.resultCounts.includes(2);
   $("#ternary-market").checked = preferences.resultCounts.includes(3);
   $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
@@ -356,23 +390,28 @@ function renderPreferences(preferences, strategy, force = false) {
   $("#market-progress-filter").value = String(preferences.maxMarketProgressPercent);
   $("#market-progress-value").textContent = String(preferences.maxMarketProgressPercent);
   $("#market-progress-filter").setAttribute("aria-valuetext", `不超过${preferences.maxMarketProgressPercent}%`);
-  const durationIndex = Math.max(0, ui.durationOptions.indexOf(preferences.maxMarketDurationDays));
-  $("#market-duration").max = String(ui.durationOptions.length - 1);
-  $("#market-duration").value = String(durationIndex);
-  $("#duration-value").textContent = String(ui.durationOptions[durationIndex]);
-  $("#duration-marks").innerHTML = ui.durationOptions.map((duration) => `<span>${duration}</span>`).join("");
-  $("#market-duration").setAttribute("aria-valuetext", `1至${ui.durationOptions[durationIndex]}天`);
+  $("#min-market-duration").value = String(preferences.minMarketDurationDays);
+  $("#max-market-duration").value = String(preferences.maxMarketDurationDays);
+  $("#min-duration-value").textContent = String(preferences.minMarketDurationDays);
+  $("#max-duration-value").textContent = String(preferences.maxMarketDurationDays);
   $("#initial-capital").value = Number(strategy.initialCapital).toFixed(2);
   $("#order-amount").value = Number(preferences.orderAmount).toFixed(2);
   renderCategories(preferences);
-  updateSortButtons(preferences.candidateSortDirection);
+  updateSortToggle(preferences.candidateSortDirection);
   renderRunControls();
 }
 
-function updateSortButtons(direction) {
-  document.querySelectorAll("[data-sort]").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.sort === direction));
-  });
+function updateSortToggle(direction) {
+  const button = $("#sort-toggle");
+  const ascending = direction === "ASC";
+  button.dataset.nextSort = ascending ? "DESC" : "ASC";
+  button.querySelector("strong").textContent = ascending ? "↑" : "↓";
+  button.setAttribute(
+    "aria-label",
+    ascending
+      ? "当前按市场进度正序，点击切换为倒序"
+      : "当前按市场进度倒序，点击切换为正序",
+  );
 }
 
 function applyDashboard(dashboard) {
@@ -382,7 +421,7 @@ function applyDashboard(dashboard) {
   ui.candidates = dashboard.marketScan.candidates ?? [];
   ui.candidateCount = dashboard.marketScan.candidateCount ?? ui.candidates.length;
   renderRunControls();
-  renderPortfolio(dashboard.portfolio);
+  renderPortfolio(dashboard.portfolio, dashboard.positions);
   renderPositions(dashboard.positions);
   renderCandidates();
   renderScanStatus(dashboard.marketScan);
@@ -434,13 +473,23 @@ function collectConfigPayload() {
   }
 
   const maxBuyPriceCents = Number($("#max-buy-price").value);
-  const durationIndex = Number($("#market-duration").value);
+  const minMarketDurationDays = Number($("#min-market-duration").value);
+  const maxMarketDurationDays = Number($("#max-market-duration").value);
   const initialCapital = Number($("#initial-capital").value);
   const orderAmount = Number($("#order-amount").value);
   const minBidAskRatioPercent = Number($("#bid-ask-ratio").value);
   const maxMarketProgressPercent = Number($("#market-progress-filter").value);
   if (!Number.isInteger(maxBuyPriceCents) || maxBuyPriceCents < 1 || maxBuyPriceCents > 3) {
     throw new Error("最高买入价必须是1至3之间的整数美分");
+  }
+  if (!Number.isInteger(minMarketDurationDays) || minMarketDurationDays < 1 || minMarketDurationDays > 365) {
+    throw new Error("最短市场总时长必须是1至365天之间的整数");
+  }
+  if (!Number.isInteger(maxMarketDurationDays) || maxMarketDurationDays < 1 || maxMarketDurationDays > 365) {
+    throw new Error("最长市场总时长必须是1至365天之间的整数");
+  }
+  if (minMarketDurationDays > maxMarketDurationDays) {
+    throw new Error("最短市场总时长不能超过最长市场总时长");
   }
   if (!Number.isFinite(initialCapital) || initialCapital <= 0) throw new Error("总模拟资金必须大于0");
   if (!Number.isFinite(orderAmount) || orderAmount <= 0) throw new Error("每单使用金额必须大于0");
@@ -457,7 +506,8 @@ function collectConfigPayload() {
     allCategories,
     selectedCategoryIds,
     maxBuyPriceCents,
-    maxMarketDurationDays: ui.durationOptions[durationIndex],
+    minMarketDurationDays,
+    maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
     minBidAskRatioPercent,
     maxMarketProgressPercent,
@@ -472,6 +522,7 @@ function savedPreferencePayload(overrides = {}) {
     allCategories: ui.preferences.allCategories,
     selectedCategoryIds: ui.preferences.selectedCategoryIds ?? ui.preferences.selectedCategories,
     maxBuyPriceCents: ui.preferences.maxBuyPriceCents,
+    minMarketDurationDays: ui.preferences.minMarketDurationDays,
     maxMarketDurationDays: ui.preferences.maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
     minBidAskRatioPercent: ui.preferences.minBidAskRatioPercent,
@@ -502,14 +553,22 @@ $("#config-form").addEventListener("input", () => {
 
 $("#all-categories").addEventListener("change", () => {
   document.querySelectorAll("[data-category-id]").forEach((input) => {
-    input.disabled = $("#all-categories").checked;
+    input.checked = $("#all-categories").checked;
   });
 });
 
-$("#market-duration").addEventListener("input", (event) => {
-  const value = ui.durationOptions[Number(event.target.value)];
-  $("#duration-value").textContent = String(value);
-  event.target.setAttribute("aria-valuetext", `1至${value}天`);
+$("#category-options").addEventListener("change", () => {
+  const options = Array.from(document.querySelectorAll("[data-category-id]"));
+  $("#all-categories").checked =
+    options.length > 0 && options.every((input) => input.checked);
+});
+
+$("#min-market-duration").addEventListener("input", (event) => {
+  $("#min-duration-value").textContent = event.target.value || "—";
+});
+
+$("#max-market-duration").addEventListener("input", (event) => {
+  $("#max-duration-value").textContent = event.target.value || "—";
 });
 
 $("#bid-ask-ratio").addEventListener("input", (event) => {
@@ -618,13 +677,12 @@ $("#test-mode").addEventListener("click", () => {
   $("#live-lock").hidden = true;
 });
 
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-sort]");
-  if (!button || !ui.preferences) return;
-  const direction = button.dataset.sort;
-  if (direction === ui.preferences.candidateSortDirection) return;
-  document.querySelectorAll("[data-sort]").forEach((item) => { item.disabled = true; });
-  updateSortButtons(direction);
+$("#sort-toggle").addEventListener("click", async () => {
+  const button = $("#sort-toggle");
+  if (!ui.preferences || button.disabled) return;
+  const direction = button.dataset.nextSort;
+  button.disabled = true;
+  updateSortToggle(direction);
   try {
     const response = await api("/api/test/preferences", {
       method: "PUT",
@@ -636,11 +694,16 @@ document.addEventListener("click", async (event) => {
     showMessage(direction === "ASC" ? "已按市场进度正序排列" : "已按市场进度倒序排列");
     await loadDashboard();
   } catch (error) {
-    updateSortButtons(ui.preferences.candidateSortDirection);
+    updateSortToggle(ui.preferences.candidateSortDirection);
     showMessage(error.message, true);
   } finally {
-    document.querySelectorAll("[data-sort]").forEach((item) => { item.disabled = false; });
+    button.disabled = false;
   }
+});
+
+$("#toggle-positions").addEventListener("click", () => {
+  ui.positionsExpanded = !ui.positionsExpanded;
+  renderPositions(ui.dashboard?.positions ?? []);
 });
 
 $("#load-more").addEventListener("click", async () => {

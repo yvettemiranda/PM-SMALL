@@ -233,6 +233,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
                   minBuyPriceMicros: this.config.minBuyPriceMicros,
                   maxBuyPriceMicros: maxPriceMicros,
                   minBidAskRatioPercent: this.config.minBidAskRatioPercent,
+                  minMarketDurationDays: this.config.minMarketDurationDays,
                   maxMarketDurationDays: this.config.maxMarketDurationDays,
                   maxMarketProgressPercent:
                     this.config.maxMarketProgressPercent,

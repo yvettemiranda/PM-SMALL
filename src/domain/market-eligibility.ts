@@ -7,6 +7,7 @@ export type MarketEligibilitySettings = {
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
   minBidAskRatioPercent: number;
+  minMarketDurationDays: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   orderBudgetMicros: number;
@@ -84,7 +85,7 @@ export function isMarketEligible(
     calculateOrderSizeMicros(settings.orderBudgetMicros, bestAskMicros) >=
       minOrderSizeMicros &&
     market.durationDays !== null &&
-    market.durationDays >= 1 &&
+    market.durationDays >= settings.minMarketDurationDays &&
     market.durationDays <= settings.maxMarketDurationDays &&
     progressPercent !== null &&
     progressPercent >= 0 &&

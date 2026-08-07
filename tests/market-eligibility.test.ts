@@ -12,6 +12,7 @@ const settings: MarketEligibilitySettings = {
   minBuyPriceMicros: 10_000,
   maxBuyPriceMicros: 30_000,
   minBidAskRatioPercent: 50,
+  minMarketDurationDays: 1,
   maxMarketDurationDays: 30,
   maxMarketProgressPercent: 20,
   orderBudgetMicros: 1_000_000,
@@ -46,6 +47,19 @@ describe("market eligibility", () => {
     expect(
       isMarketEligible(makeCandidate({ progressPercent: 20.0001 }), settings),
     ).toBe(false);
+  });
+
+  it("treats both configured market-duration endpoints as inclusive", () => {
+    const durationRange = {
+      ...settings,
+      minMarketDurationDays: 7,
+      maxMarketDurationDays: 30,
+    };
+
+    expect(isMarketEligible(makeCandidate({ durationDays: 6.99 }), durationRange)).toBe(false);
+    expect(isMarketEligible(makeCandidate({ durationDays: 7 }), durationRange)).toBe(true);
+    expect(isMarketEligible(makeCandidate({ durationDays: 30 }), durationRange)).toBe(true);
+    expect(isMarketEligible(makeCandidate({ durationDays: 30.01 }), durationRange)).toBe(false);
   });
 
   it("removes a sports market as soon as its game starts", () => {

@@ -153,6 +153,7 @@ describe("PaperDatabase", () => {
     currentDatabase.ensurePaperTradingPreferences({
       resultCounts: [2, 3],
       maxBuyPriceMicros: 30_000,
+      minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 20,
       minBidAskRatioPercent: 50,
@@ -182,6 +183,7 @@ describe("PaperDatabase", () => {
     const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
+        minMarketDurationDays: 1,
         maxMarketProgressPercent: 20,
         minBidAskRatioPercent: 50,
       });
@@ -192,9 +194,133 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 13 });
+        ).toEqual({ version: 14 });
       } finally {
         schemaVersion.close();
+      }
+    } finally {
+      upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves schema 13 preferences while enabling arbitrary duration ranges", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-duration-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
+    currentDatabase.ensurePaperTradingPreferences({
+      resultCounts: [2],
+      maxBuyPriceMicros: 20_000,
+      minMarketDurationDays: 1,
+      maxMarketDurationDays: 60,
+      maxMarketProgressPercent: 37,
+      minBidAskRatioPercent: 75,
+      candidatesSelectedByDefault: false,
+      allCategories: false,
+      selectedCategories: ["2", "21"],
+      candidateSortDirection: "DESC",
+      orderBudgetMicros: 2_000_000,
+    });
+    currentDatabase.setStrategyStatus("RUNNING");
+    currentDatabase.close();
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase.exec(`
+        CREATE TABLE paper_trading_preferences_v13 (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          binary_enabled INTEGER NOT NULL CHECK (binary_enabled IN (0, 1)),
+          ternary_enabled INTEGER NOT NULL CHECK (ternary_enabled IN (0, 1)),
+          max_buy_price_micros INTEGER NOT NULL
+            CHECK (
+              max_buy_price_micros BETWEEN 10000 AND 30000
+              AND max_buy_price_micros % 10000 = 0
+            ),
+          max_market_duration_days INTEGER NOT NULL
+            CHECK (max_market_duration_days IN (1, 7, 14, 30, 60, 90, 120, 180, 360, 365)),
+          max_market_progress_percent INTEGER NOT NULL
+            CHECK (max_market_progress_percent BETWEEN 1 AND 100),
+          candidates_selected_by_default INTEGER NOT NULL
+            CHECK (candidates_selected_by_default IN (0, 1)),
+          all_categories_enabled INTEGER NOT NULL
+            CHECK (all_categories_enabled IN (0, 1)),
+          selected_categories_json TEXT NOT NULL DEFAULT '[]',
+          candidate_sort_direction TEXT NOT NULL DEFAULT 'ASC'
+            CHECK (candidate_sort_direction IN ('ASC', 'DESC')),
+          order_budget_micros INTEGER NOT NULL DEFAULT 1000000
+            CHECK (order_budget_micros > 0),
+          min_bid_ask_ratio_percent INTEGER NOT NULL DEFAULT 50
+            CHECK (min_bid_ask_ratio_percent BETWEEN 1 AND 100),
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO paper_trading_preferences_v13(
+          id, binary_enabled, ternary_enabled, max_buy_price_micros,
+          max_market_duration_days, max_market_progress_percent,
+          candidates_selected_by_default, all_categories_enabled,
+          selected_categories_json, candidate_sort_direction,
+          order_budget_micros, min_bid_ask_ratio_percent, updated_at
+        )
+        SELECT
+          id, binary_enabled, ternary_enabled, max_buy_price_micros,
+          max_market_duration_days, max_market_progress_percent,
+          candidates_selected_by_default, all_categories_enabled,
+          selected_categories_json, candidate_sort_direction,
+          order_budget_micros, min_bid_ask_ratio_percent, updated_at
+        FROM paper_trading_preferences;
+        DROP TABLE paper_trading_preferences;
+        ALTER TABLE paper_trading_preferences_v13 RENAME TO paper_trading_preferences;
+        DELETE FROM schema_migrations WHERE version = 14;
+        DELETE FROM audit_log
+        WHERE event_type = 'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED';
+      `);
+    } finally {
+      rawDatabase.close();
+    }
+
+    const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
+        resultCounts: [2],
+        maxBuyPriceMicros: 20_000,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 60,
+        maxMarketProgressPercent: 37,
+        minBidAskRatioPercent: 75,
+        candidatesSelectedByDefault: false,
+        allCategories: false,
+        selectedCategories: ["2", "21"],
+        candidateSortDirection: "DESC",
+        orderBudgetMicros: 2_000_000,
+      });
+      expect(upgradedDatabase.getStrategyState().status).toBe("PAUSED");
+
+      const preserved = upgradedDatabase.getPaperTradingPreferences();
+      upgradedDatabase.updatePaperTradingPreferences({
+        ...preserved,
+        minMarketDurationDays: 7,
+        maxMarketDurationDays: 45,
+      });
+      expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
+        minMarketDurationDays: 7,
+        maxMarketDurationDays: 45,
+      });
+
+      const inspectedDatabase = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          inspectedDatabase
+            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+            .get(),
+        ).toEqual({ version: 14 });
+        expect(
+          inspectedDatabase
+            .prepare(
+              "SELECT COUNT(*) AS count FROM audit_log WHERE event_type = 'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED'",
+            )
+            .get(),
+        ).toEqual({ count: 1 });
+      } finally {
+        inspectedDatabase.close();
       }
     } finally {
       upgradedDatabase.close();

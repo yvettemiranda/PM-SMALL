@@ -3,6 +3,9 @@ import { z } from "zod";
 const numberFromEnvironment = (fallback: number) =>
   z.coerce.number().finite().positive().default(fallback);
 
+const durationDaysFromEnvironment = (fallback: number) =>
+  z.coerce.number().int().min(1).max(365).default(fallback);
+
 const configSchema = z.object({
   HOST: z.string().min(1).default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -10,7 +13,8 @@ const configSchema = z.object({
   INITIAL_CAPITAL_USD: numberFromEnvironment(100),
   TOTAL_BUDGET_USD: numberFromEnvironment(100),
   ORDER_BUDGET_USD: numberFromEnvironment(1),
-  MAX_MARKET_DURATION_DAYS: numberFromEnvironment(30),
+  MIN_MARKET_DURATION_DAYS: durationDaysFromEnvironment(1),
+  MAX_MARKET_DURATION_DAYS: durationDaysFromEnvironment(30),
   MAX_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.03),
   MIN_BID_ASK_RATIO_PERCENT: z.coerce.number().int().min(1).max(100).default(50),
   MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().int().min(1).max(100).default(20),
@@ -29,6 +33,7 @@ export type AppConfig = {
   initialCapitalMicros: number;
   totalBudgetMicros: number;
   orderBudgetMicros: number;
+  minMarketDurationDays: number;
   maxMarketDurationDays: number;
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
@@ -59,6 +64,12 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     throw new Error("TOTAL_BUDGET_USD cannot exceed INITIAL_CAPITAL_USD");
   }
 
+  if (parsed.MIN_MARKET_DURATION_DAYS > parsed.MAX_MARKET_DURATION_DAYS) {
+    throw new Error(
+      "MIN_MARKET_DURATION_DAYS cannot exceed MAX_MARKET_DURATION_DAYS",
+    );
+  }
+
   return {
     host: parsed.HOST,
     port: parsed.PORT,
@@ -66,6 +77,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     initialCapitalMicros: toMicros(parsed.INITIAL_CAPITAL_USD),
     totalBudgetMicros: toMicros(parsed.TOTAL_BUDGET_USD),
     orderBudgetMicros: toMicros(parsed.ORDER_BUDGET_USD),
+    minMarketDurationDays: parsed.MIN_MARKET_DURATION_DAYS,
     maxMarketDurationDays: parsed.MAX_MARKET_DURATION_DAYS,
     minBuyPriceMicros: 10_000,
     maxBuyPriceMicros: toMicros(parsed.MAX_BUY_PRICE),

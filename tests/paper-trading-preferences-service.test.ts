@@ -24,6 +24,7 @@ describe("PaperTradingPreferencesService", () => {
     expect(preferences.getSnapshot()).toMatchObject({
       resultCounts: [2, 3],
       maxBuyPriceMicros: 30_000,
+      minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
       minBidAskRatioPercent: 50,
       maxMarketProgressPercent: 20,
@@ -33,7 +34,8 @@ describe("PaperTradingPreferencesService", () => {
     preferences.updateMarketFilters({
       resultCounts: [3],
       maxBuyPriceMicros: 30_000,
-      maxMarketDurationDays: 60,
+      minMarketDurationDays: 7,
+      maxMarketDurationDays: 45,
       minBidAskRatioPercent: 60,
       maxMarketProgressPercent: 80,
     });
@@ -41,7 +43,8 @@ describe("PaperTradingPreferencesService", () => {
     expect(restored.getSnapshot()).toMatchObject({
       resultCounts: [3],
       maxBuyPriceMicros: 30_000,
-      maxMarketDurationDays: 60,
+      minMarketDurationDays: 7,
+      maxMarketDurationDays: 45,
       minBidAskRatioPercent: 60,
       maxMarketProgressPercent: 80,
       candidatesSelectedByDefault: true,
@@ -294,17 +297,27 @@ describe("PaperTradingPreferencesService", () => {
     );
   });
 
-  it("rejects legacy configuration values that cannot be represented by the UI", () => {
+  it("accepts arbitrary whole-day ranges and rejects invalid values", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
 
-    expect(
-      () =>
-        new PaperTradingPreferencesService(database, {
-          ...testConfig,
-          maxMarketDurationDays: 45,
-        }),
-    ).toThrow(/supported slider value/);
+    const preferences = new PaperTradingPreferencesService(database, {
+      ...testConfig,
+      minMarketDurationDays: 8,
+      maxMarketDurationDays: 45,
+    });
+    expect(preferences.getSnapshot()).toMatchObject({
+      minMarketDurationDays: 8,
+      maxMarketDurationDays: 45,
+    });
+    expect(() =>
+      preferences.updateMarketFilters({
+        resultCounts: [2, 3],
+        maxBuyPriceMicros: 30_000,
+        minMarketDurationDays: 46,
+        maxMarketDurationDays: 45,
+      }),
+    ).toThrow(/minimum market duration/i);
 
     const anotherDatabase = new PaperDatabase(":memory:", 100_000_000);
     databases.push(anotherDatabase);

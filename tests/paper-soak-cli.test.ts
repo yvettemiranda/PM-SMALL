@@ -291,7 +291,10 @@ function makeHealthyStatus(callCount: number) {
       realizedPnlMicros: 0,
       positionCostMicros: 0,
     },
-    configuration: { maxMarketDurationDays: 30 },
+    configuration: {
+      minMarketDurationDays: 1,
+      maxMarketDurationDays: 30,
+    },
     runtime: beforeRestart
       ? {
           uptimeSeconds: 3_600,

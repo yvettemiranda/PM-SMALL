@@ -29,10 +29,10 @@ body {
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { color: inherit; }
-button, label, input[type="checkbox"], input[type="range"] { cursor: pointer; }
-button:disabled, input:disabled { cursor: default; }
+button, label, select, input[type="checkbox"], input[type="range"] { cursor: pointer; }
+button:disabled, input:disabled, select:disabled { cursor: default; }
 h1, h2, p, fieldset { margin: 0; }
 h2 { font-size: 15px; font-weight: 720; letter-spacing: -0.02em; }
 a { color: inherit; }
@@ -88,32 +88,28 @@ a { color: inherit; }
 
 .topbar-actions { flex: 0 0 auto; gap: 6px; }
 
-.mode-switch,
-.segmented {
+.mode-switch {
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--surface-strong);
 }
 
-.mode-switch button,
-.segmented button {
-  min-height: 34px;
-  padding: 5px 10px;
+.mode-switch button {
+  min-width: 40px;
+  min-height: 28px;
+  padding: 3px 7px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 720;
 }
 
-.mode-switch button { min-width: 54px; }
-.segmented button { min-width: 44px; }
-.mode-switch button[aria-pressed="true"],
-.segmented button[aria-pressed="true"] {
+.mode-switch button[aria-pressed="true"] {
   background: var(--surface);
   color: var(--text);
   box-shadow: 0 1px 3px rgb(18 38 32 / 12%);
@@ -135,11 +131,12 @@ a { color: inherit; }
 .button.secondary:hover, .icon-button:hover { border-color: #b8cbc5; color: var(--accent); }
 .button.danger { border-color: #f1cbd1; background: var(--negative-soft); color: var(--negative); }
 .button.danger:hover { border-color: var(--negative); }
-.button:disabled, .icon-button:disabled, .segmented button:disabled { opacity: 0.5; }
+.button:disabled, .icon-button:disabled, .sort-toggle:disabled { opacity: 0.5; }
 .icon-button { width: 40px; padding: 0; color: var(--muted); font-size: 21px; line-height: 1; }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 a:focus-visible {
   outline: 2px solid #11a187;
   outline-offset: 2px;
@@ -278,6 +275,22 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .price-input input { text-align: center; }
 .unit-input > span { padding-right: 9px; text-align: right; }
 
+.duration-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.duration-bound { min-width: 0; }
+.duration-bound > span:first-child {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.duration-separator { padding-bottom: 12px; color: var(--muted); font-size: 10px; }
+
 .range-fields { display: grid; gap: 17px; }
 .range-heading { align-items: baseline; }
 .range-heading > span { margin: 0; }
@@ -298,8 +311,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .test-settings .danger { width: 100%; margin-top: 10px; }
 .config-actions { display: grid; margin-top: 10px; }
 
-.portfolio { display: grid; grid-template-columns: repeat(4, 1fr); }
-.portfolio article { min-width: 0; padding: 15px; }
+.portfolio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.portfolio article { min-width: 0; padding: 13px; }
 .portfolio article + article { border-left: 1px solid var(--line); }
 .portfolio span { display: block; color: var(--muted); font-size: 10px; }
 .portfolio strong {
@@ -330,8 +343,22 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   line-height: 1.45;
 }
 .scan-state.is-error { color: var(--negative); }
-.sort-control { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
-.sort-control > span { color: var(--muted); font-size: 10px; }
+.sort-toggle {
+  display: inline-flex;
+  min-height: 29px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+}
+.sort-toggle strong { color: var(--text); font-size: 13px; line-height: 1; }
+.sort-toggle:hover { border-color: #b8cbc5; color: var(--accent); }
 
 .position-row,
 .market-row { padding: 13px; }
@@ -394,6 +421,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .empty-state { padding: 25px 13px; color: var(--muted); font-size: 12px; text-align: center; }
 .load-more { padding: 11px 13px; border-top: 1px solid var(--line); }
 .load-more .button { min-width: 120px; }
+.position-list-controls .compact-button { min-width: 0; min-height: 32px; padding: 5px 9px; }
 
 #message {
   position: fixed;
@@ -420,11 +448,9 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .app-shell { width: min(100% - 16px, 820px); padding-top: 8px; }
   .topbar { top: 5px; min-height: 52px; }
   .button { padding-right: 10px; padding-left: 10px; }
-  .portfolio { grid-template-columns: 1fr 1fr; }
-  .portfolio article { padding: 12px; }
-  .portfolio article:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
-  .portfolio article:nth-child(4) { border-top: 1px solid var(--line); }
-  .portfolio strong { font-size: 19px; }
+  .portfolio article { padding: 11px 9px; }
+  .portfolio span { font-size: 9px; }
+  .portfolio strong { font-size: 17px; }
   .config-panel { padding: 12px; }
   .money-fields, .config-actions { grid-template-columns: 1fr; }
   .scan-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
@@ -439,11 +465,12 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .topbar { gap: 5px; padding: 5px; }
   .topbar-actions { gap: 4px; }
   .mode-switch { padding: 2px; }
-  .mode-switch button { min-width: 46px; padding: 4px 6px; }
+  .mode-switch button { min-width: 36px; padding: 3px 5px; }
   .topbar .button { padding: 7px 8px; }
+  .portfolio article { padding-right: 7px; padding-left: 7px; }
+  .portfolio strong { font-size: 12px; }
   .section-heading, .position-row, .market-row { padding-right: 10px; padding-left: 10px; }
   .outcome-badge { min-width: 70px; }
-  .sort-control > span { display: none; }
   .range-marks { font-size: 8px; }
   .market-time strong { font-size: 9px; }
 }

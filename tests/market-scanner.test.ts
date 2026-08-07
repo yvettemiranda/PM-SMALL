@@ -32,6 +32,7 @@ describe("MarketScanner", () => {
       maxBuyPriceMicros: 30_000,
       minBuyPriceMicros: 10_000,
       minBidAskRatioPercent: 50,
+      minMarketDurationDays: 1,
       maxMarketDurationDays: 7,
       maxMarketProgressPercent: 20,
       allCategories: true,
@@ -51,6 +52,82 @@ describe("MarketScanner", () => {
     expect(await scanner.scan(now)).toHaveLength(2);
 
     expect(requestedWindows).toEqual([{ pageSize: 50 }, { pageSize: 50 }, { pageSize: 50 }]);
+  });
+
+  it("exposes only Polymarket homepage categories instead of every event tag", async () => {
+    const event = makeEvent({
+      tags: [
+        { id: "2", label: "Politics", slug: "politics" },
+        { id: "1001", label: "Abortion", slug: "abortion" },
+      ],
+    });
+    const source = {
+      listHomepageCategories: async () => [
+        { id: "2", label: "Politics" },
+        { id: "1", label: "Sports" },
+      ],
+      listOpenEvents: async () => [event],
+      fetchOrderBooks: async () => [],
+    } as MarketDataSource;
+    const scanner = new MarketScanner(source, testConfig);
+
+    await scanner.scan(new Date("2026-01-02T00:00:00.000Z"));
+
+    expect(scanner.getLastDiagnostics()?.availableCategories).toEqual([
+      { id: "2", label: "Politics" },
+      { id: "1", label: "Sports" },
+    ]);
+  });
+
+  it("publishes homepage categories while the event traversal is still running", async () => {
+    let finishEvents!: () => void;
+    const eventsPending = new Promise<never[]>((resolve) => {
+      finishEvents = () => resolve([]);
+    });
+    const source: MarketDataSource = {
+      listHomepageCategories: async () => [
+        { id: "2", label: "Politics" },
+        { id: "1", label: "Sports" },
+      ],
+      listOpenEvents: async () => eventsPending,
+      fetchOrderBooks: async () => [],
+    };
+    const scanner = new MarketScanner(source, testConfig);
+
+    const scan = scanner.scan(new Date("2026-01-02T00:00:00.000Z"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      phase: "EVENTS",
+      availableCategories: [
+        { id: "2", label: "Politics" },
+        { id: "1", label: "Sports" },
+      ],
+    });
+
+    finishEvents();
+    await scan;
+  });
+
+  it("does not block candidate refresh when homepage category sync hangs", async () => {
+    const source: MarketDataSource = {
+      listHomepageCategories: async () => new Promise(() => {}),
+      listOpenEvents: async () => [],
+      fetchOrderBooks: async () => [],
+    };
+    const scanner = new MarketScanner(source, testConfig);
+
+    const outcome = await Promise.race([
+      scanner
+        .scan(new Date("2026-01-02T00:00:00.000Z"))
+        .then(() => "COMPLETE"),
+      new Promise<string>((resolve) => {
+        setTimeout(() => resolve("BLOCKED"), 25);
+      }),
+    ]);
+
+    expect(outcome).toBe("COMPLETE");
   });
 
   it("passes the cancellation signal through both scan stages", async () => {

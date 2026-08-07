@@ -22,10 +22,9 @@ import type { CandidateService, CandidateSnapshot } from "./services/candidate-s
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
 import type { PaperSettlementRuntime } from "./services/paper-settlement-service.js";
-import {
-  MARKET_DURATION_DAY_OPTIONS,
-  type PaperTradingPreferencesService,
-  type PaperTradingPreferencesSnapshot,
+import type {
+  PaperTradingPreferencesService,
+  PaperTradingPreferencesSnapshot,
 } from "./services/paper-trading-preferences-service.js";
 import type { PaperValidationRuntime } from "./services/paper-validation-service.js";
 
@@ -52,6 +51,7 @@ function publicConfig(
     totalBudget: microsToDecimalString(strategy.initialCapitalMicros),
     orderBudget: microsToDecimalString(preferences.orderBudgetMicros),
     resultCounts: preferences.resultCounts,
+    minMarketDurationDays: preferences.minMarketDurationDays,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
@@ -164,6 +164,7 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
     selectedCategories: preferences.selectedCategories,
     selectedCategoryIds: preferences.selectedCategories,
     candidateSortDirection: preferences.candidateSortDirection,
+    minMarketDurationDays: preferences.minMarketDurationDays,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     updatedAt: preferences.updatedAt,
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
@@ -171,7 +172,6 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
     minBidAskRatioPercent: preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
-    durationOptions: [...MARKET_DURATION_DAY_OPTIONS],
   };
 }
 
@@ -347,6 +347,7 @@ function serializePortfolio(
     state.availableCashMicros + state.reservedCashMicros + marketValueMicros;
   return {
     totalFunds: microsToDecimalString(totalFundsMicros),
+    positionValue: microsToDecimalString(marketValueMicros),
     totalPnl: microsToDecimalString(totalPnlMicros),
     realizedPnl: microsToDecimalString(state.realizedPnlMicros),
     unrealizedPnl: microsToDecimalString(unrealizedPnlMicros),
@@ -546,10 +547,8 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       .object({
         resultCounts: z.array(z.union([z.literal(2), z.literal(3)])).min(1),
         maxBuyPriceCents: z.number().int().min(1).max(3),
-        maxMarketDurationDays: z
-          .number()
-          .int()
-          .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
+        minMarketDurationDays: z.number().int().min(1).max(365).optional(),
+        maxMarketDurationDays: z.number().int().min(1).max(365),
         allCategories: z.boolean().optional(),
         selectedCategoryIds: z.array(z.string().trim().min(1).max(80)).optional(),
         selectedCategories: z.array(z.string().trim().min(1).max(80)).optional(),
@@ -560,6 +559,14 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         initialCapital: z.number().finite().positive().max(1_000_000).optional(),
       })
       .parse(request.body);
+    const currentPreferences = dependencies.tradingPreferences.getSnapshot();
+    const requestedMinMarketDurationDays =
+      body.minMarketDurationDays ?? currentPreferences.minMarketDurationDays;
+    if (requestedMinMarketDurationDays > body.maxMarketDurationDays) {
+      throw new Error(
+        "Minimum market duration cannot exceed maximum market duration",
+      );
+    }
     const selectedCategoryIds =
       body.selectedCategoryIds ?? body.selectedCategories;
     if (
@@ -597,6 +604,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const update = dependencies.tradingPreferences.updateMarketFilters({
       resultCounts: body.resultCounts,
       maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
+      minMarketDurationDays: requestedMinMarketDurationDays,
       maxMarketDurationDays: body.maxMarketDurationDays,
       ...(body.allCategories === undefined
         ? {}

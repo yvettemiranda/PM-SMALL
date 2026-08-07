@@ -618,6 +618,7 @@ function defaultPreferences() {
     orderBudgetMicros: 1_000_000,
     maxBuyPriceMicros: 30_000,
     minBidAskRatioPercent: 50,
+    minMarketDurationDays: 1,
     maxMarketDurationDays: 30,
     maxMarketProgressPercent: 20,
     candidatesSelectedByDefault: true,

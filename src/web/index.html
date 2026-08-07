@@ -49,10 +49,10 @@
               <legend>市场类别</legend>
               <label class="all-category-option">
                 <input id="all-categories" type="checkbox" />
-                <span>全部符合条件</span>
+                <span>全选</span>
               </label>
               <div id="category-options" class="chip-options" aria-label="选择市场类别"></div>
-              <p id="category-note" class="field-note">扫描完成后会显示可选类别。</p>
+              <p id="category-note" class="field-note">栏目与 Polymarket 首页同步；全选时会自动纳入新栏目。</p>
             </fieldset>
 
             <fieldset class="config-block">
@@ -84,19 +84,25 @@
               <div class="duration-field range-field">
                 <div class="range-heading">
                   <span>市场总时长</span>
-                  <strong>1–<span id="duration-value">30</span>天</strong>
+                  <strong><span id="min-duration-value">1</span>–<span id="max-duration-value">30</span>天</strong>
                 </div>
-                <input
-                  id="market-duration"
-                  type="range"
-                  min="0"
-                  max="9"
-                  step="1"
-                  value="3"
-                  aria-label="市场总时长范围，最短一天"
-                  aria-valuetext="1至30天"
-                />
-                <div id="duration-marks" class="range-marks" aria-hidden="true"></div>
+                <div class="duration-inputs">
+                  <label class="duration-bound">
+                    <span>最短</span>
+                    <span class="unit-input">
+                      <input id="min-market-duration" type="number" min="1" max="365" step="1" value="1" inputmode="numeric" />
+                      <span>天</span>
+                    </span>
+                  </label>
+                  <span class="duration-separator" aria-hidden="true">至</span>
+                  <label class="duration-bound">
+                    <span>最长</span>
+                    <span class="unit-input">
+                      <input id="max-market-duration" type="number" min="1" max="365" step="1" value="30" inputmode="numeric" />
+                      <span>天</span>
+                    </span>
+                  </label>
+                </div>
               </div>
               <div class="range-field">
                 <div class="range-heading">
@@ -164,11 +170,10 @@
         </form>
       </section>
 
-      <section id="portfolio" class="portfolio" aria-label="资金与盈亏">
+      <section id="portfolio" class="portfolio" aria-label="资金与持仓">
         <article><span>总资金</span><strong id="total-funds">—</strong></article>
-        <article><span>总盈亏</span><strong id="total-pnl">—</strong></article>
-        <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
-        <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
+        <article><span>持仓实时价值</span><strong id="position-value">—</strong></article>
+        <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
       </section>
 
       <section class="panel">
@@ -180,6 +185,10 @@
           <span id="position-count" class="count">0个</span>
         </div>
         <div id="positions" class="position-list" aria-live="polite"></div>
+        <div id="position-list-controls" class="load-more position-list-controls" hidden>
+          <button id="toggle-positions" class="button secondary compact-button" type="button">展开其余持仓</button>
+          <span id="position-display-count" class="count">当前显示0 / 0</span>
+        </div>
       </section>
 
       <section class="panel">
@@ -192,13 +201,13 @@
             </div>
             <span id="scan-refresh-state" class="scan-state" role="status" aria-live="polite">等待首次扫描</span>
           </div>
-          <div class="sort-control">
-            <span>进度</span>
-            <div class="segmented" role="group" aria-label="市场进度排序">
-              <button type="button" data-sort="ASC" aria-pressed="true">正序</button>
-              <button type="button" data-sort="DESC" aria-pressed="false">倒序</button>
-            </div>
-          </div>
+          <button
+            id="sort-toggle"
+            class="sort-toggle"
+            type="button"
+            data-sort-toggle
+            aria-label="当前按市场进度正序，点击切换为倒序"
+          ><span>进度</span><strong aria-hidden="true">↑</strong></button>
         </div>
 
         <div id="candidates" class="market-list" aria-live="polite"></div>

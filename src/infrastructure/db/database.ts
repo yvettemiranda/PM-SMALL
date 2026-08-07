@@ -148,6 +148,7 @@ export type PaperTradingPreferences = {
   orderBudgetMicros: number;
   maxBuyPriceMicros: number;
   minBidAskRatioPercent: number;
+  minMarketDurationDays: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
@@ -354,6 +355,7 @@ function rowToPaperTradingPreferences(row: {
   ternary_enabled: number;
   max_buy_price_micros: number;
   min_bid_ask_ratio_percent: number;
+  min_market_duration_days: number;
   max_market_duration_days: number;
   max_market_progress_percent: number;
   candidates_selected_by_default: number;
@@ -374,6 +376,7 @@ function rowToPaperTradingPreferences(row: {
     orderBudgetMicros: row.order_budget_micros,
     maxBuyPriceMicros: row.max_buy_price_micros,
     minBidAskRatioPercent: row.min_bid_ask_ratio_percent,
+    minMarketDurationDays: row.min_market_duration_days,
     maxMarketDurationDays: row.max_market_duration_days,
     maxMarketProgressPercent: row.max_market_progress_percent,
     candidatesSelectedByDefault: row.candidates_selected_by_default === 1,
@@ -436,6 +439,7 @@ export class PaperDatabase {
       { version: 11, file: "011_legacy_target_exit_metadata.sql" },
       { version: 12, file: "012_final_market_eligibility.sql" },
       { version: 13, file: "013_fak_buy_fill_invariant.sql" },
+      { version: 14, file: "014_market_duration_range.sql" },
     ];
 
     for (const migration of migrations) {
@@ -705,16 +709,18 @@ export class PaperDatabase {
         .prepare(
           `INSERT INTO paper_trading_preferences(
             id, binary_enabled, ternary_enabled, max_buy_price_micros,
-            max_market_duration_days, max_market_progress_percent,
+            min_market_duration_days, max_market_duration_days,
+            max_market_progress_percent,
             candidates_selected_by_default, all_categories_enabled,
             selected_categories_json, candidate_sort_direction,
             order_budget_micros, min_bid_ask_ratio_percent, updated_at
-          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           defaults.resultCounts.includes(2) ? 1 : 0,
           defaults.resultCounts.includes(3) ? 1 : 0,
           defaults.maxBuyPriceMicros,
+          defaults.minMarketDurationDays,
           defaults.maxMarketDurationDays,
           defaults.maxMarketProgressPercent,
           defaults.candidatesSelectedByDefault ? 1 : 0,
@@ -759,7 +765,8 @@ export class PaperDatabase {
         .prepare(
           `UPDATE paper_trading_preferences
           SET binary_enabled = ?, ternary_enabled = ?, max_buy_price_micros = ?,
-              max_market_duration_days = ?, max_market_progress_percent = ?,
+              min_market_duration_days = ?, max_market_duration_days = ?,
+              max_market_progress_percent = ?,
               candidates_selected_by_default = ?, all_categories_enabled = ?,
               selected_categories_json = ?, candidate_sort_direction = ?,
               order_budget_micros = ?, min_bid_ask_ratio_percent = ?, updated_at = ?
@@ -769,6 +776,7 @@ export class PaperDatabase {
           preferences.resultCounts.includes(2) ? 1 : 0,
           preferences.resultCounts.includes(3) ? 1 : 0,
           preferences.maxBuyPriceMicros,
+          preferences.minMarketDurationDays,
           preferences.maxMarketDurationDays,
           preferences.maxMarketProgressPercent,
           preferences.candidatesSelectedByDefault ? 1 : 0,
@@ -791,6 +799,7 @@ export class PaperDatabase {
         resultCounts: preferences.resultCounts,
         maxBuyPriceMicros: preferences.maxBuyPriceMicros,
         minBidAskRatioPercent: preferences.minBidAskRatioPercent,
+        minMarketDurationDays: preferences.minMarketDurationDays,
         maxMarketDurationDays: preferences.maxMarketDurationDays,
         maxMarketProgressPercent: preferences.maxMarketProgressPercent,
         allCategories: preferences.allCategories,
@@ -2883,6 +2892,7 @@ export class PaperDatabase {
         binary_enabled: number;
         ternary_enabled: number;
         max_buy_price_micros: number;
+        min_market_duration_days: number;
         max_market_duration_days: number;
         max_market_progress_percent: number;
         min_bid_ask_ratio_percent: number;
@@ -2897,7 +2907,8 @@ export class PaperDatabase {
     return this.database
       .prepare(
         `SELECT binary_enabled, ternary_enabled, max_buy_price_micros,
-          max_market_duration_days, max_market_progress_percent,
+          min_market_duration_days, max_market_duration_days,
+          max_market_progress_percent,
           min_bid_ask_ratio_percent,
           candidates_selected_by_default, all_categories_enabled,
           selected_categories_json, candidate_sort_direction,
@@ -2909,6 +2920,7 @@ export class PaperDatabase {
           binary_enabled: number;
           ternary_enabled: number;
           max_buy_price_micros: number;
+          min_market_duration_days: number;
           max_market_duration_days: number;
           max_market_progress_percent: number;
           min_bid_ask_ratio_percent: number;

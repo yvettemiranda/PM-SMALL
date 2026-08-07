@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   RateLimitError,
   RequestRejectedError,
@@ -8,6 +8,82 @@ import { PolymarketMarketDataSource } from "../src/infrastructure/polymarket/mar
 import { makeEvent } from "./helpers.js";
 
 describe("PolymarketMarketDataSource", () => {
+  it("mirrors and caches the current Polymarket homepage category navigation", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const body = url.includes("/api/tags/filtered?")
+        ? [
+            { id: "2", label: "Politics", slug: "politics" },
+            { id: "21", label: "Crypto", slug: "crypto" },
+          ]
+        : url.endsWith("/tags/slug/esports?include_template=false")
+          ? { id: "64", label: "Esports", slug: "esports" }
+          : { id: "1422", label: "Art", slug: "art" };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const source = new PolymarketMarketDataSource(
+      {} as PublicClient,
+      [],
+      fetcher as typeof fetch,
+    );
+
+    await expect(source.listHomepageCategories()).resolves.toEqual([
+      { id: "2", label: "Politics" },
+      { id: "21", label: "Crypto" },
+      { id: "64", label: "Esports" },
+      { id: "1422", label: "Art" },
+    ]);
+    await source.listHomepageCategories();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back when homepage category sync exceeds its short timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let observedAbort = false;
+      const fetcher = vi.fn(
+        async (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal?.aborted) {
+              reject(signal.reason);
+              return;
+            }
+            signal?.addEventListener(
+              "abort",
+              () => {
+                observedAbort = true;
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          }),
+      );
+      const source = new PolymarketMarketDataSource(
+        {} as PublicClient,
+        [],
+        fetcher as typeof fetch,
+      );
+
+      const pending = source.listHomepageCategories();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(pending).resolves.toEqual(
+        expect.arrayContaining([
+          { id: "2", label: "Politics" },
+          { id: "1422", label: "Art" },
+        ]),
+      );
+      expect(await pending).toHaveLength(14);
+      expect(observedAbort).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("walks every page of open events", async () => {
     const firstEvent = makeEvent({ id: "event-page-1" });
     const secondEvent = makeEvent({ id: "event-page-2" });

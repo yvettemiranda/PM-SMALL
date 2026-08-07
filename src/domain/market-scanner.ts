@@ -35,6 +35,7 @@ export type MarketScanPreferences = {
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
   minBidAskRatioPercent: number;
+  minMarketDurationDays: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   allCategories: boolean;
@@ -103,6 +104,7 @@ export class MarketScanner implements CandidateScanner {
       minBuyPriceMicros: this.config.minBuyPriceMicros,
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
       minBidAskRatioPercent: this.config.minBidAskRatioPercent,
+      minMarketDurationDays: this.config.minMarketDurationDays,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
       maxMarketProgressPercent: this.config.maxMarketProgressPercent,
       allCategories: true,
@@ -113,6 +115,7 @@ export class MarketScanner implements CandidateScanner {
     const scanConfig: AppConfig = {
       ...this.config,
       maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
+      minMarketDurationDays: 1,
       maxMarketDurationDays: 365,
     };
     const startedAt = new Date();
@@ -142,6 +145,23 @@ export class MarketScanner implements CandidateScanner {
     // child market cannot be lost to an event-level date bound.
     try {
       signal?.throwIfAborted();
+      const homepageCategoriesPromise =
+        this.marketData.listHomepageCategories === undefined
+          ? Promise.resolve([])
+          : this.marketData.listHomepageCategories(signal).catch(() => []);
+      let homepageCategories: MarketCategory[] = [];
+      void homepageCategoriesPromise.then((syncedCategories) => {
+        homepageCategories = syncedCategories.map((category) => ({
+          ...category,
+        }));
+        if (
+          homepageCategories.length > 0 &&
+          this.lastDiagnostics?.startedAt === startedAt.toISOString() &&
+          this.lastDiagnostics.completedAt === null
+        ) {
+          this.updateDiagnostics({ availableCategories: homepageCategories });
+        }
+      });
       let eventRetryCount = 0;
       let eventRateLimitCount = 0;
       let eventTransientErrorCount = 0;
@@ -180,7 +200,7 @@ export class MarketScanner implements CandidateScanner {
       const eligibleTokens = eligibleEvents.flatMap(({ event, eligibleEvent }) =>
         extractEligibleTokens(event, eligibleEvent, scanConfig, now),
       );
-      const availableCategories = Array.from(
+      const eventCategories = Array.from(
         new Map(
           eligibleTokens.flatMap((token) =>
             token.categoryIds.map((id, index) => [
@@ -193,6 +213,8 @@ export class MarketScanner implements CandidateScanner {
         (left, right) =>
           left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
       );
+      const availableCategories =
+        homepageCategories.length > 0 ? homepageCategories : eventCategories;
       const tokens = eligibleTokens;
 
       this.updateDiagnostics({
@@ -257,6 +279,7 @@ export class MarketScanner implements CandidateScanner {
           minBuyPriceMicros: scanPreferences.minBuyPriceMicros,
           maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
           minBidAskRatioPercent: scanPreferences.minBidAskRatioPercent,
+          minMarketDurationDays: scanPreferences.minMarketDurationDays,
           maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
           maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
           orderBudgetMicros: scanPreferences.orderBudgetMicros,
@@ -274,7 +297,10 @@ export class MarketScanner implements CandidateScanner {
         orderBookCount: books.length,
         monitoredTokenCount: orderedCandidates.length,
         candidateCount,
-        availableCategories,
+        availableCategories:
+          homepageCategories.length > 0
+            ? homepageCategories
+            : availableCategories,
       });
       return orderedCandidates;
     } catch (error) {

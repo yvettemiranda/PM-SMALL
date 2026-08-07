@@ -13,9 +13,8 @@ import {
 import type { TradeCandidate } from "../domain/types.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 
-export const MARKET_DURATION_DAY_OPTIONS = [
-  1, 7, 14, 30, 60, 90, 120, 180, 360, 365,
-] as const;
+const MIN_MARKET_DURATION_DAYS = 1;
+const MAX_MARKET_DURATION_DAYS = 365;
 
 export type PaperMarketResultCount = 2 | 3;
 
@@ -27,6 +26,7 @@ export type PaperTradingPreferencesSnapshot = {
   orderBudgetMicros: number;
   maxBuyPriceMicros: number;
   minBidAskRatioPercent: number;
+  minMarketDurationDays: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
@@ -37,6 +37,7 @@ type MarketFilterUpdate = Pick<
   PaperTradingPreferencesSnapshot,
   "resultCounts" | "maxBuyPriceMicros" | "maxMarketDurationDays"
 > & {
+  minMarketDurationDays?: number;
   allCategories?: boolean;
   selectedCategories?: readonly string[];
   candidateSortDirection?: CandidateSortDirection;
@@ -50,6 +51,7 @@ type NormalizedMarketFilters = Pick<
   | "resultCounts"
   | "maxBuyPriceMicros"
   | "minBidAskRatioPercent"
+  | "minMarketDurationDays"
   | "maxMarketDurationDays"
   | "maxMarketProgressPercent"
   | "allCategories"
@@ -83,6 +85,7 @@ export class PaperTradingPreferencesService {
       orderBudgetMicros: config.orderBudgetMicros,
       maxBuyPriceMicros: config.maxBuyPriceMicros,
       minBidAskRatioPercent: config.minBidAskRatioPercent,
+      minMarketDurationDays: config.minMarketDurationDays,
       maxMarketDurationDays: config.maxMarketDurationDays,
       maxMarketProgressPercent: config.maxMarketProgressPercent,
       candidatesSelectedByDefault: true,
@@ -118,6 +121,7 @@ export class PaperTradingPreferencesService {
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
       minBuyPriceMicros: this.minBuyPriceMicros,
       minBidAskRatioPercent: this.snapshot.minBidAskRatioPercent,
+      minMarketDurationDays: this.snapshot.minMarketDurationDays,
       maxMarketDurationDays: this.snapshot.maxMarketDurationDays,
       maxMarketProgressPercent: this.snapshot.maxMarketProgressPercent,
       allCategories: this.snapshot.allCategories,
@@ -166,6 +170,8 @@ export class PaperTradingPreferencesService {
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       minBidAskRatioPercent:
         update.minBidAskRatioPercent ?? this.snapshot.minBidAskRatioPercent,
+      minMarketDurationDays:
+        update.minMarketDurationDays ?? this.snapshot.minMarketDurationDays,
       maxMarketDurationDays: update.maxMarketDurationDays,
       maxMarketProgressPercent:
         update.maxMarketProgressPercent ?? this.snapshot.maxMarketProgressPercent,
@@ -271,6 +277,7 @@ function toEligibilitySettings(
     minBuyPriceMicros,
     maxBuyPriceMicros: filters.maxBuyPriceMicros,
     minBidAskRatioPercent: filters.minBidAskRatioPercent,
+    minMarketDurationDays: filters.minMarketDurationDays,
     maxMarketDurationDays: filters.maxMarketDurationDays,
     maxMarketProgressPercent: filters.maxMarketProgressPercent,
     orderBudgetMicros: filters.orderBudgetMicros,
@@ -282,6 +289,7 @@ function validateMarketFilterValues(
     PaperTradingPreferencesSnapshot,
     | "maxBuyPriceMicros"
     | "minBidAskRatioPercent"
+    | "minMarketDurationDays"
     | "maxMarketDurationDays"
     | "maxMarketProgressPercent"
     | "orderBudgetMicros"
@@ -295,8 +303,22 @@ function validateMarketFilterValues(
   ) {
     throw new Error("Maximum TEST buy price must be a whole cent between 1 and 3 cents");
   }
-  if (!MARKET_DURATION_DAY_OPTIONS.includes(values.maxMarketDurationDays as never)) {
-    throw new Error("Market duration must use a supported slider value");
+  if (
+    !Number.isInteger(values.minMarketDurationDays) ||
+    values.minMarketDurationDays < MIN_MARKET_DURATION_DAYS ||
+    values.minMarketDurationDays > MAX_MARKET_DURATION_DAYS
+  ) {
+    throw new Error("Minimum market duration must be a whole day from 1 to 365");
+  }
+  if (
+    !Number.isInteger(values.maxMarketDurationDays) ||
+    values.maxMarketDurationDays < MIN_MARKET_DURATION_DAYS ||
+    values.maxMarketDurationDays > MAX_MARKET_DURATION_DAYS
+  ) {
+    throw new Error("Maximum market duration must be a whole day from 1 to 365");
+  }
+  if (values.minMarketDurationDays > values.maxMarketDurationDays) {
+    throw new Error("Minimum market duration cannot exceed maximum market duration");
   }
   if (
     !Number.isInteger(values.minBidAskRatioPercent) ||

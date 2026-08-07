@@ -46,6 +46,7 @@ describe("HTTP app", () => {
       strategy: { mode: "TEST", status: "PAUSED" },
       portfolio: {
         totalFunds: "100",
+        positionValue: "0",
         totalPnl: "0",
         realizedPnl: "0",
         unrealizedPnl: "0",
@@ -124,6 +125,7 @@ describe("HTTP app", () => {
         maxBuyPriceCents: 3,
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
+        minMarketDurationDays: 7,
         maxMarketDurationDays: 30,
         candidateSortDirection: "DESC",
         initialCapital: 120,
@@ -141,6 +143,8 @@ describe("HTTP app", () => {
         candidateSortDirection: "DESC",
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
+        minMarketDurationDays: 7,
+        maxMarketDurationDays: 30,
         orderAmount: "2",
       },
     });
@@ -264,6 +268,7 @@ describe("HTTP app", () => {
     expect(dashboard.json()).toMatchObject({
       portfolio: {
         totalFunds: "99",
+        positionValue: "0",
         totalPnl: "-1",
         unrealizedPnl: "-1",
       },
@@ -394,20 +399,33 @@ describe("HTTP app", () => {
     expect(page.body).toContain("LIVE");
     expect(page.body).toContain("交易配置");
     expect(page.body).toContain("市场类别");
+    expect(page.body).toContain("全选");
     expect(page.body).toContain("最低买卖盘比例");
     expect(page.body).toContain("生命周期进度");
     expect(page.body).toContain("总模拟资金");
     expect(page.body).toContain("每单使用金额");
     expect(page.body).toContain("重置TEST");
     expect(page.body).toContain("总资金");
+    expect(page.body).toContain("持仓实时价值");
+    expect(page.body).toContain("持仓数");
     expect(page.body).toContain("当前持仓");
     expect(page.body).toContain("扫描市场");
     expect(page.body).toContain('id="scan-refresh-state"');
+    expect(page.body).toContain('id="position-list-controls"');
+    expect(page.body).toContain('id="toggle-positions"');
+    expect(page.body.match(/data-sort-toggle/g)).toHaveLength(1);
+    expect(page.body).not.toContain('data-sort="ASC"');
+    expect(page.body).not.toContain('data-sort="DESC"');
+    expect(page.body).not.toContain("总盈亏");
+    expect(page.body).not.toContain("已实现");
+    expect(page.body).not.toContain("未实现");
     expect(page.body).not.toContain("市场选择（可多选）");
-    expect(page.body).not.toContain("全选");
     expect(page.body).not.toContain("清空TEST交易范围");
     expect(page.body).not.toContain("进入时市场进度");
     expect(page.body).toContain('id="market-progress-filter"');
+    expect(page.body).toContain('id="min-market-duration"');
+    expect(page.body).toContain('id="max-market-duration"');
+    expect(page.body).not.toContain('id="market-duration"');
     expect(page.body).not.toContain("开始新一轮");
     expect(page.body).not.toContain('id="new-cycle"');
     expect(page.body).not.toContain("PAPER");

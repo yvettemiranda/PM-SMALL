@@ -52,6 +52,7 @@ const statusSchema = z.object({
     positionCostMicros: z.number(),
   }),
   configuration: z.object({
+    minMarketDurationDays: z.number().positive().default(1),
     maxMarketDurationDays: z.number().positive(),
   }),
   runtime: runtimeSchema,
@@ -173,7 +174,10 @@ export type PaperSoakSample = {
     strategyMode: string;
     strategyStatus: string;
   };
-  configuration: { maxMarketDurationDays: number };
+  configuration: {
+    minMarketDurationDays: number;
+    maxMarketDurationDays: number;
+  };
   runtime: z.infer<typeof runtimeSchema>;
   strategy: {
     initialCapitalMicros: number;
@@ -277,6 +281,7 @@ export function evaluatePaperSoakSample(
       strategyStatus: status.strategy.status,
     },
     configuration: {
+      minMarketDurationDays: status.configuration.minMarketDurationDays,
       maxMarketDurationDays: status.configuration.maxMarketDurationDays,
     },
     runtime: status.runtime,

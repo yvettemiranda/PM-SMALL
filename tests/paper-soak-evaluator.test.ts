@@ -74,6 +74,27 @@ describe("evaluatePaperSoakSample", () => {
     });
   });
 
+  it("defaults the minimum duration when sampling a schema 13 status", () => {
+    const status = makeStatus();
+    delete (status.configuration as Partial<typeof status.configuration>)
+      .minMarketDurationDays;
+
+    const sample = evaluatePaperSoakSample({
+      sampledAt: "2026-08-04T00:00:00.000Z",
+      requestDurationMs: 25,
+      statusHttpStatus: 200,
+      validationHttpStatus: 200,
+      statusPayload: status,
+      validationPayload: makeValidation(),
+      requireRunning: true,
+    });
+
+    expect(sample.configuration).toEqual({
+      minMarketDurationDays: 1,
+      maxMarketDurationDays: 30,
+    });
+  });
+
   it("treats temporary component errors as warnings", () => {
     const status = makeStatus();
     status.marketScan.lastError = "HTTP 429";
@@ -221,7 +242,10 @@ function makeStatus() {
       positionCostMicros: 0,
       updatedAt: "2026-08-04T00:00:00.000Z",
     },
-    configuration: { maxMarketDurationDays: 30 },
+    configuration: {
+      minMarketDurationDays: 1,
+      maxMarketDurationDays: 30,
+    },
     runtime: {
       uptimeSeconds: 3_600,
       rssBytes: 320_000_000,
