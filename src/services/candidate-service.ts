@@ -16,6 +16,8 @@ export type CandidateSnapshot = {
 export class CandidateService {
   private candidates: TradeCandidate[] = [];
   private candidateByTokenId = new Map<string, TradeCandidate>();
+  private candidatesByEventId = new Map<string, TradeCandidate[]>();
+  private eventIdByTokenId = new Map<string, string>();
   private lastScanAt: string | null = null;
   private lastError: string | null = null;
   private diagnostics: MarketScanDiagnostics | null = null;
@@ -95,6 +97,28 @@ export class CandidateService {
     return candidates;
   }
 
+  public getEventIds(): string[] {
+    return [...this.candidatesByEventId.keys()].sort((left, right) =>
+      left.localeCompare(right),
+    );
+  }
+
+  public getEventIdByTokenId(tokenId: string): string | null {
+    return this.eventIdByTokenId.get(tokenId) ?? null;
+  }
+
+  public getCandidatesByEventId(eventId: string): TradeCandidate[] {
+    return [...(this.candidatesByEventId.get(eventId) ?? [])];
+  }
+
+  public getCandidatesByEventIds(eventIds: Iterable<string>): TradeCandidate[] {
+    const candidates: TradeCandidate[] = [];
+    for (const eventId of eventIds) {
+      candidates.push(...(this.candidatesByEventId.get(eventId) ?? []));
+    }
+    return candidates;
+  }
+
   public updateQuote(
     tokenId: string,
     bestBidMicros: number | null,
@@ -153,9 +177,7 @@ export class CandidateService {
       .scan(undefined, controller.signal)
       .then((candidates) => {
         this.candidates = candidates;
-        this.candidateByTokenId = new Map(
-          candidates.map((candidate) => [candidate.tokenId, candidate]),
-        );
+        this.rebuildIndexes(candidates);
         this.lastScanAt = new Date().toISOString();
         this.lastError = null;
         this.diagnostics = this.scanner.getLastDiagnostics?.() ?? null;
@@ -182,6 +204,19 @@ export class CandidateService {
     const snapshot = this.getSnapshot();
     for (const listener of this.listeners) {
       listener(snapshot);
+    }
+  }
+
+  private rebuildIndexes(candidates: readonly TradeCandidate[]): void {
+    this.candidateByTokenId = new Map();
+    this.candidatesByEventId = new Map();
+    this.eventIdByTokenId = new Map();
+    for (const candidate of candidates) {
+      this.candidateByTokenId.set(candidate.tokenId, candidate);
+      this.eventIdByTokenId.set(candidate.tokenId, candidate.eventId);
+      const siblings = this.candidatesByEventId.get(candidate.eventId) ?? [];
+      siblings.push(candidate);
+      this.candidatesByEventId.set(candidate.eventId, siblings);
     }
   }
 }

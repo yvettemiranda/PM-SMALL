@@ -17,7 +17,7 @@ export type EligibleEvent = {
   title: string;
   category: string;
   categories: MarketCategory[];
-  resultCount: 2 | 3;
+  resultCount: number;
   isNegativeRisk: boolean;
 };
 
@@ -28,7 +28,7 @@ export type MarketToken = {
   category: string;
   categoryIds: string[];
   categoryLabels: string[];
-  resultCount: 2 | 3;
+  resultCount: number;
   isNegativeRisk: boolean;
   marketId: string;
   conditionId: string;

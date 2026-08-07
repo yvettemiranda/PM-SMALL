@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TokenOrderBook } from "../src/domain/types.js";
-import { PaperDatabase } from "../src/infrastructure/db/database.js";
+import {
+  PaperDatabase,
+  type PaperTradingPreferences,
+} from "../src/infrastructure/db/database.js";
 import { makeCandidate, testEligibilitySettings } from "./helpers.js";
 
 describe("TEST FAK accounting", () => {
@@ -17,6 +20,196 @@ describe("TEST FAK accounting", () => {
   afterEach(() => {
     vi.useRealTimers();
     for (const database of databases.splice(0)) database.close();
+  });
+
+  it("previews with persisted book consumption and never mutates accounting", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const input = {
+      candidate: makeCandidate({ bestAskMicros: 20_000 }),
+      book: makeBook({
+        bookVersion: "PREVIEW-BOOK",
+        asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    };
+
+    expect(database.previewTestFakBuy(input)).toMatchObject({
+      outcome: "READY",
+      preview: { plan: { spentMicros: 200_000 } },
+    });
+    expect(database.listPaperOrders()).toEqual([]);
+    expect(database.listPaperPositions()).toEqual([]);
+    expect(database.listPaperEventLocks()).toEqual([]);
+
+    expect(database.executeTestFakBuy(input).spentMicros).toBe(200_000);
+    expect(database.previewTestFakBuy(input)).toMatchObject({
+      outcome: "BLOCKED",
+      preview: null,
+    });
+    expect(database.listPaperOrders().filter((order) => order.side === "BUY")).toHaveLength(1);
+  });
+
+  it("creates the Event lock only on a real fill and freezes its cycle budget", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const winner = makeCandidate({
+      eventId: "shared-event",
+      tokenId: "winner-token",
+      candidateId: "winner-token",
+      marketId: "winner-market",
+      conditionId: "winner-condition",
+      bestAskMicros: 20_000,
+    });
+    const sibling = makeCandidate({
+      eventId: "shared-event",
+      tokenId: "sibling-token",
+      candidateId: "sibling-token",
+      marketId: "sibling-market",
+      conditionId: "sibling-condition",
+      bestAskMicros: 20_000,
+    });
+    const execute = (
+      candidate: typeof winner,
+      bookVersion: string,
+      orderBudgetMicros: number,
+      askSizeMicros: number,
+    ) =>
+      database.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion,
+          asks: [{ priceMicros: 20_000, sizeMicros: askSizeMicros }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros,
+        eligibility: testEligibilitySettings({ orderBudgetMicros }),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+
+    expect(execute(winner, "FIRST-FILL", 1_000_000, 10_000_000).spentMicros).toBe(
+      200_000,
+    );
+    expect(database.getPaperEventLock("shared-event")).toMatchObject({
+      state: "ACTIVE",
+      activeTokenId: "winner-token",
+      marketId: "winner-market",
+      conditionId: "winner-condition",
+      cycleBudgetMicros: 1_000_000,
+    });
+    expect(execute(sibling, "SIBLING", 1_000_000, 100_000_000).outcome).toBe(
+      "BLOCKED",
+    );
+    expect(execute(winner, "FROZEN", 2_000_000, 100_000_000).spentMicros).toBe(
+      800_000,
+    );
+    expect(database.getPaperEventLock("shared-event")?.cycleBudgetMicros).toBe(
+      1_000_000,
+    );
+    expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(1_000_000);
+  });
+
+  it("releases a fully exited Event in the sell transaction so a sibling can win next", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const first = makeCandidate({
+      eventId: "reusable-event",
+      tokenId: "first-token",
+      candidateId: "first-token",
+      marketId: "first-market",
+      conditionId: "first-condition",
+      bestAskMicros: 20_000,
+    });
+    const second = makeCandidate({
+      eventId: "reusable-event",
+      tokenId: "second-token",
+      candidateId: "second-token",
+      marketId: "second-market",
+      conditionId: "second-condition",
+      bestAskMicros: 20_000,
+    });
+    const buy = (
+      candidate: typeof first,
+      version: string,
+      orderBudgetMicros = 1_000_000,
+      askSizeMicros = 10_000_000,
+    ) =>
+      database.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: version,
+          asks: [{ priceMicros: 20_000, sizeMicros: askSizeMicros }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros,
+        eligibility: testEligibilitySettings({ orderBudgetMicros }),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+
+    expect(buy(first, "FIRST-BUY").spentMicros).toBe(200_000);
+    expect(
+      database.executeTestFakSells({
+        tokenId: first.tokenId,
+        bookVersion: "FIRST-SELL",
+        bids: [{ priceMicros: 30_000, sizeMicros: 10_000_000 }],
+        minOrderSizeMicros: 1,
+        feeRateMicros: 0,
+        feeExponent: 1,
+      }).filledSizeMicros,
+    ).toBe(10_000_000);
+    expect(database.getPaperEventLock("reusable-event")).toBeNull();
+    expect(buy(second, "SECOND-BUY", 2_000_000, 100_000_000).spentMicros).toBe(
+      2_000_000,
+    );
+    expect(database.getPaperEventLock("reusable-event")).toMatchObject({
+      activeTokenId: "second-token",
+      cycleBudgetMicros: 2_000_000,
+    });
+  });
+
+  it("rolls back an Event lock when the fill transaction fails", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      eventId: "rollback-event",
+      marketId: " ",
+      tokenId: "rollback-token",
+      conditionId: "rollback-condition",
+      bestAskMicros: 20_000,
+    });
+
+    expect(() =>
+      database.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: "ROLLBACK-BOOK",
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      }),
+    ).toThrow();
+    expect(database.listPaperEventLocks()).toEqual([]);
+    expect(database.listPaperOrders()).toEqual([]);
+    expect(database.listPaperPositions()).toEqual([]);
   });
 
   it("blocks every buy path when the current book violates a final eligibility rule", () => {
@@ -164,7 +357,7 @@ describe("TEST FAK accounting", () => {
     expect(database.validatePaperState()).toMatchObject({ passed: true });
   });
 
-  it("enforces the per-token cycle cash cap across repeated partial FAK buys", () => {
+  it("enforces the per-Event cycle cash cap across repeated partial FAK buys", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
     database.setStrategyStatus("RUNNING");
@@ -270,6 +463,7 @@ describe("TEST FAK accounting", () => {
       const tokenId = `full-token-${index}`;
       const candidate = makeCandidate({
         candidateId: `${tokenId}:20000`,
+        eventId: `event-${index}`,
         tokenId,
         conditionId: `condition-${index}`,
         marketId: `market-${index}`,
@@ -577,7 +771,7 @@ describe("TEST FAK accounting", () => {
         positionCostMicros: 0,
       },
       preferences: {
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         maxBuyPriceMicros: 30_000,
         maxMarketDurationDays: 30,
         minBidAskRatioPercent: 50,
@@ -609,9 +803,9 @@ function makeBook(overrides: Partial<TokenOrderBook> = {}): TokenOrderBook {
   };
 }
 
-function defaultPreferences() {
+function defaultPreferences(): Omit<PaperTradingPreferences, "updatedAt"> {
   return {
-    resultCounts: [2, 3] as Array<2 | 3>,
+    marketTypes: ["BINARY", "TERNARY"],
     allCategories: true,
     selectedCategories: [],
     candidateSortDirection: "ASC" as const,

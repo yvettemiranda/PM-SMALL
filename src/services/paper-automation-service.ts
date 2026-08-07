@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.js";
 import type { TradingExecutionAdapter } from "../domain/execution.js";
 import type { TradeCandidate } from "../domain/types.js";
 import type { MarketEligibilitySettings } from "../domain/market-eligibility.js";
+import type { CandidateSortDirection } from "../domain/trading-strategy.js";
 import type {
   PaperDatabase,
   PaperRecoveryResult,
@@ -9,6 +10,11 @@ import type {
 import type { CandidateService } from "./candidate-service.js";
 import type { PaperMarketRuntime } from "./market-stream-service.js";
 import { TestExecutor } from "../infrastructure/execution/test-executor.js";
+import {
+  EventOpportunityService,
+  type EventOpportunityEvaluation,
+  type EventOpportunitySelection,
+} from "./event-opportunity-service.js";
 
 export type PaperAutomationStatus = {
   running: boolean;
@@ -18,20 +24,30 @@ export type PaperAutomationStatus = {
   cancelledFilterBuyCount: number;
   cancelledStartedBuyCount: number;
   cancelledProgressedBuyCount: number;
+  eventsEvaluatedCount: number;
+  incompleteEventCount: number;
+  arbitrationCount: number;
+  arbitrationRecomputeCount: number;
+  staleArbitrationRejectionCount: number;
+  skippedLockedSiblingQuoteCount: number;
+  maxObservedResultCount: number;
   recovery: PaperRecoveryResult | null;
 };
 
 export interface PaperAutomationRuntime {
   getStatus(): PaperAutomationStatus;
+  getEventEvaluations?(): EventOpportunityEvaluation[];
   requestRun(): void;
 }
 
-export interface PaperCandidateSelection {
+export interface PaperCandidateSelection extends EventOpportunitySelection {
   isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean;
   reconcileActiveBuys?(now?: Date): number;
   getMaxBuyPriceMicros?(): number;
   getOrderBudgetMicros?(): number;
   getEligibilitySettings?(): MarketEligibilitySettings;
+  getCandidateSortDirection?(): CandidateSortDirection;
+  getStateVersion?(): string;
   getOrderedCandidates?(
     candidates: readonly TradeCandidate[],
     now?: Date,
@@ -44,7 +60,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private quoteUnsubscribe: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
   private fullRunRequested = false;
-  private readonly pendingTokenIds = new Set<string>();
+  private readonly pendingEventIds = new Set<string>();
   private runLoop: Promise<void> | null = null;
   private lastRunAt: string | null = null;
   private lastError: string | null = null;
@@ -52,8 +68,20 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private cancelledFilterBuyCount = 0;
   private cancelledStartedBuyCount = 0;
   private cancelledProgressedBuyCount = 0;
+  private eventsEvaluatedCount = 0;
+  private incompleteEventCount = 0;
+  private arbitrationCount = 0;
+  private arbitrationRecomputeCount = 0;
+  private staleArbitrationRejectionCount = 0;
+  private skippedLockedSiblingQuoteCount = 0;
+  private maxObservedResultCount = 0;
   private recovery: PaperRecoveryResult | null = null;
-  private readonly attemptedBuyIntentByToken = new Map<string, string>();
+  private readonly attemptedBuyIntentByEvent = new Map<string, string>();
+  private readonly latestEventEvaluationById = new Map<
+    string,
+    EventOpportunityEvaluation
+  >();
+  private readonly eventOpportunities: EventOpportunityService;
 
   public constructor(
     private readonly candidates: CandidateService,
@@ -68,6 +96,13 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     if (!executor.enabled) {
       throw new Error("PaperAutomationService requires an enabled execution adapter");
     }
+    this.eventOpportunities = new EventOpportunityService(
+      candidates,
+      database,
+      marketStream,
+      config,
+      candidateSelection,
+    );
   }
 
   public start(): void {
@@ -114,7 +149,19 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     if (!this.started) {
       return;
     }
-    this.pendingTokenIds.add(tokenId);
+    const eventId = this.candidates.getEventIdByTokenId(tokenId);
+    if (eventId === null) {
+      return;
+    }
+    const eventLock = this.database.getPaperEventLock(eventId);
+    if (
+      eventLock?.state === "ACTIVE" &&
+      eventLock.activeTokenId !== tokenId
+    ) {
+      this.skippedLockedSiblingQuoteCount += 1;
+      return;
+    }
+    this.pendingEventIds.add(eventId);
     this.scheduleRun();
   }
 
@@ -139,35 +186,48 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       cancelledFilterBuyCount: this.cancelledFilterBuyCount,
       cancelledStartedBuyCount: this.cancelledStartedBuyCount,
       cancelledProgressedBuyCount: this.cancelledProgressedBuyCount,
+      eventsEvaluatedCount: this.eventsEvaluatedCount,
+      incompleteEventCount: this.incompleteEventCount,
+      arbitrationCount: this.arbitrationCount,
+      arbitrationRecomputeCount: this.arbitrationRecomputeCount,
+      staleArbitrationRejectionCount: this.staleArbitrationRejectionCount,
+      skippedLockedSiblingQuoteCount: this.skippedLockedSiblingQuoteCount,
+      maxObservedResultCount: this.maxObservedResultCount,
       recovery: this.recovery,
     };
+  }
+
+  public getEventEvaluations(): EventOpportunityEvaluation[] {
+    return [...this.latestEventEvaluationById.values()].sort((left, right) =>
+      left.eventId.localeCompare(right.eventId),
+    );
   }
 
   private async drainRuns(): Promise<void> {
     while (this.hasPendingRun() && this.started) {
       const runAll = this.fullRunRequested;
-      const tokenIds = runAll ? null : new Set(this.pendingTokenIds);
+      const eventIds = runAll ? null : new Set(this.pendingEventIds);
       this.fullRunRequested = false;
-      this.pendingTokenIds.clear();
-      this.runOnce(tokenIds);
+      this.pendingEventIds.clear();
+      this.runOnce(eventIds);
       await Promise.resolve();
     }
   }
 
   private hasPendingRun(): boolean {
-    return this.fullRunRequested || this.pendingTokenIds.size > 0;
+    return this.fullRunRequested || this.pendingEventIds.size > 0;
   }
 
-  private runOnce(tokenIds: ReadonlySet<string> | null): void {
+  private runOnce(eventIds: ReadonlySet<string> | null): void {
     const now = new Date();
     try {
       const cancelledFiltered =
-        tokenIds === null
+        eventIds === null
           ? (this.candidateSelection?.reconcileActiveBuys?.(now) ?? 0)
           : 0;
       this.cancelledFilterBuyCount += cancelledFiltered;
       const cancelled =
-        tokenIds === null ? this.database.cancelStartedGameBuys(now) : 0;
+        eventIds === null ? this.database.cancelStartedGameBuys(now) : 0;
       this.cancelledStartedBuyCount += cancelled;
       // Filter reconciliation applies the saved lifecycle threshold to any
       // legacy active buy orders before new FAK executions are considered.
@@ -175,88 +235,66 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       this.cancelledProgressedBuyCount += cancelledProgressed;
       let placedThisRun = 0;
 
+      const requestedEventIds = eventIds === null
+        ? this.candidates.getEventIds()
+        : [...eventIds].sort((left, right) => left.localeCompare(right));
+      if (eventIds === null) {
+        const currentEventIds = new Set(requestedEventIds);
+        for (const eventId of this.latestEventEvaluationById.keys()) {
+          if (!currentEventIds.has(eventId)) {
+            this.latestEventEvaluationById.delete(eventId);
+          }
+        }
+      }
+      const evaluations = requestedEventIds.map((eventId) =>
+        this.evaluateEvent(eventId, now),
+      );
+      const direction =
+        this.candidateSelection?.getCandidateSortDirection?.() ?? "ASC";
+      evaluations.sort((left, right) =>
+        compareEventEvaluations(left, right, direction),
+      );
+
       if (this.database.getStrategyState().status === "RUNNING") {
-        const snapshotCandidates =
-          tokenIds === null
-            ? this.candidates.getSnapshot().candidates
-            : this.candidates.getCandidatesByTokenIds(tokenIds);
-        const orderedCandidates =
-          this.candidateSelection?.getOrderedCandidates?.(
-            snapshotCandidates,
-            now,
-          ) ?? snapshotCandidates;
-        for (const candidate of orderedCandidates) {
+        for (const evaluation of evaluations) {
+          if (evaluation.status !== "READY" || evaluation.winner === null) {
+            continue;
+          }
+          const rechecked = this.evaluateEvent(evaluation.eventId, new Date());
+          const changed =
+            rechecked.snapshotVersion !== evaluation.snapshotVersion ||
+            rechecked.winner?.candidate.tokenId !==
+              evaluation.winner.candidate.tokenId;
+          if (changed) {
+            this.staleArbitrationRejectionCount += 1;
+            this.arbitrationRecomputeCount += 1;
+          }
+          const current = rechecked;
+          if (current.status !== "READY" || current.winner === null) {
+            continue;
+          }
+          const candidate = current.winner.candidate;
+          const buyIntentKey = `${candidate.tokenId}:${current.snapshotVersion}`;
           if (
-            (tokenIds !== null && !tokenIds.has(candidate.tokenId)) ||
-            this.candidateSelection?.isCandidateEnabled(candidate, now) === false ||
-            !candidateIsCurrent(candidate, now) ||
-            !this.marketStream.isTokenReady(candidate.tokenId)
+            this.attemptedBuyIntentByEvent.get(current.eventId) === buyIntentKey
           ) {
             continue;
           }
-          const book = this.marketStream.getOrderBook?.(candidate) ?? null;
-          if (book === null) {
-            continue;
-          }
-          const bookRevision =
-            this.marketStream.getOrderBookRevision?.(candidate.tokenId) ?? null;
-          const maxPriceMicros =
-            this.candidateSelection?.getMaxBuyPriceMicros?.() ??
-            this.config.maxBuyPriceMicros;
-          const orderBudgetMicros =
-            this.candidateSelection?.getOrderBudgetMicros?.() ??
-            this.config.orderBudgetMicros;
-          const strategyBeforeAttempt = this.database.getStrategyState();
-          const buyIntentKey =
-            bookRevision === null
-              ? null
-              : `${bookRevision}:${maxPriceMicros}:${orderBudgetMicros}:${strategyBeforeAttempt.availableCashMicros}:${strategyBeforeAttempt.updatedAt}`;
-          if (
-            buyIntentKey !== null &&
-            this.attemptedBuyIntentByToken.get(candidate.tokenId) === buyIntentKey
-          ) {
-            continue;
-          }
-          if (buyIntentKey !== null) {
-            this.attemptedBuyIntentByToken.set(candidate.tokenId, buyIntentKey);
-          }
+          this.attemptedBuyIntentByEvent.set(current.eventId, buyIntentKey);
           try {
-            const execution = this.executor.executeBuy({
-              candidate,
-              book,
-              maxPriceMicros,
-              orderBudgetMicros,
-              feeRateMicros: candidate.feeRateMicros,
-              feeExponent: candidate.feeExponent,
-              eligibility:
-                this.candidateSelection?.getEligibilitySettings?.() ?? {
-                  resultCounts: [2, 3],
-                  allCategories: true,
-                  selectedCategoryIds: [],
-                  minBuyPriceMicros: this.config.minBuyPriceMicros,
-                  maxBuyPriceMicros: maxPriceMicros,
-                  minBidAskRatioPercent: this.config.minBidAskRatioPercent,
-                  minMarketDurationDays: this.config.minMarketDurationDays,
-                  maxMarketDurationDays: this.config.maxMarketDurationDays,
-                  maxMarketProgressPercent:
-                    this.config.maxMarketProgressPercent,
-                  orderBudgetMicros,
-                },
-            });
+            const execution = this.executor.executeBuy(current.winner.intent);
             if (execution.order !== null) {
               this.marketStream.consumeTestBuyLiquidity?.(
                 candidate.tokenId,
                 execution.consumedAsks,
               );
-              // The same book may already satisfy the newly created exit
-              // target. Recheck it now instead of waiting for another tick.
               this.marketStream.executeTargetSells?.(candidate.tokenId);
               this.placedBuyCount += 1;
               placedThisRun += 1;
             }
           } catch (error) {
             if (!isExpectedPlacementRejection(error)) {
-              this.attemptedBuyIntentByToken.delete(candidate.tokenId);
+              this.attemptedBuyIntentByEvent.delete(current.eventId);
               throw error;
             }
           }
@@ -278,32 +316,44 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       this.lastRunAt = new Date().toISOString();
     }
   }
+
+  private evaluateEvent(eventId: string, now: Date): EventOpportunityEvaluation {
+    const evaluation = this.eventOpportunities.evaluateEvent(eventId, now);
+    this.latestEventEvaluationById.set(eventId, evaluation);
+    this.eventsEvaluatedCount += 1;
+    if (evaluation.status === "INCOMPLETE") {
+      this.incompleteEventCount += 1;
+    }
+    if (evaluation.arbitrationPerformed) {
+      this.arbitrationCount += 1;
+    }
+    this.maxObservedResultCount = Math.max(
+      this.maxObservedResultCount,
+      evaluation.maxResultCount,
+    );
+    return evaluation;
+  }
 }
 
-function candidateIsCurrent(
-  candidate: TradeCandidate,
-  now: Date,
-): boolean {
-  const openedAt = Date.parse(candidate.openedAt);
-  const endsAt = Date.parse(candidate.endsAt);
-  const gameStartsAt =
-    candidate.gameStartsAt === null ? null : Date.parse(candidate.gameStartsAt);
-  if (
-    !Number.isFinite(openedAt) ||
-    !Number.isFinite(endsAt) ||
-    now.getTime() < openedAt ||
-    now.getTime() >= endsAt ||
-    (gameStartsAt !== null && now.getTime() >= gameStartsAt)
-  ) {
-    return false;
-  }
-
-  return true;
+function compareEventEvaluations(
+  left: EventOpportunityEvaluation,
+  right: EventOpportunityEvaluation,
+  direction: CandidateSortDirection,
+): number {
+  const leftProgress = left.winner?.candidate.progressPercent ??
+    (direction === "ASC" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
+  const rightProgress = right.winner?.candidate.progressPercent ??
+    (direction === "ASC" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
+  const progressComparison =
+    direction === "ASC"
+      ? leftProgress - rightProgress
+      : rightProgress - leftProgress;
+  return progressComparison || left.eventId.localeCompare(right.eventId);
 }
 
 function isExpectedPlacementRejection(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /active paper buy|first sell|budget would be exceeded|Insufficient paper cash|game has started/.test(
+  return /active paper buy|first sell|budget would be exceeded|Insufficient paper cash|game has started|Event is locked|legacy conflicting|unlocked paper position/.test(
     message,
   );
 }

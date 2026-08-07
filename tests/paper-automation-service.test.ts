@@ -51,7 +51,7 @@ class FakeMarketRuntime implements PaperMarketRuntime {
     this.refreshCount += 1;
   }
 
-  public isTokenReady(): boolean {
+  public isTokenReady(_tokenId: string): boolean {
     return true;
   }
 
@@ -92,6 +92,31 @@ class FakeMarketRuntime implements PaperMarketRuntime {
 
   public executeTargetSells(tokenId: string): void {
     this.executeTargetSellsForToken?.(tokenId);
+  }
+}
+
+class FlippingWinnerRuntime extends FakeMarketRuntime {
+  private orderBookCallCount = 0;
+
+  public override getOrderBook(candidate: TradeCandidate): TokenOrderBook {
+    this.orderBookCallCount += 1;
+    const secondEvaluation = this.orderBookCallCount > 2;
+    const firstOption = candidate.tokenId === "stale-first";
+    const bestBidMicros = secondEvaluation === firstOption ? 10_000 : 20_000;
+    return {
+      tokenId: candidate.tokenId,
+      conditionId: candidate.conditionId,
+      bookVersion: secondEvaluation ? "RECHECKED" : "INITIAL",
+      bids: [{ priceMicros: bestBidMicros, sizeMicros: 100_000_000 }],
+      asks: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+      minOrderSizeMicros: candidate.minOrderSizeMicros,
+      tickSizeMicros: candidate.tickSizeMicros,
+      isNegativeRisk: candidate.isNegativeRisk,
+    };
+  }
+
+  public override getOrderBookRevision(): number {
+    return this.orderBookCallCount > 2 ? 2 : 1;
   }
 }
 
@@ -227,7 +252,7 @@ describe("PaperAutomationService", () => {
     });
   });
 
-  it("evaluates only changed tokens after a quote update", async () => {
+  it("re-evaluates every sibling in only the changed Event after a quote update", async () => {
     const firstCandidate = makeCurrentCandidate();
     const secondCandidate = makeCurrentCandidate({
       candidateId: "second-token:30000",
@@ -240,7 +265,7 @@ describe("PaperAutomationService", () => {
     await candidates.refresh();
     const database = new PaperDatabase(":memory:", 100_000_000);
     database.setStrategyStatus("RUNNING");
-    const evaluatedTokenIds: string[][] = [];
+    const evaluatedTokenIds: string[] = [];
     const automation = new PaperAutomationService(
       candidates,
       database,
@@ -248,24 +273,243 @@ describe("PaperAutomationService", () => {
       { ...testConfig, paperSchedulerIntervalMs: 60_000 },
       {
         isCandidateEnabled: () => false,
-        getOrderedCandidates: (changedCandidates) => {
-          evaluatedTokenIds.push(
-            changedCandidates.map((candidate) => candidate.tokenId),
-          );
-          return [...changedCandidates];
+        candidateMatchesStaticFilters: (candidate) => {
+          evaluatedTokenIds.push(candidate.tokenId);
+          return true;
         },
       },
     );
     resources.push(database, automation);
 
     automation.start();
-    await waitFor(() => evaluatedTokenIds.length > 0);
+    await waitFor(() => evaluatedTokenIds.length >= 2);
     evaluatedTokenIds.length = 0;
 
     candidates.updateQuote(secondCandidate.tokenId, 10_000, 20_000);
-    await waitFor(() => evaluatedTokenIds.length > 0);
+    await waitFor(() => evaluatedTokenIds.length >= 2);
 
-    expect(evaluatedTokenIds).toEqual([[secondCandidate.tokenId]]);
+    expect(evaluatedTokenIds.sort()).toEqual(
+      [firstCandidate.tokenId, secondCandidate.tokenId].sort(),
+    );
+  });
+
+  it("does not re-evaluate another Event after a Token quote update", async () => {
+    const firstCandidate = makeCurrentCandidate();
+    const secondCandidate = makeCurrentCandidate({
+      candidateId: "other-event-token:30000",
+      tokenId: "other-event-token",
+      eventId: "other-event",
+      conditionId: "other-condition",
+      marketId: "other-market",
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [firstCandidate, secondCandidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const evaluatedTokenIds: string[] = [];
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+      {
+        isCandidateEnabled: () => false,
+        candidateMatchesStaticFilters: (candidate) => {
+          evaluatedTokenIds.push(candidate.tokenId);
+          return true;
+        },
+      },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => evaluatedTokenIds.length >= 2);
+    evaluatedTokenIds.length = 0;
+    candidates.updateQuote(secondCandidate.tokenId, 10_000, 20_000);
+    await waitFor(() => evaluatedTokenIds.length >= 1);
+
+    expect(evaluatedTokenIds).toEqual([secondCandidate.tokenId]);
+  });
+
+  it("does not open an unlocked Event while a static sibling Book is incomplete", async () => {
+    const first = makeCurrentCandidate();
+    const sibling = makeCurrentCandidate({
+      candidateId: "not-ready-sibling:20000",
+      tokenId: "not-ready-sibling",
+      conditionId: "not-ready-condition",
+      marketId: "not-ready-market",
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [first, sibling] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const marketStream = new FakeMarketRuntime();
+    marketStream.isTokenReady = (tokenId) => tokenId !== sibling.tokenId;
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+
+    expect(database.listPaperPositions()).toEqual([]);
+    expect(automation.getStatus().incompleteEventCount).toBeGreaterThan(0);
+  });
+
+  it("opens only the unique Event winner when multiple siblings are executable", async () => {
+    const first = makeCurrentCandidate({
+      candidateId: "first-winner-option:20000",
+      tokenId: "first-winner-option",
+      conditionId: "first-winner-condition",
+      marketId: "a-market",
+    });
+    const sibling = makeCurrentCandidate({
+      candidateId: "second-winner-option:20000",
+      tokenId: "second-winner-option",
+      conditionId: "second-winner-condition",
+      marketId: "b-market",
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [first, sibling] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => database.listPaperPositions().length === 1);
+
+    const positions = database.listPaperPositions();
+    const lock = database.getPaperEventLock(first.eventId);
+    expect(positions).toHaveLength(1);
+    expect(lock).toMatchObject({
+      state: "ACTIVE",
+      activeTokenId: positions[0]?.tokenId,
+    });
+    expect(
+      database.listPaperOrders().filter((order) => order.side === "BUY"),
+    ).toHaveLength(1);
+  });
+
+  it("rejects a stale winner and executes the latest Event arbitration result", async () => {
+    const first = makeCurrentCandidate({
+      candidateId: "stale-first:20000",
+      tokenId: "stale-first",
+      conditionId: "stale-first-condition",
+      marketId: "stale-first-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const second = makeCurrentCandidate({
+      candidateId: "fresh-second:20000",
+      tokenId: "fresh-second",
+      conditionId: "fresh-second-condition",
+      marketId: "fresh-second-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [first, second] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FlippingWinnerRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => database.listPaperPositions().length === 1);
+
+    expect(database.listPaperPositions()[0]?.tokenId).toBe(second.tokenId);
+    expect(automation.getStatus()).toMatchObject({
+      staleArbitrationRejectionCount: 1,
+      arbitrationRecomputeCount: 1,
+    });
+  });
+
+  it("skips sibling quote arbitration while an Event is locked", async () => {
+    const active = makeCurrentCandidate({
+      candidateId: "active-option:20000",
+      tokenId: "active-option",
+      conditionId: "active-condition",
+      marketId: "active-market",
+    });
+    const sibling = makeCurrentCandidate({
+      candidateId: "locked-quote-sibling:20000",
+      tokenId: "locked-quote-sibling",
+      conditionId: "locked-quote-condition",
+      marketId: "locked-quote-market",
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [active, sibling] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    database.executeTestFakBuy({
+      candidate: active,
+      book: {
+        tokenId: active.tokenId,
+        conditionId: active.conditionId,
+        bookVersion: "LOCKED-INITIAL",
+        bids: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+        asks: [{ priceMicros: 20_000, sizeMicros: 5_000_000 }],
+        minOrderSizeMicros: active.minOrderSizeMicros,
+        tickSizeMicros: active.tickSizeMicros,
+        isNegativeRisk: active.isNegativeRisk,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+      eligibility: testEligibilitySettings(),
+    });
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+      { isCandidateEnabled: () => false },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+    const before = automation.getStatus();
+    candidates.updateQuote(sibling.tokenId, 10_000, 20_000);
+    const after = automation.getStatus();
+
+    expect(after.skippedLockedSiblingQuoteCount).toBe(
+      before.skippedLockedSiblingQuoteCount + 1,
+    );
+    expect(after.eventsEvaluatedCount).toBe(before.eventsEvaluatedCount);
   });
 
   it("does not place automatic buys while stopped", async () => {
@@ -366,7 +610,7 @@ describe("PaperAutomationService", () => {
     database.setStrategyStatus("RUNNING");
     const preferences = new PaperTradingPreferencesService(database, testConfig);
     preferences.updateMarketFilters({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 20_000,
       maxMarketDurationDays: 30,
       orderBudgetMicros: 1_000_000,
@@ -393,7 +637,7 @@ describe("PaperAutomationService", () => {
     expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(100_000);
 
     preferences.updateMarketFilters({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
       orderBudgetMicros: 1_000_000,
@@ -435,6 +679,7 @@ describe("PaperAutomationService", () => {
     const committed = makeCurrentCandidate({
       candidateId: "committed-token",
       tokenId: "committed-token",
+      eventId: "committed-event",
       conditionId: "committed-condition",
       marketId: "committed-market",
       bestAskMicros: 20_000,
@@ -444,6 +689,7 @@ describe("PaperAutomationService", () => {
     const releasable = makeCurrentCandidate({
       candidateId: "releasable-token",
       tokenId: "releasable-token",
+      eventId: "releasable-event",
       conditionId: "releasable-condition",
       marketId: "releasable-market",
       bestAskMicros: 20_000,
@@ -461,6 +707,7 @@ describe("PaperAutomationService", () => {
     const candidate = makeCurrentCandidate({
       candidateId: "waiting-token",
       tokenId: "waiting-token",
+      eventId: "waiting-event",
       conditionId: "waiting-condition",
       marketId: "waiting-market",
       bestAskMicros: 20_000,

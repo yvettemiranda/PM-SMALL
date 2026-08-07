@@ -12,6 +12,7 @@ import { calculateTakerFeeMicros } from "./domain/trading-strategy.js";
 import type { PaperOrder, TradeCandidate } from "./domain/types.js";
 import type {
   PaperDatabase,
+  PaperEventLock,
   PaperPositionView,
   PaperSettlement,
   StrategyState,
@@ -21,6 +22,10 @@ import { TestExecutor } from "./infrastructure/execution/test-executor.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
 import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
+import {
+  EventOpportunityService,
+  type EventOpportunityEvaluation,
+} from "./services/event-opportunity-service.js";
 import type { PaperSettlementRuntime } from "./services/paper-settlement-service.js";
 import type {
   PaperTradingPreferencesService,
@@ -50,7 +55,7 @@ function publicConfig(
     initialCapital: microsToDecimalString(strategy.initialCapitalMicros),
     totalBudget: microsToDecimalString(strategy.initialCapitalMicros),
     orderBudget: microsToDecimalString(preferences.orderBudgetMicros),
-    resultCounts: preferences.resultCounts,
+    marketTypes: preferences.marketTypes,
     minMarketDurationDays: preferences.minMarketDurationDays,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
@@ -144,31 +149,237 @@ function serializeCandidate(
 
 function serializeSnapshot(
   snapshot: CandidateSnapshot,
-  preferences: PaperTradingPreferencesService,
+  dependencies: AppDependencies,
   includeCandidates = true,
 ) {
-  const { candidates: unfilteredCandidates, ...status } = snapshot;
-  const candidates = preferences.getOrderedCandidates(
-    unfilteredCandidates,
-    new Date(),
-  );
+  const { candidates: _unfilteredCandidates, ...status } = snapshot;
+  const marketScan = buildEventMarketScan(snapshot, dependencies, new Date());
   const summary = {
     ...status,
-    candidateCount: candidates.length,
+    ...marketScan.summary,
   };
   return includeCandidates
     ? {
         ...summary,
-        candidates: candidates.map((candidate) =>
-          serializeCandidate(candidate),
-        ),
+        events: marketScan.events,
+        candidates: marketScan.candidates,
       }
     : summary;
 }
 
+function buildEventMarketScan(
+  snapshot: CandidateSnapshot,
+  dependencies: AppDependencies,
+  now: Date,
+) {
+  const staticCandidates = snapshot.candidates.filter((candidate) =>
+    dependencies.tradingPreferences.candidateMatchesStaticFilters(
+      candidate,
+      now,
+    ),
+  );
+  const candidatesByEvent = new Map<string, TradeCandidate[]>();
+  for (const candidate of staticCandidates) {
+    const siblings = candidatesByEvent.get(candidate.eventId) ?? [];
+    siblings.push(candidate);
+    candidatesByEvent.set(candidate.eventId, siblings);
+  }
+  const evaluationByEvent = new Map<string, EventOpportunityEvaluation>(
+    (dependencies.paperAutomation?.getEventEvaluations?.() ?? []).map(
+      (evaluation) => [evaluation.eventId, evaluation],
+    ),
+  );
+  const lockByEvent = new Map(
+    dependencies.database
+      .listPaperEventLocks()
+      .map((lock) => [lock.eventId, lock]),
+  );
+  const exitingEventIds = new Set(
+    dependencies.database
+      .listCurrentPaperPositionViews()
+      .filter(
+        (position) =>
+          position.eventId !== null && position.firstSellAt !== null,
+      )
+      .map((position) => position.eventId as string),
+  );
+  const direction =
+    dependencies.tradingPreferences.getSnapshot().candidateSortDirection;
+  const events = [...candidatesByEvent.entries()].map(([eventId, siblings]) => {
+    const orderedSiblings = dependencies.tradingPreferences.getOrderedCandidates(
+      siblings.map((candidate) => ({ ...candidate, bookReady: true })),
+      now,
+    );
+    const evaluation = evaluationByEvent.get(eventId);
+    const lock = evaluation?.lock ?? lockByEvent.get(eventId) ?? null;
+    const cachedWinner = evaluation?.winner?.candidate;
+    const fallbackWinner =
+      evaluation === undefined && dependencies.marketStream === undefined
+        ? dependencies.tradingPreferences
+            .getOrderedCandidates(siblings, now)
+            .find((candidate) => candidate.bookReady)
+        : undefined;
+    const winner = cachedWinner ?? fallbackWinner ?? null;
+    const activeCandidate =
+      lock?.activeTokenId === null || lock?.activeTokenId === undefined
+        ? undefined
+        : siblings.find((candidate) => candidate.tokenId === lock.activeTokenId);
+    const representative = winner ?? activeCandidate ?? orderedSiblings[0] ?? siblings[0];
+    if (representative === undefined) {
+      throw new Error(`Event has no display candidate: ${eventId}`);
+    }
+    const status =
+      evaluation?.status ??
+      (winner !== null
+        ? "READY"
+        : dependencies.marketStream !== undefined &&
+            siblings.some(
+              (candidate) =>
+                !dependencies.marketStream?.isTokenReady(candidate.tokenId),
+            )
+          ? "INCOMPLETE"
+          : "NO_WINNER");
+    const winnerTokenId = winner?.tokenId ?? null;
+    const incompleteTokenIds = new Set(evaluation?.incompleteTokenIds ?? []);
+    const opportunityTokenIds = new Set(
+      evaluation?.opportunities.map(
+        (opportunity) => opportunity.candidate.tokenId,
+      ) ?? [],
+    );
+    const outcomes = [...siblings]
+      .sort(
+        (left, right) =>
+          left.marketId.localeCompare(right.marketId) ||
+          left.direction.localeCompare(right.direction) ||
+          left.tokenId.localeCompare(right.tokenId),
+      )
+      .map((candidate) => {
+        const isWinner = candidate.tokenId === winnerTokenId;
+        const quoteStatus = incompleteTokenIds.has(candidate.tokenId)
+          ? dependencies.marketStream?.getQuoteStatus?.(candidate.tokenId) ??
+            "NOT_READY"
+          : isWinner
+            ? "READY"
+            : opportunityTokenIds.has(candidate.tokenId)
+              ? "ELIGIBLE"
+              : "FILTERED";
+        return {
+          ...serializeCandidate(candidate, {
+            tradable: isWinner && status === "READY",
+            quoteStatus,
+          }),
+          isWinner,
+          participationStatus: incompleteTokenIds.has(candidate.tokenId)
+            ? "INCOMPLETE"
+            : isWinner
+              ? "WINNER"
+              : opportunityTokenIds.has(candidate.tokenId)
+                ? "ELIGIBLE"
+                : "FILTERED",
+        };
+      });
+    const serializedRepresentative = serializeCandidate(representative, {
+      tradable: winnerTokenId === representative.tokenId && status === "READY",
+      quoteStatus:
+        dependencies.marketStream?.getQuoteStatus?.(representative.tokenId) ??
+        (winnerTokenId === representative.tokenId && status === "READY"
+          ? "READY"
+          : status),
+    });
+    return {
+      eventId,
+      eventSlug: representative.eventSlug,
+      eventTitle: representative.eventTitle,
+      marketUrl: polymarketEventUrl(
+        representative.eventSlug,
+        representative.eventId,
+      ),
+      resultCount: Math.max(
+        ...siblings.map((candidate) => candidate.resultCount ?? 0),
+      ),
+      participantTokenCount: evaluation?.participantCount ?? siblings.length,
+      eligibleTokenCount:
+        evaluation?.eligibleOpportunityCount ?? (winner === null ? 0 : 1),
+      marketCount: new Set(siblings.map((candidate) => candidate.marketId)).size,
+      tokenCount: siblings.length,
+      progressPercent: representative.progressPercent,
+      openedAt: representative.openedAt,
+      endsAt: representative.endsAt,
+      status,
+      locked: lock !== null,
+      lockState: lock?.state ?? null,
+      activeTokenId: lock?.activeTokenId ?? null,
+      winnerTokenId,
+      winner:
+        winner === null
+          ? null
+          : serializeCandidate(winner, {
+              tradable: status === "READY",
+              quoteStatus: status === "READY" ? "READY" : status,
+            }),
+      representative: serializedRepresentative,
+      outcomes,
+    };
+  });
+  events.sort((left, right) => {
+    const progress =
+      direction === "ASC"
+        ? left.progressPercent - right.progressPercent
+        : right.progressPercent - left.progressPercent;
+    return progress || left.eventId.localeCompare(right.eventId);
+  });
+  const readyEventCount = events.filter((event) => event.status === "READY").length;
+  const incompleteEventCount = events.filter(
+    (event) => event.status === "INCOMPLETE",
+  ).length;
+  const eligibleTokenCount = events.reduce(
+    (sum, event) =>
+      sum +
+      event.outcomes.filter(
+        (outcome) =>
+          outcome.participationStatus === "ELIGIBLE" ||
+          outcome.participationStatus === "WINNER",
+      ).length,
+    0,
+  );
+  const tokenCount = events.reduce((sum, event) => sum + event.tokenCount, 0);
+  const maxObservedResultCount = events.reduce(
+    (maximum, event) => Math.max(maximum, event.resultCount),
+    0,
+  );
+  return {
+    summary: {
+      candidateCount: readyEventCount,
+      eventCount: readyEventCount,
+      monitoredEventCount: events.length,
+      monitoredTokenCount: tokenCount,
+      completeEventCount: events.length - incompleteEventCount,
+      incompleteEventCount,
+      eligibleTokenCount,
+      arbitratedEventCount: events.filter(
+        (event) => evaluationByEvent.get(event.eventId)?.arbitrationPerformed,
+      ).length,
+      winnerEventCount: readyEventCount,
+      lockedEventCount: lockByEvent.size,
+      exitingEventCount: exitingEventIds.size,
+      legacyConflictCount: [...lockByEvent.values()].filter(
+        (eventLock) => eventLock.state === "LEGACY_CONFLICT",
+      ).length,
+      displayCandidateCount: events.length,
+      displayEventCount: events.length,
+      pendingEventCount: events.length - readyEventCount,
+      staleCandidateCount: events.length - readyEventCount,
+      tokenCount,
+      maxObservedResultCount,
+    },
+    events,
+    candidates: events.map((event) => event.representative),
+  };
+}
+
 function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
   return {
-    resultCounts: preferences.resultCounts,
+    marketTypes: preferences.marketTypes,
     allCategories: preferences.allCategories,
     selectedCategories: preferences.selectedCategories,
     selectedCategoryIds: preferences.selectedCategories,
@@ -243,15 +454,60 @@ function markPriceMicros(
   );
 }
 
+type PositionSerializationContext = {
+  candidateByToken: Map<string, TradeCandidate>;
+  eventLockByEvent: Map<string, PaperEventLock>;
+  targetSellPricesByToken: Map<string, number[]>;
+};
+
+function positionSerializationContext(
+  dependencies: AppDependencies,
+): PositionSerializationContext {
+  const targetSellPricesByToken = new Map<string, number[]>();
+  for (const order of dependencies.database.listActivePaperOrders()) {
+    if (order.side !== "SELL" || order.executionKind !== "TARGET") continue;
+    const prices = targetSellPricesByToken.get(order.tokenId) ?? [];
+    prices.push(order.priceMicros);
+    targetSellPricesByToken.set(order.tokenId, prices);
+  }
+  for (const prices of targetSellPricesByToken.values()) {
+    prices.sort((left, right) => left - right);
+  }
+  return {
+    candidateByToken: new Map(
+      dependencies.candidates
+        .getSnapshot()
+        .candidates.map((candidate) => [candidate.tokenId, candidate]),
+    ),
+    eventLockByEvent: new Map(
+      dependencies.database
+        .listPaperEventLocks()
+        .map((eventLock) => [eventLock.eventId, eventLock]),
+    ),
+    targetSellPricesByToken,
+  };
+}
+
+function serializePositionViews(
+  positions: readonly PaperPositionView[],
+  dependencies: AppDependencies,
+  now: Date,
+) {
+  const context = positionSerializationContext(dependencies);
+  return positions.map((position) =>
+    serializePositionView(position, dependencies, now, context),
+  );
+}
+
 function serializePositionView(
   position: PaperPositionView,
   dependencies: AppDependencies,
   now: Date,
+  context: PositionSerializationContext,
 ) {
-  const candidate = dependencies.candidates
-    .getSnapshot()
-    .candidates.find((item) => item.tokenId === position.tokenId);
+  const candidate = context.candidateByToken.get(position.tokenId);
   const eventId = position.eventId ?? candidate?.eventId ?? null;
+  const eventLock = eventId === null ? null : context.eventLockByEvent.get(eventId) ?? null;
   const eventSlug = position.eventSlug ?? candidate?.eventSlug ?? null;
   const openedAt = position.openedAt ?? candidate?.openedAt ?? null;
   const endsAt = position.endsAt ?? candidate?.endsAt ?? null;
@@ -271,13 +527,13 @@ function serializePositionView(
     currentMarkPriceMicros,
     dependencies,
   );
-  const targetSellPrices = dependencies.database
-    .listActivePaperOrders(position.tokenId)
-    .filter(
-      (order) => order.side === "SELL" && order.executionKind === "TARGET",
-    )
-    .map((order) => order.priceMicros)
-    .sort((left, right) => left - right);
+  const targetSellPrices = context.targetSellPricesByToken.get(position.tokenId) ?? [];
+  const cycleStatus =
+    eventLock?.state === "LEGACY_CONFLICT"
+      ? "LEGACY_CONFLICT"
+      : position.firstSellAt === null
+        ? "ACCUMULATING"
+        : "EXITING";
   return {
     ...position,
     eventId,
@@ -290,6 +546,14 @@ function serializePositionView(
     openedAt,
     endsAt,
     marketUrl: polymarketEventUrl(eventSlug, eventId),
+    eventLockState: eventLock?.state ?? null,
+    activeTokenId: eventLock?.activeTokenId ?? null,
+    cycleStatus,
+    cycleBudget:
+      eventLock?.state !== "ACTIVE"
+        ? null
+        : microsToDecimalString(eventLock.cycleBudgetMicros),
+    cycleSpent: microsToDecimalString(position.cycleSpendMicros),
     quantity: microsToDecimalString(position.quantityMicros),
     cost: microsToDecimalString(position.costMicros),
     realizedPnl: microsToDecimalString(position.realizedPnlMicros),
@@ -421,7 +685,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       runtime: runtimeStatus(),
       marketScan: serializeSnapshot(
         dependencies.candidates.getSnapshot(),
-        dependencies.tradingPreferences,
+        dependencies,
         query.compact !== "true",
       ),
       marketStream: dependencies.marketStream?.getStatus() ?? {
@@ -451,6 +715,13 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         cancelledFilterBuyCount: 0,
         cancelledStartedBuyCount: 0,
         cancelledProgressedBuyCount: 0,
+        eventsEvaluatedCount: 0,
+        incompleteEventCount: 0,
+        arbitrationCount: 0,
+        arbitrationRecomputeCount: 0,
+        staleArbitrationRejectionCount: 0,
+        skippedLockedSiblingQuoteCount: 0,
+        maxObservedResultCount: 0,
         recovery: null,
       },
       paperSettlement: dependencies.paperSettlement?.getStatus() ?? {
@@ -482,61 +753,30 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const positions = dependencies.database.listCurrentPaperPositionViews();
     const preferences = dependencies.tradingPreferences.getSnapshot();
     const candidateSnapshot = dependencies.candidates.getSnapshot();
-    const now = new Date();
-    const eligibleCandidates = dependencies.tradingPreferences.getOrderedCandidates(
-      candidateSnapshot.candidates,
-      now,
-    );
-    const actionableCandidates =
-      dependencies.marketStream === undefined
-        ? eligibleCandidates
-        : eligibleCandidates.filter((candidate) =>
-            dependencies.marketStream?.isTokenReady(candidate.tokenId),
-          );
-    const displayCandidates = dependencies.tradingPreferences.getOrderedCandidates(
-      candidateSnapshot.candidates.map((candidate) =>
-        candidate.bookReady ? candidate : { ...candidate, bookReady: true },
-      ),
-      now,
-    );
-    const actionableCandidateIds = new Set(
-      actionableCandidates.map((candidate) => candidate.candidateId),
+    const eventMarketScan = buildEventMarketScan(
+      candidateSnapshot,
+      dependencies,
+      new Date(),
     );
     const { candidates: _unfilteredCandidates, ...marketScanStatus } =
       candidateSnapshot;
+    const visibleEvents = eventMarketScan.events.slice(0, query.limit);
     return {
       version: "0.5.0",
       executionMode: "TEST",
       liveExecutionEnabled: false,
       strategy: serializeState(strategy),
       portfolio: serializePortfolio(strategy, positions, dependencies),
-      positions: positions.map((position) =>
-        serializePositionView(position, dependencies, new Date()),
-      ),
+      positions: serializePositionViews(positions, dependencies, new Date()),
       preferences: serializePreferences(preferences),
       capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
       marketScan: {
         ...marketScanStatus,
-        candidateCount: actionableCandidates.length,
-        displayCandidateCount: displayCandidates.length,
-        staleCandidateCount:
-          displayCandidates.length - actionableCandidates.length,
-        candidates: displayCandidates
-          .slice(0, query.limit)
-          .map((candidate) => {
-            const tradable = actionableCandidateIds.has(candidate.candidateId);
-            return serializeCandidate(candidate, {
-              tradable,
-              quoteStatus:
-                dependencies.marketStream?.getQuoteStatus?.(
-                  candidate.tokenId,
-                ) ?? (tradable ? "READY" : "NOT_READY"),
-            });
-          }),
-        displayedCandidateCount: Math.min(
-          query.limit,
-          displayCandidates.length,
-        ),
+        ...eventMarketScan.summary,
+        events: visibleEvents,
+        candidates: visibleEvents.map((event) => event.representative),
+        displayedCandidateCount: visibleEvents.length,
+        displayedEventCount: visibleEvents.length,
       },
     };
   });
@@ -571,7 +811,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       query.refresh === "true"
         ? await dependencies.candidates.refresh()
         : dependencies.candidates.getSnapshot();
-    return serializeSnapshot(snapshot, dependencies.tradingPreferences);
+    return serializeSnapshot(snapshot, dependencies);
   });
 
   app.get("/api/test/preferences", async () => ({
@@ -582,7 +822,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   app.put("/api/test/preferences", async (request) => {
     const body = z
       .object({
-        resultCounts: z.array(z.union([z.literal(2), z.literal(3)])).min(1),
+        marketTypes: z.array(z.enum(["BINARY", "TERNARY", "MULTI"])).min(1),
         maxBuyPriceCents: z.number().int().min(1).max(3),
         minMarketDurationDays: z.number().int().min(1).max(365).optional(),
         maxMarketDurationDays: z.number().int().min(1).max(365),
@@ -622,7 +862,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         ? dependencies.tradingPreferences.getSnapshot().orderBudgetMicros
         : unitsToMicros(body.orderAmount);
     if (requestedOrderBudgetMicros > requestedInitialCapitalMicros) {
-      throw new Error("Per-order TEST amount cannot exceed total TEST capital");
+      throw new Error("Per-Event cycle TEST amount cannot exceed total TEST capital");
     }
     if (
       requestedInitialCapitalMicros !== currentStrategy.initialCapitalMicros &&
@@ -639,7 +879,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
             requestedInitialCapitalMicros,
           );
     const update = dependencies.tradingPreferences.updateMarketFilters({
-      resultCounts: body.resultCounts,
+      marketTypes: body.marketTypes,
       maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
       minMarketDurationDays: requestedMinMarketDurationDays,
       maxMarketDurationDays: body.maxMarketDurationDays,
@@ -684,9 +924,11 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
   }));
 
   app.get("/api/test/positions", async () => ({
-    positions: dependencies.database
-      .listCurrentPaperPositionViews()
-      .map((position) => serializePositionView(position, dependencies, new Date())),
+    positions: serializePositionViews(
+      dependencies.database.listCurrentPaperPositionViews(),
+      dependencies,
+      new Date(),
+    ),
   }));
 
   app.get("/api/test/settlements", async () => ({
@@ -702,28 +944,48 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       return reply.code(404).send({ error: "Candidate is unavailable or stale" });
     }
     if (
-      !dependencies.tradingPreferences.isCandidateEnabled(candidate, new Date())
+      !dependencies.tradingPreferences.candidateMatchesStaticFilters(
+        candidate,
+        new Date(),
+      )
     ) {
       return reply.code(409).send({
         error: "Candidate is excluded by the current TEST filters",
       });
     }
 
-    const book = dependencies.marketStream?.getOrderBook?.(candidate) ?? null;
-    if (book === null) {
+    if (dependencies.marketStream === undefined) {
       return reply.code(409).send({ error: "Current TEST order book is incomplete" });
     }
-    const execution = testExecutor.executeBuy({
-      candidate,
-      book,
-      maxPriceMicros:
-        dependencies.tradingPreferences.getSnapshot().maxBuyPriceMicros,
-      orderBudgetMicros:
-        dependencies.tradingPreferences.getSnapshot().orderBudgetMicros,
-      feeRateMicros: candidate.feeRateMicros,
-      feeExponent: candidate.feeExponent,
-      eligibility: dependencies.tradingPreferences.getEligibilitySettings(),
-    });
+    const opportunities = new EventOpportunityService(
+      dependencies.candidates,
+      dependencies.database,
+      dependencies.marketStream,
+      dependencies.config,
+      dependencies.tradingPreferences,
+    );
+    const initial = opportunities.evaluateEvent(candidate.eventId, new Date());
+    if (
+      initial.status !== "READY" ||
+      initial.winner?.candidate.tokenId !== candidate.tokenId
+    ) {
+      return reply.code(409).send({
+        error:
+          initial.status === "INCOMPLETE"
+            ? "Current Event order books are incomplete"
+            : "Candidate is not the current Event winner",
+      });
+    }
+    const rechecked = opportunities.evaluateEvent(candidate.eventId, new Date());
+    if (
+      rechecked.status !== "READY" ||
+      rechecked.winner?.candidate.tokenId !== candidate.tokenId
+    ) {
+      return reply.code(409).send({
+        error: "Event arbitration changed before TEST execution",
+      });
+    }
+    const execution = testExecutor.executeBuy(rechecked.winner.intent);
     if (execution.order === null) {
       return reply.code(409).send({
         error: `TEST FAK buy was not executed: ${execution.outcome}`,

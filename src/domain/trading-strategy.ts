@@ -1,4 +1,7 @@
 import {
+  bestAskLevel,
+  bestBidLevel,
+  calculateFixedSellPriceMicros,
   calculateOrderCostMicros,
   calculateOrderSizeMicros,
   DECIMAL_SCALE,
@@ -31,6 +34,27 @@ export type FakBuyPlan = {
   spentMicros: number;
   feeMicros: number;
   fullySpent: boolean;
+};
+
+export type FakBuyPreviewFill = FakBuyFill & {
+  targetPriceMicros: number;
+  exitableBidDepthMicros: number;
+  targetGrossProceedsMicros: number;
+  targetFeeMicros: number;
+  targetNetProceedsMicros: number;
+};
+
+export type FakBuyPreview = {
+  plan: FakBuyPlan;
+  fills: FakBuyPreviewFill[];
+  bestAskMicros: number;
+  bestBidMicros: number;
+  terminalTargetPriceMicros: number;
+  exitBidCoverageSizeMicros: number;
+  exitBidCoveragePositionSizeMicros: number;
+  targetNetProceedsMicros: number;
+  targetNetProfitMicros: number;
+  cycleBudgetMicros: number;
 };
 
 export type FakSellFill = {
@@ -173,6 +197,91 @@ export function planFakBuy(input: {
     spentMicros: sum(fills, (fill) => fill.notionalMicros),
     feeMicros: sum(fills, (fill) => fill.feeMicros),
     fullySpent: remainingSpendMicros === 0,
+  };
+}
+
+export function previewFakBuy(input: {
+  asks: readonly BookLevel[];
+  bids: readonly BookLevel[];
+  maxPriceMicros: number;
+  maxSpendMicros: number;
+  cycleBudgetMicros: number;
+  minOrderSizeMicros: number;
+  tickSizeMicros: number;
+  feeRateMicros: number;
+  feeExponent: number;
+}): FakBuyPreview | null {
+  if (!Number.isSafeInteger(input.cycleBudgetMicros) || input.cycleBudgetMicros <= 0) {
+    return null;
+  }
+  const plan = planFakBuy(input);
+  const bestAsk = bestAskLevel(input.asks);
+  const bestBid = bestBidLevel(input.bids);
+  if (plan === null || bestAsk === null || bestBid === null) {
+    return null;
+  }
+
+  const fills = plan.fills.map((fill): FakBuyPreviewFill => {
+    const targetPriceMicros = calculateFixedSellPriceMicros(
+      fill.priceMicros,
+      input.tickSizeMicros,
+    );
+    const exitableBidDepthMicros = input.bids
+      .filter(
+        (level) =>
+          Number.isSafeInteger(level.priceMicros) &&
+          level.priceMicros >= targetPriceMicros &&
+          level.priceMicros < DECIMAL_SCALE &&
+          Number.isSafeInteger(level.sizeMicros) &&
+          level.sizeMicros > 0,
+      )
+      .reduce((total, level) => total + level.sizeMicros, 0);
+    const targetGrossProceedsMicros = calculateOrderCostMicros(
+      targetPriceMicros,
+      fill.netSizeMicros,
+    );
+    const targetFeeMicros = calculateTakerFeeMicros({
+      sizeMicros: fill.netSizeMicros,
+      priceMicros: targetPriceMicros,
+      feeRateMicros: input.feeRateMicros,
+      feeExponent: input.feeExponent,
+    });
+    return {
+      ...fill,
+      targetPriceMicros,
+      exitableBidDepthMicros,
+      targetGrossProceedsMicros,
+      targetFeeMicros,
+      targetNetProceedsMicros: Math.max(
+        0,
+        targetGrossProceedsMicros - targetFeeMicros,
+      ),
+    };
+  });
+  const targetNetProceedsMicros = sum(
+    fills,
+    (fill) => fill.targetNetProceedsMicros,
+  );
+  const exitBidCoverageSizeMicros = Math.min(
+    plan.netFillSizeMicros,
+    sum(fills, (fill) =>
+      Math.min(fill.exitableBidDepthMicros, fill.netSizeMicros),
+    ),
+  );
+
+  return {
+    plan,
+    fills,
+    bestAskMicros: bestAsk.priceMicros,
+    bestBidMicros: bestBid.priceMicros,
+    terminalTargetPriceMicros: Math.max(
+      ...fills.map((fill) => fill.targetPriceMicros),
+    ),
+    exitBidCoverageSizeMicros,
+    exitBidCoveragePositionSizeMicros: plan.netFillSizeMicros,
+    targetNetProceedsMicros,
+    targetNetProfitMicros: targetNetProceedsMicros - plan.spentMicros,
+    cycleBudgetMicros: input.cycleBudgetMicros,
   };
 }
 

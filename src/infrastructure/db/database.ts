@@ -7,6 +7,7 @@ import { calculateConservativePaperFill } from "../../domain/paper-fill-model.js
 import type {
   ConsumedBookLevel,
   ImmediateBuyExecution,
+  ImmediateBuyIntent,
   ImmediateBuyOutcome,
   TargetSellExecution,
 } from "../../domain/execution.js";
@@ -23,10 +24,11 @@ import {
 } from "../../domain/price.js";
 import { isMarketEligible } from "../../domain/market-eligibility.js";
 import type { MarketEligibilitySettings } from "../../domain/market-eligibility.js";
+import type { MarketType } from "../../domain/market-type.js";
 import {
-  planFakBuy,
   planFakSell,
-  type FakBuyPlan,
+  previewFakBuy,
+  type FakBuyPreview,
 } from "../../domain/trading-strategy.js";
 import type {
   BookLevel,
@@ -140,8 +142,28 @@ export type PaperPositionView = PaperPosition & {
   endsAt: string | null;
 };
 
+export type PaperEventLockState = "ACTIVE" | "LEGACY_CONFLICT";
+
+export type PaperEventLock = {
+  eventId: string;
+  activeTokenId: string | null;
+  marketId: string | null;
+  conditionId: string | null;
+  cycleBudgetMicros: number;
+  state: PaperEventLockState;
+  lockedAt: string;
+  updatedAt: string;
+};
+
+export type TestFakBuyPreviewResult = {
+  outcome: "READY" | "NO_FILL" | "BLOCKED";
+  preview: FakBuyPreview | null;
+  eventLock: PaperEventLock | null;
+  eventStateVersion: string;
+};
+
 export type PaperTradingPreferences = {
-  resultCounts: Array<2 | 3>;
+  marketTypes: MarketType[];
   allCategories: boolean;
   selectedCategories: string[];
   candidateSortDirection: "ASC" | "DESC";
@@ -168,7 +190,7 @@ export type ActivePaperBuyMarket = {
   bookReady: boolean;
   category: string | null;
   categoryIds: string[];
-  resultCount: 2 | 3 | null;
+  resultCount: number | null;
   durationDays: number | null;
   openedAt: string | null;
   endsAt: string | null;
@@ -254,6 +276,24 @@ type PaperPositionViewRow = PaperPositionRow & {
   direction: "YES" | "NO" | null;
   opened_at: string | null;
   ends_at: string | null;
+};
+
+type PaperEventLockRow = {
+  event_id: string;
+  active_token_id: string | null;
+  market_id: string | null;
+  condition_id: string | null;
+  cycle_budget_micros: number;
+  state: PaperEventLockState;
+  locked_at: string;
+  updated_at: string;
+};
+
+type TestFakBuyPlanningResult = TestFakBuyPreviewResult & {
+  availableBids: BookLevel[];
+  availableAsks: BookLevel[];
+  startingNewCycle: boolean;
+  maxSpendMicros: number;
 };
 
 const FINAL_RESOLUTION_STATUSES = new Set(["resolved", "settled"]);
@@ -365,9 +405,23 @@ function rowToPaperPositionView(row: PaperPositionViewRow): PaperPositionView {
   };
 }
 
+function rowToPaperEventLock(row: PaperEventLockRow): PaperEventLock {
+  return {
+    eventId: row.event_id,
+    activeTokenId: row.active_token_id,
+    marketId: row.market_id,
+    conditionId: row.condition_id,
+    cycleBudgetMicros: row.cycle_budget_micros,
+    state: row.state,
+    lockedAt: row.locked_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function rowToPaperTradingPreferences(row: {
   binary_enabled: number;
   ternary_enabled: number;
+  multi_enabled: number;
   max_buy_price_micros: number;
   min_bid_ask_ratio_percent: number;
   min_market_duration_days: number;
@@ -380,11 +434,12 @@ function rowToPaperTradingPreferences(row: {
   order_budget_micros: number;
   updated_at: string;
 }): PaperTradingPreferences {
-  const resultCounts: Array<2 | 3> = [];
-  if (row.binary_enabled === 1) resultCounts.push(2);
-  if (row.ternary_enabled === 1) resultCounts.push(3);
+  const marketTypes: MarketType[] = [];
+  if (row.binary_enabled === 1) marketTypes.push("BINARY");
+  if (row.ternary_enabled === 1) marketTypes.push("TERNARY");
+  if (row.multi_enabled === 1) marketTypes.push("MULTI");
   return {
-    resultCounts,
+    marketTypes,
     allCategories: row.all_categories_enabled === 1,
     selectedCategories: parseCategoryJson(row.selected_categories_json),
     candidateSortDirection: row.candidate_sort_direction,
@@ -455,6 +510,7 @@ export class PaperDatabase {
       { version: 12, file: "012_final_market_eligibility.sql" },
       { version: 13, file: "013_fak_buy_fill_invariant.sql" },
       { version: 14, file: "014_market_duration_range.sql" },
+      { version: 15, file: "015_event_cycles.sql" },
     ];
 
     for (const migration of migrations) {
@@ -666,7 +722,8 @@ export class PaperDatabase {
           (SELECT COUNT(*) FROM paper_orders) +
           (SELECT COUNT(*) FROM paper_fills) +
           (SELECT COUNT(*) FROM paper_positions) +
-          (SELECT COUNT(*) FROM paper_settlements) AS count`,
+          (SELECT COUNT(*) FROM paper_settlements) +
+          (SELECT COUNT(*) FROM paper_event_locks) AS count`,
       )
       .get() as { count: number };
     return row.count;
@@ -691,6 +748,7 @@ export class PaperDatabase {
         .run();
       this.database.prepare("DELETE FROM paper_orders").run();
       this.database.prepare("DELETE FROM paper_settlements").run();
+      this.database.prepare("DELETE FROM paper_event_locks").run();
       this.database.prepare("DELETE FROM paper_positions").run();
       this.database.prepare("DELETE FROM paper_market_metadata").run();
       this.database
@@ -723,17 +781,19 @@ export class PaperDatabase {
       this.database
         .prepare(
           `INSERT INTO paper_trading_preferences(
-            id, binary_enabled, ternary_enabled, max_buy_price_micros,
+            id, binary_enabled, ternary_enabled, multi_enabled,
+            max_buy_price_micros,
             min_market_duration_days, max_market_duration_days,
             max_market_progress_percent,
             candidates_selected_by_default, all_categories_enabled,
             selected_categories_json, candidate_sort_direction,
             order_budget_micros, min_bid_ask_ratio_percent, updated_at
-          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          defaults.resultCounts.includes(2) ? 1 : 0,
-          defaults.resultCounts.includes(3) ? 1 : 0,
+          defaults.marketTypes.includes("BINARY") ? 1 : 0,
+          defaults.marketTypes.includes("TERNARY") ? 1 : 0,
+          defaults.marketTypes.includes("MULTI") ? 1 : 0,
           defaults.maxBuyPriceMicros,
           defaults.minMarketDurationDays,
           defaults.maxMarketDurationDays,
@@ -779,7 +839,8 @@ export class PaperDatabase {
       this.database
         .prepare(
           `UPDATE paper_trading_preferences
-          SET binary_enabled = ?, ternary_enabled = ?, max_buy_price_micros = ?,
+          SET binary_enabled = ?, ternary_enabled = ?, multi_enabled = ?,
+              max_buy_price_micros = ?,
               min_market_duration_days = ?, max_market_duration_days = ?,
               max_market_progress_percent = ?,
               candidates_selected_by_default = ?, all_categories_enabled = ?,
@@ -788,8 +849,9 @@ export class PaperDatabase {
           WHERE id = 1`,
         )
         .run(
-          preferences.resultCounts.includes(2) ? 1 : 0,
-          preferences.resultCounts.includes(3) ? 1 : 0,
+          preferences.marketTypes.includes("BINARY") ? 1 : 0,
+          preferences.marketTypes.includes("TERNARY") ? 1 : 0,
+          preferences.marketTypes.includes("MULTI") ? 1 : 0,
           preferences.maxBuyPriceMicros,
           preferences.minMarketDurationDays,
           preferences.maxMarketDurationDays,
@@ -811,7 +873,7 @@ export class PaperDatabase {
         );
       }
       this.writeAudit("PAPER_TRADING_FILTERS_UPDATED", "strategy", "1", {
-        resultCounts: preferences.resultCounts,
+        marketTypes: preferences.marketTypes,
         maxBuyPriceMicros: preferences.maxBuyPriceMicros,
         minBidAskRatioPercent: preferences.minBidAskRatioPercent,
         minMarketDurationDays: preferences.minMarketDurationDays,
@@ -847,7 +909,7 @@ export class PaperDatabase {
       price_micros: number;
       category: string | null;
       category_ids_json: string | null;
-      result_count: 2 | 3 | null;
+      result_count: number | null;
       duration_days: number | null;
       opened_at: string | null;
       ends_at: string | null;
@@ -952,6 +1014,22 @@ export class PaperDatabase {
       )
       .all() as unknown as PaperPositionViewRow[];
     return rows.map(rowToPaperPositionView);
+  }
+
+  public listPaperEventLocks(): PaperEventLock[] {
+    const rows = this.database
+      .prepare(
+        `SELECT event_id, active_token_id, market_id, condition_id,
+          cycle_budget_micros, state, locked_at, updated_at
+        FROM paper_event_locks ORDER BY event_id`,
+      )
+      .all() as unknown as PaperEventLockRow[];
+    return rows.map(rowToPaperEventLock);
+  }
+
+  public getPaperEventLock(eventId: string): PaperEventLock | null {
+    const row = this.getPaperEventLockRow(eventId);
+    return row === undefined ? null : rowToPaperEventLock(row);
   }
 
   public listPaperSettlements(limit = 100): PaperSettlement[] {
@@ -1409,6 +1487,7 @@ export class PaperDatabase {
         realizedPnlMicros,
         redemptionStatus,
       });
+      this.releasePaperEventLockIfClosed(target.eventId, nowIso);
 
       return {
         settlement: this.getPaperSettlement(target.conditionId) as PaperSettlement,
@@ -1803,6 +1882,8 @@ export class PaperDatabase {
       }
     }
 
+    errors.push(...this.collectPaperEventStateErrors(activeOrders));
+
     const settledConditions = this.database
       .prepare(
         "SELECT condition_id FROM paper_settlements WHERE status = 'SETTLED'",
@@ -1832,6 +1913,191 @@ export class PaperDatabase {
       }
     }
     return errors;
+  }
+
+  private collectPaperEventStateErrors(
+    activeOrders: readonly PaperOrder[],
+  ): string[] {
+    const errors = new Set<string>();
+    const positions = this.database
+      .prepare(
+        `SELECT pp.token_id, pp.condition_id, pp.cycle_spend_micros,
+          pp.first_sell_at, pm.event_id, pm.market_id
+        FROM paper_positions pp
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+        WHERE pp.quantity_micros > 0`,
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      condition_id: string;
+      cycle_spend_micros: number;
+      first_sell_at: string | null;
+      event_id: string | null;
+      market_id: string | null;
+    }>;
+    const positionsByEvent = new Map<string, typeof positions>();
+    for (const position of positions) {
+      if (position.event_id === null || position.market_id === null) {
+        errors.add(
+          `Paper position is missing Event metadata: ${position.token_id}`,
+        );
+        continue;
+      }
+      const eventPositions = positionsByEvent.get(position.event_id) ?? [];
+      eventPositions.push(position);
+      positionsByEvent.set(position.event_id, eventPositions);
+    }
+
+    const metadataRows = this.database
+      .prepare(
+        `SELECT token_id, event_id, market_id FROM paper_market_metadata`,
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      event_id: string;
+      market_id: string;
+    }>;
+    const metadataByToken = new Map(
+      metadataRows.map((metadata) => [metadata.token_id, metadata]),
+    );
+    const locks = this.listPaperEventLocks();
+    const locksByEvent = new Map(locks.map((lock) => [lock.eventId, lock]));
+    const activeTargetsByEvent = new Map<string, PaperOrder[]>();
+    const activeBuysByEvent = new Map<string, PaperOrder[]>();
+    for (const order of activeOrders) {
+      const targetMap =
+        order.side === "SELL"
+          ? activeTargetsByEvent
+          : order.side === "BUY"
+            ? activeBuysByEvent
+            : null;
+      if (targetMap === null) continue;
+      const orders = targetMap.get(order.eventId) ?? [];
+      orders.push(order);
+      targetMap.set(order.eventId, orders);
+    }
+
+    for (const [eventId, eventPositions] of positionsByEvent) {
+      const lock = locksByEvent.get(eventId);
+      if (lock === undefined) {
+        for (const position of eventPositions) {
+          errors.add(
+            `Paper position is missing its Event lock: ${position.token_id}`,
+          );
+        }
+        continue;
+      }
+      if (eventPositions.length > 1 && lock.state !== "LEGACY_CONFLICT") {
+        errors.add(
+          `Paper Event has multiple positive tokens without LEGACY_CONFLICT: ${eventId}`,
+        );
+      }
+    }
+
+    const settledConditionRows = this.database
+      .prepare(
+        `SELECT condition_id FROM paper_settlements WHERE status = 'SETTLED'`,
+      )
+      .all() as unknown as Array<{ condition_id: string }>;
+    const settledConditions = new Set(
+      settledConditionRows.map((row) => row.condition_id),
+    );
+    for (const lock of locks) {
+      const eventPositions = positionsByEvent.get(lock.eventId) ?? [];
+      const activeTargets = activeTargetsByEvent.get(lock.eventId) ?? [];
+      const activeBuys = activeBuysByEvent.get(lock.eventId) ?? [];
+      if (eventPositions.length === 0 && activeTargets.length === 0) {
+        errors.add(
+          `Paper Event lock has no position or active target: ${lock.eventId}`,
+        );
+      }
+      if (
+        lock.conditionId !== null &&
+        settledConditions.has(lock.conditionId)
+      ) {
+        errors.add(
+          `Settled condition still has an Event lock: ${lock.conditionId}`,
+        );
+      }
+
+      if (lock.state === "LEGACY_CONFLICT") {
+        if (activeBuys.length > 0) {
+          errors.add(
+            `LEGACY_CONFLICT Event has an active BUY: ${lock.eventId}`,
+          );
+        }
+        continue;
+      }
+
+      const activeTokenId = lock.activeTokenId;
+      const metadata =
+        activeTokenId === null ? undefined : metadataByToken.get(activeTokenId);
+      const identityMatches =
+        activeTokenId !== null &&
+        lock.marketId !== null &&
+        lock.conditionId !== null &&
+        metadata?.event_id === lock.eventId &&
+        metadata.market_id === lock.marketId &&
+        eventPositions.every(
+          (position) =>
+            position.token_id === activeTokenId &&
+            position.market_id === lock.marketId &&
+            position.condition_id === lock.conditionId,
+        ) &&
+        activeTargets.every(
+          (target) =>
+            target.tokenId === activeTokenId &&
+            target.marketId === lock.marketId &&
+            target.conditionId === lock.conditionId,
+        );
+      if (!identityMatches) {
+        errors.add(
+          `Paper Event lock identity does not match metadata: ${lock.eventId}`,
+        );
+      }
+      if (activeBuys.some((buy) => buy.tokenId !== activeTokenId)) {
+        errors.add(
+          `Paper Event lock has an active sibling BUY: ${lock.eventId}`,
+        );
+      }
+      const activePosition = eventPositions.find(
+        (position) => position.token_id === activeTokenId,
+      );
+      if (
+        activePosition !== undefined &&
+        activePosition.cycle_spend_micros > lock.cycleBudgetMicros
+      ) {
+        errors.add(
+          `Paper Event cycle spend exceeds frozen budget: ${lock.eventId}`,
+        );
+      }
+      if (
+        activePosition?.first_sell_at !== null &&
+        activePosition?.first_sell_at !== undefined &&
+        activeBuys.length > 0
+      ) {
+        errors.add(
+          `Paper Event has an active BUY after first sell: ${lock.eventId}`,
+        );
+      }
+    }
+
+    const postSellBuyRows = this.database
+      .prepare(
+        `SELECT DISTINCT pm.event_id
+        FROM paper_positions pp
+        JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+        JOIN paper_event_locks pel ON pel.event_id = pm.event_id
+          AND pel.state = 'ACTIVE'
+        JOIN paper_orders po ON po.event_id = pm.event_id AND po.side = 'BUY'
+        WHERE pp.first_sell_at IS NOT NULL
+          AND po.created_at > pp.first_sell_at`,
+      )
+      .all() as unknown as Array<{ event_id: string }>;
+    for (const row of postSellBuyRows) {
+      errors.add(`Paper Event has a BUY created after first sell: ${row.event_id}`);
+    }
+    return [...errors];
   }
 
   public pausePaperStrategyForValidationFailure(
@@ -1912,98 +2178,31 @@ export class PaperDatabase {
     });
   }
 
-  public executeTestFakBuy(input: {
-    candidate: TradeCandidate;
-    book: TokenOrderBook;
-    maxPriceMicros: number;
-    orderBudgetMicros: number;
-    feeRateMicros: number;
-    feeExponent: number;
-    eligibility: MarketEligibilitySettings;
-  }): ImmediateBuyExecution {
+  public previewTestFakBuy(input: ImmediateBuyIntent): TestFakBuyPreviewResult {
+    const planning = this.planTestFakBuy(input, false);
+    return {
+      outcome: planning.outcome,
+      preview: planning.preview,
+      eventLock: planning.eventLock,
+      eventStateVersion: planning.eventStateVersion,
+    };
+  }
+
+  public executeTestFakBuy(input: ImmediateBuyIntent): ImmediateBuyExecution {
     this.assertPaperAccountingMutationAllowed();
     return this.transaction(() => {
       const { candidate, book } = input;
-      const state = this.getStrategyState();
-      if (
-        state.status !== "RUNNING" ||
-        candidate.tokenId !== book.tokenId ||
-        candidate.conditionId !== book.conditionId ||
-        candidate.isNegativeRisk !== book.isNegativeRisk ||
-        book.bookVersion.trim().length === 0
-      ) {
-        return emptyTestFakBuy("BLOCKED");
+      const planning = this.planTestFakBuy(input, true);
+      if (planning.outcome !== "READY" || planning.preview === null) {
+        return emptyTestFakBuy(
+          planning.outcome === "NO_FILL" ? "NO_FILL" : "BLOCKED",
+        );
       }
-      const availableBids = this.availableTestBookLevels(
-        candidate.tokenId,
-        book.bookVersion,
-        "BID",
-        book.bids,
-      );
-      const availableAsks = this.availableTestBookLevels(
-        candidate.tokenId,
-        book.bookVersion,
-        "ASK",
-        book.asks,
-      );
-      const currentBestBid = bestBidLevel(availableBids)?.priceMicros ?? null;
-      const currentBestAsk = bestAskLevel(availableAsks)?.priceMicros ?? null;
-      if (
-        !isMarketEligible(
-          {
-            ...candidate,
-            bookReady: true,
-            bestBidMicros: currentBestBid,
-            bestAskMicros: currentBestAsk,
-            minOrderSizeMicros: book.minOrderSizeMicros,
-            tickSizeMicros: book.tickSizeMicros,
-          },
-          input.eligibility,
-          new Date(),
-        )
-      ) {
-        return emptyTestFakBuy("BLOCKED");
-      }
-      if (
-        candidate.gameStartsAt !== null &&
-        Date.parse(candidate.gameStartsAt) <= Date.now()
-      ) {
-        return emptyTestFakBuy("BLOCKED");
-      }
+      const plan = planning.preview.plan;
+      const maxSpendMicros = planning.maxSpendMicros;
 
-      let position = this.database
-        .prepare(
-          `SELECT quantity_micros, cost_micros, first_sell_at,
-            cycle_closed_at, cycle_spend_micros
-          FROM paper_positions WHERE token_id = ?`,
-        )
-        .get(candidate.tokenId) as
-        | {
-            quantity_micros: number;
-            cost_micros: number;
-            first_sell_at: string | null;
-            cycle_closed_at: string | null;
-            cycle_spend_micros: number;
-          }
-        | undefined;
-      const settled = this.database
-        .prepare(
-          "SELECT 1 FROM paper_settlements WHERE condition_id = ? AND status = 'SETTLED'",
-        )
-        .get(candidate.conditionId);
-      if (settled !== undefined) {
-        return emptyTestFakBuy("BLOCKED");
-      }
-      if (position?.first_sell_at || position?.cycle_closed_at) {
-        if (
-          position.quantity_micros !== 0 ||
-          position.cost_micros !== 0 ||
-          position.cycle_closed_at === null ||
-          state.availableCashMicros < input.orderBudgetMicros
-        ) {
-          return emptyTestFakBuy("BLOCKED");
-        }
-        const now = new Date().toISOString();
+      const now = new Date().toISOString();
+      if (planning.startingNewCycle) {
         this.database
           .prepare(
             `UPDATE paper_positions
@@ -2014,59 +2213,42 @@ export class PaperDatabase {
           )
           .run(now, candidate.tokenId);
         this.writeAudit(
-          "TEST_CYCLE_AUTOMATICALLY_STARTED",
-          "market_token",
-          candidate.tokenId,
-          { previousCycleClosedAt: position.cycle_closed_at },
+          "TEST_EVENT_CYCLE_AUTOMATICALLY_STARTED",
+          "event",
+          candidate.eventId,
+          { activeTokenId: candidate.tokenId },
         );
-        position = {
-          ...position,
-          first_sell_at: null,
-          cycle_closed_at: null,
-          cycle_spend_micros: 0,
-        };
       }
-      if (
-        this.listActivePaperOrders(candidate.tokenId).some(
-          (order) => order.side === "BUY",
-        )
-      ) {
-        return emptyTestFakBuy("BLOCKED");
-      }
-
-      const remainingCycleBudget = Math.max(
-        0,
-        input.orderBudgetMicros - (position?.cycle_spend_micros ?? 0),
-      );
-      if (
-        (position?.cycle_spend_micros ?? 0) === 0 &&
-        state.availableCashMicros < input.orderBudgetMicros
-      ) {
-        return emptyTestFakBuy("BLOCKED");
-      }
-      const maxSpendMicros = Math.min(
-        remainingCycleBudget,
-        state.availableCashMicros,
-      );
-      const plan = planFakBuy({
-        asks: availableAsks,
-        maxPriceMicros: input.maxPriceMicros,
-        maxSpendMicros,
-        minOrderSizeMicros: book.minOrderSizeMicros,
-        feeRateMicros: input.feeRateMicros,
-        feeExponent: input.feeExponent,
-      });
-      if (plan === null) {
-        return emptyTestFakBuy("NO_FILL");
-      }
-
-      const now = new Date().toISOString();
       this.upsertTestMarketMetadata(
         candidate,
         input.feeRateMicros,
         input.feeExponent,
         now,
       );
+      if (planning.eventLock === null) {
+        this.database
+          .prepare(
+            `INSERT INTO paper_event_locks(
+              event_id, active_token_id, market_id, condition_id,
+              cycle_budget_micros, state, locked_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+          )
+          .run(
+            candidate.eventId,
+            candidate.tokenId,
+            candidate.marketId,
+            candidate.conditionId,
+            input.orderBudgetMicros,
+            now,
+            now,
+          );
+        this.writeAudit("TEST_EVENT_LOCK_CREATED", "event", candidate.eventId, {
+          activeTokenId: candidate.tokenId,
+          marketId: candidate.marketId,
+          conditionId: candidate.conditionId,
+          cycleBudgetMicros: input.orderBudgetMicros,
+        });
+      }
       const orderId = randomUUID();
       const requestedSizeMicros = calculateOrderSizeMicros(
         maxSpendMicros,
@@ -2128,10 +2310,9 @@ export class PaperDatabase {
             now,
           );
         const sellOrderId = randomUUID();
-        const targetPriceMicros = calculateFixedSellPriceMicros(
-          fill.priceMicros,
-          book.tickSizeMicros,
-        );
+        const targetPriceMicros =
+          planning.preview.fills[index]?.targetPriceMicros ??
+          calculateFixedSellPriceMicros(fill.priceMicros, book.tickSizeMicros);
         this.database
           .prepare(
             `INSERT INTO paper_orders(
@@ -2357,11 +2538,13 @@ export class PaperDatabase {
       }
 
       if (filledSizeMicros > 0) {
+        const completedAt = new Date().toISOString();
         this.cancelActiveBuysForToken(
           input.tokenId,
-          new Date().toISOString(),
+          completedAt,
           "FIRST_SELL",
         );
+        this.releasePaperEventLockIfClosedForToken(input.tokenId, completedAt);
       }
       this.recordTestBookConsumption(
         input.tokenId,
@@ -2396,6 +2579,19 @@ export class PaperDatabase {
         Date.parse(candidate.gameStartsAt) <= Date.now()
       ) {
         throw new Error("Paper buy is blocked because the game has started");
+      }
+
+      const eventLock = this.getPaperEventLock(candidate.eventId);
+      if (eventLock?.state === "LEGACY_CONFLICT") {
+        throw new Error("Event has unresolved legacy conflicting positions");
+      }
+      if (
+        eventLock?.state === "ACTIVE" &&
+        (eventLock.activeTokenId !== candidate.tokenId ||
+          eventLock.marketId !== candidate.marketId ||
+          eventLock.conditionId !== candidate.conditionId)
+      ) {
+        throw new Error("Event is locked to another token");
       }
 
       const closedCycle = this.database
@@ -2437,6 +2633,49 @@ export class PaperDatabase {
         candidate.makerBuyPriceMicros,
         candidate.orderSizeMicros,
       );
+      if (eventLock?.state === "ACTIVE") {
+        const activePosition = this.database
+          .prepare(
+            `SELECT quantity_micros, first_sell_at, cycle_closed_at,
+              cycle_spend_micros
+            FROM paper_positions WHERE token_id = ?`,
+          )
+          .get(candidate.tokenId) as
+          | {
+              quantity_micros: number;
+              first_sell_at: string | null;
+              cycle_closed_at: string | null;
+              cycle_spend_micros: number;
+            }
+          | undefined;
+        if (
+          activePosition === undefined ||
+          activePosition.quantity_micros <= 0 ||
+          activePosition.first_sell_at !== null ||
+          activePosition.cycle_closed_at !== null
+        ) {
+          throw new Error("Event is not in an accumulating cycle");
+        }
+        if (
+          activePosition.cycle_spend_micros + reservedCostMicros >
+          eventLock.cycleBudgetMicros
+        ) {
+          throw new Error("Event cycle budget would be exceeded");
+        }
+      } else {
+        const existingEventPosition = this.database
+          .prepare(
+            `SELECT pp.token_id
+            FROM paper_positions pp
+            JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+            WHERE pm.event_id = ? AND pp.quantity_micros > 0
+            LIMIT 1`,
+          )
+          .get(candidate.eventId);
+        if (existingEventPosition !== undefined) {
+          throw new Error("Event has an unlocked paper position");
+        }
+      }
       const exposureMicros =
         state.reservedCashMicros + state.positionCostMicros + reservedCostMicros;
       if (reservedCostMicros > state.availableCashMicros) {
@@ -2496,8 +2735,10 @@ export class PaperDatabase {
             market_opened_at, market_ends_at, side,
             price_micros, target_sell_price_micros, linked_buy_order_id,
             original_size_micros, filled_size_micros, queue_ahead_size_micros,
-            observed_trade_size_micros, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BUY', ?, ?, NULL, ?, 0, ?, 0, 'OPEN', ?, ?)`,
+            observed_trade_size_micros, status, execution_kind,
+            cash_limit_micros, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'BUY', ?, ?, NULL, ?, 0, ?, 0,
+            'OPEN', 'LEGACY_MAKER', ?, ?, ?)`,
         )
         .run(
           id,
@@ -2512,6 +2753,7 @@ export class PaperDatabase {
           candidate.fixedSellPriceMicros,
           candidate.orderSizeMicros,
           candidate.queueAheadSizeMicros,
+          reservedCostMicros,
           now,
           now,
         );
@@ -2700,8 +2942,10 @@ export class PaperDatabase {
           market_opened_at, market_ends_at, side,
           price_micros, target_sell_price_micros, linked_buy_order_id,
           original_size_micros, filled_size_micros, queue_ahead_size_micros,
-          observed_trade_size_micros, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, NULL, ?, ?, 0, ?, 0, 'OPEN', ?, ?)`,
+          observed_trade_size_micros, status, execution_kind,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', ?, NULL, ?, ?, 0, ?, 0,
+          'OPEN', 'LEGACY_MAKER', ?, ?)`,
       )
       .run(
         id,
@@ -2729,18 +2973,33 @@ export class PaperDatabase {
   private applyBuyFill(order: PaperOrder, sizeMicros: number, now: string): void {
     this.assertPaperAccountingMutationAllowed();
     const costMicros = calculateOrderCostMicros(order.priceMicros, sizeMicros);
+    this.ensurePaperEventLockForBuyFill(order, costMicros, now);
     this.database
       .prepare(
         `INSERT INTO paper_positions(
           token_id, condition_id, quantity_micros, cost_micros,
-          realized_pnl_micros, first_sell_at, cycle_closed_at, updated_at
-        ) VALUES (?, ?, ?, ?, 0, NULL, NULL, ?)
+          realized_pnl_micros, first_sell_at, cycle_closed_at,
+          cycle_spend_micros, gross_buy_size_micros,
+          gross_buy_notional_micros, updated_at
+        ) VALUES (?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?, ?)
         ON CONFLICT(token_id) DO UPDATE SET
           quantity_micros = quantity_micros + excluded.quantity_micros,
           cost_micros = cost_micros + excluded.cost_micros,
+          cycle_spend_micros = cycle_spend_micros + excluded.cycle_spend_micros,
+          gross_buy_size_micros = gross_buy_size_micros + excluded.gross_buy_size_micros,
+          gross_buy_notional_micros = gross_buy_notional_micros + excluded.gross_buy_notional_micros,
           updated_at = excluded.updated_at`,
       )
-      .run(order.tokenId, order.conditionId, sizeMicros, costMicros, now);
+      .run(
+        order.tokenId,
+        order.conditionId,
+        sizeMicros,
+        costMicros,
+        costMicros,
+        sizeMicros,
+        costMicros,
+        now,
+      );
     this.database
       .prepare(
         `UPDATE strategy_state
@@ -2748,6 +3007,117 @@ export class PaperDatabase {
         WHERE id = 1`,
       )
       .run(costMicros, now);
+  }
+
+  private ensurePaperEventLockForBuyFill(
+    order: PaperOrder,
+    incrementalCostMicros: number,
+    now: string,
+  ): void {
+    const metadata = this.database
+      .prepare(
+        `SELECT event_id, market_id FROM paper_market_metadata
+        WHERE token_id = ?`,
+      )
+      .get(order.tokenId) as
+      | { event_id: string; market_id: string }
+      | undefined;
+    if (
+      metadata === undefined ||
+      metadata.event_id !== order.eventId ||
+      metadata.market_id !== order.marketId
+    ) {
+      throw new Error("Paper buy Event identity does not match market metadata");
+    }
+
+    let eventLock = this.getPaperEventLock(order.eventId);
+    if (eventLock === null) {
+      const existingPosition = this.database
+        .prepare(
+          `SELECT pp.token_id
+          FROM paper_positions pp
+          JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+          WHERE pm.event_id = ? AND pp.quantity_micros > 0
+          LIMIT 1`,
+        )
+        .get(order.eventId);
+      if (existingPosition !== undefined) {
+        throw new Error("Event has a positive position without a lock");
+      }
+      const cycleBudgetMicros =
+        order.cashLimitMicros > 0
+          ? order.cashLimitMicros
+          : calculateOrderCostMicros(
+              order.priceMicros,
+              order.originalSizeMicros,
+            );
+      this.database
+        .prepare(
+          `INSERT INTO paper_event_locks(
+            event_id, active_token_id, market_id, condition_id,
+            cycle_budget_micros, state, locked_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+        )
+        .run(
+          order.eventId,
+          order.tokenId,
+          order.marketId,
+          order.conditionId,
+          cycleBudgetMicros,
+          now,
+          now,
+        );
+      this.writeAudit("TEST_EVENT_LOCK_CREATED", "event", order.eventId, {
+        activeTokenId: order.tokenId,
+        marketId: order.marketId,
+        conditionId: order.conditionId,
+        cycleBudgetMicros,
+        executionKind: order.executionKind,
+      });
+      eventLock = this.getPaperEventLock(order.eventId);
+    }
+
+    if (eventLock?.state === "LEGACY_CONFLICT") {
+      throw new Error("Event has unresolved legacy conflicting positions");
+    }
+    if (
+      eventLock === null ||
+      eventLock.activeTokenId !== order.tokenId ||
+      eventLock.marketId !== order.marketId ||
+      eventLock.conditionId !== order.conditionId
+    ) {
+      throw new Error("Event is locked to another token");
+    }
+    const position = this.database
+      .prepare(
+        `SELECT cycle_spend_micros, first_sell_at, cycle_closed_at
+        FROM paper_positions WHERE token_id = ?`,
+      )
+      .get(order.tokenId) as
+      | {
+          cycle_spend_micros: number;
+          first_sell_at: string | null;
+          cycle_closed_at: string | null;
+        }
+      | undefined;
+    if (position?.first_sell_at !== null && position?.first_sell_at !== undefined) {
+      throw new Error("Event cannot buy again after its first sell");
+    }
+    if (position?.cycle_closed_at !== null && position?.cycle_closed_at !== undefined) {
+      throw new Error("Event cycle is already closed");
+    }
+    if (
+      (position?.cycle_spend_micros ?? 0) + incrementalCostMicros >
+      eventLock.cycleBudgetMicros
+    ) {
+      throw new Error("Event cycle budget would be exceeded");
+    }
+    this.cancelActiveBuysForEventExceptToken(
+      order.eventId,
+      order.tokenId,
+      now,
+      "EVENT_WINNER_LOCKED",
+    );
   }
 
   private applySellFill(order: PaperOrder, sizeMicros: number, now: string): void {
@@ -2804,6 +3174,7 @@ export class PaperDatabase {
       )
       .run(proceedsMicros, realizedPnlMicros, now);
     this.cancelActiveBuysForToken(order.tokenId, now, "FIRST_SELL");
+    this.releasePaperEventLockIfClosedForToken(order.tokenId, now);
   }
 
   private upsertTestMarketMetadata(
@@ -2864,6 +3235,209 @@ export class PaperDatabase {
         candidate.tickSizeMicros,
         now,
       );
+  }
+
+  private planTestFakBuy(
+    input: ImmediateBuyIntent,
+    requireRunning: boolean,
+  ): TestFakBuyPlanningResult {
+    const { candidate, book } = input;
+    const state = this.getStrategyState();
+    const eventLock = this.getPaperEventLock(candidate.eventId);
+    const position = this.database
+      .prepare(
+        `SELECT quantity_micros, cost_micros, first_sell_at,
+          cycle_closed_at, cycle_spend_micros, updated_at
+        FROM paper_positions WHERE token_id = ?`,
+      )
+      .get(candidate.tokenId) as
+      | {
+          quantity_micros: number;
+          cost_micros: number;
+          first_sell_at: string | null;
+          cycle_closed_at: string | null;
+          cycle_spend_micros: number;
+          updated_at: string;
+        }
+      | undefined;
+    const eventStateVersion = JSON.stringify({
+      strategyUpdatedAt: state.updatedAt,
+      availableCashMicros: state.availableCashMicros,
+      eventLock,
+      position: position ?? null,
+    });
+    const result = (
+      outcome: TestFakBuyPreviewResult["outcome"],
+      preview: FakBuyPreview | null = null,
+      options: {
+        availableBids?: BookLevel[];
+        availableAsks?: BookLevel[];
+        startingNewCycle?: boolean;
+        maxSpendMicros?: number;
+      } = {},
+    ): TestFakBuyPlanningResult => ({
+      outcome,
+      preview,
+      eventLock,
+      eventStateVersion,
+      availableBids: options.availableBids ?? [],
+      availableAsks: options.availableAsks ?? [],
+      startingNewCycle: options.startingNewCycle ?? false,
+      maxSpendMicros: options.maxSpendMicros ?? 0,
+    });
+
+    if (
+      (requireRunning && state.status !== "RUNNING") ||
+      candidate.tokenId !== book.tokenId ||
+      candidate.conditionId !== book.conditionId ||
+      candidate.isNegativeRisk !== book.isNegativeRisk ||
+      book.bookVersion.trim().length === 0
+    ) {
+      return result("BLOCKED");
+    }
+    if (
+      this.database
+        .prepare(
+          "SELECT 1 FROM paper_settlements WHERE condition_id = ? AND status = 'SETTLED'",
+        )
+        .get(candidate.conditionId) !== undefined
+    ) {
+      return result("BLOCKED");
+    }
+    if (
+      this.listActivePaperOrders(candidate.tokenId).some(
+        (order) => order.side === "BUY",
+      )
+    ) {
+      return result("BLOCKED");
+    }
+
+    let startingNewCycle = false;
+    let cycleBudgetMicros = input.orderBudgetMicros;
+    let cycleSpendMicros = 0;
+    if (eventLock?.state === "LEGACY_CONFLICT") {
+      return result("BLOCKED");
+    }
+    if (eventLock?.state === "ACTIVE") {
+      if (
+        eventLock.activeTokenId !== candidate.tokenId ||
+        eventLock.marketId !== candidate.marketId ||
+        eventLock.conditionId !== candidate.conditionId ||
+        position === undefined ||
+        position.quantity_micros <= 0 ||
+        position.cost_micros <= 0 ||
+        position.first_sell_at !== null ||
+        position.cycle_closed_at !== null
+      ) {
+        return result("BLOCKED");
+      }
+      cycleBudgetMicros = eventLock.cycleBudgetMicros;
+      cycleSpendMicros = position.cycle_spend_micros;
+    } else {
+      const existingEventPosition = this.database
+        .prepare(
+          `SELECT pp.token_id
+          FROM paper_positions pp
+          JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+          WHERE pm.event_id = ? AND pp.quantity_micros > 0
+          LIMIT 1`,
+        )
+        .get(candidate.eventId);
+      if (existingEventPosition !== undefined) {
+        return result("BLOCKED");
+      }
+      if (position !== undefined) {
+        if (position.quantity_micros !== 0 || position.cost_micros !== 0) {
+          return result("BLOCKED");
+        }
+        if (position.first_sell_at !== null || position.cycle_closed_at !== null) {
+          if (position.cycle_closed_at === null) {
+            return result("BLOCKED");
+          }
+          startingNewCycle = true;
+        } else if (position.cycle_spend_micros !== 0) {
+          return result("BLOCKED");
+        }
+      }
+      if (state.availableCashMicros < input.orderBudgetMicros) {
+        return result("BLOCKED");
+      }
+    }
+
+    const remainingCycleBudgetMicros = Math.max(
+      0,
+      cycleBudgetMicros - cycleSpendMicros,
+    );
+    const maxSpendMicros = Math.min(
+      remainingCycleBudgetMicros,
+      state.availableCashMicros,
+    );
+    if (maxSpendMicros <= 0) {
+      return result("NO_FILL", null, { startingNewCycle, maxSpendMicros });
+    }
+    const availableBids = this.availableTestBookLevels(
+      candidate.tokenId,
+      book.bookVersion,
+      "BID",
+      book.bids,
+    );
+    const availableAsks = this.availableTestBookLevels(
+      candidate.tokenId,
+      book.bookVersion,
+      "ASK",
+      book.asks,
+    );
+    const currentBestBid = bestBidLevel(availableBids)?.priceMicros ?? null;
+    const currentBestAsk = bestAskLevel(availableAsks)?.priceMicros ?? null;
+    if (
+      !isMarketEligible(
+        {
+          ...candidate,
+          bookReady: true,
+          bestBidMicros: currentBestBid,
+          bestAskMicros: currentBestAsk,
+          minOrderSizeMicros: book.minOrderSizeMicros,
+          tickSizeMicros: book.tickSizeMicros,
+        },
+        {
+          ...input.eligibility,
+          orderBudgetMicros: maxSpendMicros,
+        },
+        new Date(),
+      )
+    ) {
+      return result("BLOCKED", null, {
+        availableBids,
+        availableAsks,
+        startingNewCycle,
+        maxSpendMicros,
+      });
+    }
+    const preview = previewFakBuy({
+      asks: availableAsks,
+      bids: availableBids,
+      maxPriceMicros: input.maxPriceMicros,
+      maxSpendMicros,
+      cycleBudgetMicros,
+      minOrderSizeMicros: book.minOrderSizeMicros,
+      tickSizeMicros: book.tickSizeMicros,
+      feeRateMicros: input.feeRateMicros,
+      feeExponent: input.feeExponent,
+    });
+    if (preview === null) {
+      return result("NO_FILL", null, {
+        availableBids,
+        availableAsks,
+        startingNewCycle,
+        maxSpendMicros,
+      });
+    }
+    return result("READY", preview, {
+      availableBids,
+      availableAsks,
+      startingNewCycle,
+      maxSpendMicros,
+    });
   }
 
   private availableTestBookLevels(
@@ -3005,6 +3579,81 @@ export class PaperDatabase {
     return orders.length;
   }
 
+  private cancelActiveBuysForEventExceptToken(
+    eventId: string,
+    activeTokenId: string,
+    now: string,
+    reason: string,
+  ): number {
+    if (this.paperValidationBlocked) {
+      return 0;
+    }
+    const orders = this.listActivePaperOrders().filter(
+      (order) =>
+        order.side === "BUY" &&
+        order.eventId === eventId &&
+        order.tokenId !== activeTokenId,
+    );
+    for (const order of orders) {
+      this.cancelPaperBuy(order, now, reason);
+    }
+    return orders.length;
+  }
+
+  private releasePaperEventLockIfClosedForToken(
+    tokenId: string,
+    now: string,
+  ): boolean {
+    const row = this.database
+      .prepare(
+        `SELECT pel.event_id
+        FROM paper_event_locks pel
+        LEFT JOIN paper_market_metadata pm ON pm.event_id = pel.event_id
+        WHERE pel.active_token_id = ? OR pm.token_id = ?
+        ORDER BY pel.event_id
+        LIMIT 1`,
+      )
+      .get(tokenId, tokenId) as { event_id: string } | undefined;
+    return row === undefined
+      ? false
+      : this.releasePaperEventLockIfClosed(row.event_id, now);
+  }
+
+  private releasePaperEventLockIfClosed(eventId: string, now: string): boolean {
+    const eventLock = this.getPaperEventLockRow(eventId);
+    if (eventLock === undefined) {
+      return false;
+    }
+    const position = this.database
+      .prepare(
+        `SELECT 1
+        FROM paper_positions pp
+        JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
+        WHERE pm.event_id = ? AND pp.quantity_micros > 0
+        LIMIT 1`,
+      )
+      .get(eventId);
+    const target = this.database
+      .prepare(
+        `SELECT 1 FROM paper_orders
+        WHERE event_id = ? AND side = 'SELL'
+          AND status IN ('OPEN', 'PARTIALLY_FILLED')
+        LIMIT 1`,
+      )
+      .get(eventId);
+    if (position !== undefined || target !== undefined) {
+      return false;
+    }
+    this.database.prepare("DELETE FROM paper_event_locks WHERE event_id = ?").run(
+      eventId,
+    );
+    this.writeAudit("TEST_EVENT_LOCK_RELEASED", "event", eventId, {
+      previousState: eventLock.state,
+      releasedAt: now,
+    });
+    return true;
+  }
+
   private cancelClosedCycleBuys(now: string, reason: string): number {
     const closedTokens = this.database
       .prepare(
@@ -3059,6 +3708,7 @@ export class PaperDatabase {
     | {
         binary_enabled: number;
         ternary_enabled: number;
+        multi_enabled: number;
         max_buy_price_micros: number;
         min_market_duration_days: number;
         max_market_duration_days: number;
@@ -3074,7 +3724,8 @@ export class PaperDatabase {
     | undefined {
     return this.database
       .prepare(
-        `SELECT binary_enabled, ternary_enabled, max_buy_price_micros,
+        `SELECT binary_enabled, ternary_enabled, multi_enabled,
+          max_buy_price_micros,
           min_market_duration_days, max_market_duration_days,
           max_market_progress_percent,
           min_bid_ask_ratio_percent,
@@ -3087,6 +3738,7 @@ export class PaperDatabase {
       | {
           binary_enabled: number;
           ternary_enabled: number;
+          multi_enabled: number;
           max_buy_price_micros: number;
           min_market_duration_days: number;
           max_market_duration_days: number;
@@ -3100,6 +3752,16 @@ export class PaperDatabase {
           updated_at: string;
         }
       | undefined;
+  }
+
+  private getPaperEventLockRow(eventId: string): PaperEventLockRow | undefined {
+    return this.database
+      .prepare(
+        `SELECT event_id, active_token_id, market_id, condition_id,
+          cycle_budget_micros, state, locked_at, updated_at
+        FROM paper_event_locks WHERE event_id = ?`,
+      )
+      .get(eventId) as PaperEventLockRow | undefined;
   }
 
   private getPaperSettlementRow(

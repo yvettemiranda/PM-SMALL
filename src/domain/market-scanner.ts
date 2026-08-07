@@ -26,6 +26,7 @@ import type {
   TokenOrderBook,
   TradeCandidate,
 } from "./types.js";
+import type { MarketType } from "./market-type.js";
 
 export type MarketScanDiagnostics = {
   phase: "EVENTS" | "ORDER_BOOKS" | "COMPLETE" | "FAILED";
@@ -35,7 +36,12 @@ export type MarketScanDiagnostics = {
   eventPageCount: number;
   eventPageRequestCount: number;
   eventCount: number;
+  eligibleEventCount: number;
+  staticEligibleEventCount: number;
+  candidateEventCount: number;
   eligibleTokenCount: number;
+  participatingTokenCount: number;
+  maxObservedResultCount: number;
   staticEligibleTokenCount: number;
   orderBookTargetTokenCount: number;
   orderBookBatchCount: number;
@@ -51,7 +57,7 @@ export type MarketScanDiagnostics = {
 };
 
 export type MarketScanPreferences = {
-  resultCounts: readonly (2 | 3)[];
+  marketTypes: readonly MarketType[];
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
   minBidAskRatioPercent: number;
@@ -134,7 +140,7 @@ export class MarketScanner implements CandidateScanner {
     signal?: AbortSignal,
   ): Promise<TradeCandidate[]> {
     const scanPreferences = this.preferences?.getMarketScanPreferences() ?? {
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       minBuyPriceMicros: this.config.minBuyPriceMicros,
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
       minBidAskRatioPercent: this.config.minBidAskRatioPercent,
@@ -153,7 +159,7 @@ export class MarketScanner implements CandidateScanner {
       maxMarketDurationDays: 365,
     };
     const eligibilitySettings = {
-      resultCounts: scanPreferences.resultCounts,
+      marketTypes: scanPreferences.marketTypes,
       allCategories: scanPreferences.allCategories,
       selectedCategoryIds: scanPreferences.selectedCategories,
       minBuyPriceMicros: scanPreferences.minBuyPriceMicros,
@@ -181,7 +187,12 @@ export class MarketScanner implements CandidateScanner {
       eventPageCount: 0,
       eventPageRequestCount: 0,
       eventCount: 0,
+      eligibleEventCount: 0,
+      staticEligibleEventCount: 0,
+      candidateEventCount: 0,
       eligibleTokenCount: 0,
+      participatingTokenCount: 0,
+      maxObservedResultCount: 0,
       staticEligibleTokenCount: 0,
       orderBookTargetTokenCount: 0,
       orderBookBatchCount: 0,
@@ -244,7 +255,9 @@ export class MarketScanner implements CandidateScanner {
       const staticTokens: MarketToken[] = [];
       const eventCategoryById = new Map<string, MarketCategory>();
       let eventCount = 0;
+      let eligibleEventCount = 0;
       let eligibleTokenCount = 0;
+      let maxObservedResultCount = 0;
       const processEventPage = (events: readonly Event[]): void => {
         eventCount += events.length;
         for (const event of events) {
@@ -252,6 +265,11 @@ export class MarketScanner implements CandidateScanner {
           if (eligibleEvent === null) {
             continue;
           }
+          eligibleEventCount += 1;
+          maxObservedResultCount = Math.max(
+            maxObservedResultCount,
+            eligibleEvent.resultCount,
+          );
           const eventTokens = extractEligibleTokens(
             event,
             eligibleEvent,
@@ -278,6 +296,11 @@ export class MarketScanner implements CandidateScanner {
             }
           }
         }
+        this.updateDiagnostics({
+          eligibleEventCount,
+          eligibleTokenCount,
+          maxObservedResultCount,
+        });
       };
       const scanRequest = { pageSize: this.config.scanEventPageSize };
       if (this.marketData.streamOpenEventPages !== undefined) {
@@ -339,7 +362,13 @@ export class MarketScanner implements CandidateScanner {
       this.updateDiagnostics({
         phase: "ORDER_BOOKS",
         eventCount,
+        eligibleEventCount,
+        staticEligibleEventCount: new Set(
+          tokens.map((token) => token.eventId),
+        ).size,
         eligibleTokenCount,
+        participatingTokenCount: tokens.length,
+        maxObservedResultCount,
         staticEligibleTokenCount: tokens.length,
         orderBookTargetTokenCount: tokens.length,
         availableCategories,
@@ -382,6 +411,7 @@ export class MarketScanner implements CandidateScanner {
 
       const monitoredCandidates: TradeCandidate[] = [];
       let candidateCount = 0;
+      const candidateEventIds = new Set<string>();
       for (const token of tokens) {
         const fetchedBook = bookByToken.get(token.tokenId);
         const book =
@@ -403,6 +433,7 @@ export class MarketScanner implements CandidateScanner {
         );
         if (rejectionReason === null) {
           candidateCount += 1;
+          candidateEventIds.add(monitored.eventId);
         } else {
           rejectionCounts[rejectionReason] += 1;
         }
@@ -413,7 +444,14 @@ export class MarketScanner implements CandidateScanner {
       );
       this.finishDiagnostics("COMPLETE", {
         eventCount,
+        eligibleEventCount,
+        staticEligibleEventCount: new Set(
+          tokens.map((token) => token.eventId),
+        ).size,
+        candidateEventCount: candidateEventIds.size,
         eligibleTokenCount,
+        participatingTokenCount: tokens.length,
+        maxObservedResultCount,
         staticEligibleTokenCount: tokens.length,
         orderBookTargetTokenCount: tokens.length,
         orderBookCount: books.length,

@@ -14,15 +14,18 @@ function parseTimestamp(value: string | null | undefined): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-export function normalizeEventResultCount(event: Event): 2 | 3 | null {
+export function normalizeEventResultCount(event: Event): number | null {
+  if (event.trading.negRiskAugmented === true) {
+    return null;
+  }
   if (event.markets.length === 1) {
     return 2;
   }
 
   if (
     event.trading.negRisk === true &&
-    event.trading.negRiskAugmented !== true &&
-    (event.markets.length === 2 || event.markets.length === 3)
+    Number.isSafeInteger(event.markets.length) &&
+    event.markets.length >= 2
   ) {
     return event.markets.length;
   }

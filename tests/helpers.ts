@@ -28,7 +28,7 @@ export function testEligibilitySettings(
   overrides: Partial<MarketEligibilitySettings> = {},
 ): MarketEligibilitySettings {
   return {
-    resultCounts: [2, 3],
+    marketTypes: ["BINARY", "TERNARY"],
     allCategories: true,
     selectedCategoryIds: [],
     minBuyPriceMicros: 10_000,

@@ -13,24 +13,33 @@ describe("event filtering", () => {
     expect(normalizeEventResultCount(makeEvent())).toBe(2);
   });
 
-  it("accepts a non-augmented three-result negative-risk event", () => {
-    const event = makeEvent({
-      trading: { negRisk: true, negRiskAugmented: false },
-      markets: [
-        makeMarket({ id: "m1" }),
-        makeMarket({ id: "m2" }),
-        makeMarket({ id: "m3" }),
-      ],
-    });
-    expect(normalizeEventResultCount(event)).toBe(3);
-  });
+  it.each([2, 3, 4, 10, 128])(
+    "accepts a non-augmented %i-result negative-risk event",
+    (resultCount) => {
+      const event = makeEvent({
+        trading: { negRisk: true, negRiskAugmented: false },
+        markets: Array.from({ length: resultCount }, (_, index) =>
+          makeMarket({ id: `m${index}` }),
+        ),
+      });
+      expect(normalizeEventResultCount(event)).toBe(resultCount);
+    },
+  );
 
-  it("rejects augmented and larger events", () => {
+  it("rejects augmented events even when their result count is otherwise supported", () => {
     const augmented = makeEvent({
       trading: { negRisk: true, negRiskAugmented: true },
       markets: [makeMarket({ id: "m1" }), makeMarket({ id: "m2" })],
     });
     expect(normalizeEventResultCount(augmented)).toBeNull();
+    expect(
+      normalizeEventResultCount(
+        makeEvent({
+          trading: { negRisk: false, negRiskAugmented: true },
+          markets: [makeMarket({ id: "single-augmented" })],
+        }),
+      ),
+    ).toBeNull();
   });
 
   it("requires explicit open-state booleans on an event", () => {

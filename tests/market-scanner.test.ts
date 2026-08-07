@@ -1,6 +1,9 @@
 import type { OrderBook } from "@polymarket/client";
 import { describe, expect, it } from "vitest";
-import { MarketScanner } from "../src/domain/market-scanner.js";
+import {
+  MarketScanner,
+  type MarketScanPreferences,
+} from "../src/domain/market-scanner.js";
 import type { MarketDataSource } from "../src/infrastructure/polymarket/market-data.js";
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
@@ -115,7 +118,7 @@ describe("MarketScanner", () => {
     };
     const scanner = new MarketScanner(source, testConfig, {
       getMarketScanPreferences: () => ({
-        resultCounts: [2],
+        marketTypes: ["BINARY"],
         minBuyPriceMicros: 10_000,
         maxBuyPriceMicros: 30_000,
         minBidAskRatioPercent: 50,
@@ -174,8 +177,8 @@ describe("MarketScanner", () => {
             }) as unknown as OrderBook,
         ),
     };
-    let filters = {
-      resultCounts: [2] as Array<2 | 3>,
+    let filters: MarketScanPreferences = {
+      marketTypes: ["BINARY"],
       maxBuyPriceMicros: 30_000,
       minBuyPriceMicros: 10_000,
       minBidAskRatioPercent: 50,
@@ -195,7 +198,7 @@ describe("MarketScanner", () => {
     expect(await scanner.scan(now)).toHaveLength(0);
     filters = { ...filters, maxMarketDurationDays: 14 };
     expect(await scanner.scan(now)).toHaveLength(2);
-    filters = { ...filters, resultCounts: [3] };
+    filters = { ...filters, marketTypes: ["TERNARY"] };
     expect(await scanner.scan(now)).toHaveLength(0);
 
     expect(requestedWindows).toEqual([{ pageSize: 50 }, { pageSize: 50 }, { pageSize: 50 }]);
@@ -242,7 +245,7 @@ describe("MarketScanner", () => {
     };
     const scanner = new MarketScanner(source, testConfig, {
       getMarketScanPreferences: () => ({
-        resultCounts: [2],
+        marketTypes: ["BINARY"],
         minBuyPriceMicros: 10_000,
         maxBuyPriceMicros: 30_000,
         minBidAskRatioPercent: 50,
@@ -330,7 +333,7 @@ describe("MarketScanner", () => {
     };
     const scanner = new MarketScanner(source, testConfig, {
       getMarketScanPreferences: () => ({
-        resultCounts: [2],
+        marketTypes: ["BINARY"],
         minBuyPriceMicros: 10_000,
         maxBuyPriceMicros: 30_000,
         minBidAskRatioPercent: 50,

@@ -22,7 +22,7 @@ describe("PaperTradingPreferencesService", () => {
     const preferences = new PaperTradingPreferencesService(database, testConfig);
 
     expect(preferences.getSnapshot()).toMatchObject({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
@@ -32,7 +32,7 @@ describe("PaperTradingPreferencesService", () => {
     });
 
     preferences.updateMarketFilters({
-      resultCounts: [3],
+      marketTypes: ["TERNARY", "MULTI"],
       maxBuyPriceMicros: 30_000,
       minMarketDurationDays: 7,
       maxMarketDurationDays: 45,
@@ -41,7 +41,7 @@ describe("PaperTradingPreferencesService", () => {
     });
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
-      resultCounts: [3],
+      marketTypes: ["TERNARY", "MULTI"],
       maxBuyPriceMicros: 30_000,
       minMarketDurationDays: 7,
       maxMarketDurationDays: 45,
@@ -75,7 +75,7 @@ describe("PaperTradingPreferencesService", () => {
     const preferences = new PaperTradingPreferencesService(database, testConfig);
 
     preferences.updateMarketFilters({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
       allCategories: false,
@@ -124,7 +124,7 @@ describe("PaperTradingPreferencesService", () => {
 
     expect(preferences.isCandidateEnabled(progressedCandidate)).toBe(false);
     preferences.updateMarketFilters({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 40,
@@ -152,7 +152,7 @@ describe("PaperTradingPreferencesService", () => {
 
     expect(preferences.isCandidateEnabled(binary)).toBe(true);
     preferences.updateMarketFilters({
-      resultCounts: [3],
+      marketTypes: ["TERNARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 60,
     });
@@ -182,7 +182,7 @@ describe("PaperTradingPreferencesService", () => {
     );
 
     const update = preferences.updateMarketFilters({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 20_000,
       maxMarketDurationDays: 30,
     });
@@ -244,7 +244,7 @@ describe("PaperTradingPreferencesService", () => {
     );
 
     const update = preferences.updateMarketFilters({
-      resultCounts: [2],
+      marketTypes: ["BINARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
     });
@@ -282,13 +282,13 @@ describe("PaperTradingPreferencesService", () => {
 
     expect(() =>
       preferences.updateMarketFilters({
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         maxBuyPriceMicros: 20_000,
         maxMarketDurationDays: 30,
       }),
     ).toThrow(/blocked by failed validation/);
     expect(preferences.getSnapshot()).toMatchObject({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
     });
@@ -312,7 +312,7 @@ describe("PaperTradingPreferencesService", () => {
     });
     expect(() =>
       preferences.updateMarketFilters({
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         maxBuyPriceMicros: 30_000,
         minMarketDurationDays: 46,
         maxMarketDurationDays: 45,

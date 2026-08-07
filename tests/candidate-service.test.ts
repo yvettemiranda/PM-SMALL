@@ -199,4 +199,40 @@ describe("CandidateService", () => {
 
     expect(tokenIdReads).toBeLessThanOrEqual(10);
   });
+
+  it("indexes sibling candidates by Event and maps Token updates back to one Event", async () => {
+    const first = makeCandidate({
+      candidateId: "event-a-first:20000",
+      tokenId: "event-a-first",
+      eventId: "event-a",
+    });
+    const sibling = makeCandidate({
+      candidateId: "event-a-second:20000",
+      tokenId: "event-a-second",
+      eventId: "event-a",
+      conditionId: "event-a-second-condition",
+      marketId: "event-a-second-market",
+    });
+    const other = makeCandidate({
+      candidateId: "event-b-first:20000",
+      tokenId: "event-b-first",
+      eventId: "event-b",
+      conditionId: "event-b-condition",
+      marketId: "event-b-market",
+    });
+    const service = new CandidateService(
+      { scan: async () => [first, sibling, other] },
+      15_000,
+    );
+    await service.refresh();
+
+    expect(service.getEventIds()).toEqual(["event-a", "event-b"]);
+    expect(service.getEventIdByTokenId(sibling.tokenId)).toBe("event-a");
+    expect(
+      service.getCandidatesByEventId("event-a").map((candidate) => candidate.tokenId),
+    ).toEqual([first.tokenId, sibling.tokenId]);
+    expect(
+      service.getCandidatesByEventIds(["event-b"]).map((candidate) => candidate.tokenId),
+    ).toEqual([other.tokenId]);
+  });
 });

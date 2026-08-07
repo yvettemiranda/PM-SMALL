@@ -1,93 +1,74 @@
 # 项目交接记录
 
-更新时间：2026-08-07
+更新时间：2026-08-08
 
 ## 当前结论
 
-PM-SMALL 已完成最终 TEST UI、扫描稳定性、大集合性能优化和长期 TEST 前正确性加固的实现、自动验证、真实多轮扫描、手机浏览器检查、GitHub 推送与 Linux 部署。当前运行时代码提交为 `ff8b5bc9010261a349f27d7640c17789896f38d0`；服务器为 Schema 14 并保持 `TEST + LIVE_DISABLED + PAUSED`。所有环境继续禁止接钱包、签名、真实订单和链上写操作。
+PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“任意标准多元、Event 仲裁与 Event 周期锁”的 Schema 15 架构升级。标准 Event 统一支持安全整数 `resultCount >= 2`；增强型负风险 Event 继续排除。交易、订单、Fill、Position 和 Condition 结算仍以 Token/Market 为底层单位，候选择优、单轮资金上限和同 Event 互斥提升到 Event 级。
 
-本轮正式把生命周期进度恢复为硬筛选条件，默认 `<=20%`；同时统一了最低 1¢、最高 1–3¢、有效 Best Bid、Bid/Ask 比例、订单簿完整性、最小下单量、市场时长、官方类别和体育开赛等全部资格规则。部署时发现并修复了旧多档 FAK 买单的成交份额不变量，Schema 13 已无损归一旧记录。短时冒烟已经完成，当前已按用户要求停在正式长期验证前。
+本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、276 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动 TEST、接钱包、签名、提交真实订单或执行链上操作。
 
-2026-08-07 在已核对的 `origin/main` `b9143b921fec3e366034faa29be04d84529093c1` 上完成并交付 UI 与扫描优化：Polymarket 首页栏目动态同步并默认全选，总时长改为自由上下限，资金摘要/排序/持仓折叠按浏览器注释精简；开放事件改为流式处理，静态条件先筛选，再有界并发拉盘口；普通重扫改为同连接增量订阅，断线候选保留上次报价但禁止交易。相关提交已推送并部署，短时冒烟保持 `TEST + LIVE_DISABLED + PAUSED`。
+当前正在同步 GitHub `main` 和 Linux 服务器。同步完成前，固定本地/远端基线仍为 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`；服务器仍为旧运行时代码 `ff8b5bc9010261a349f27d7640c17789896f38d0`、Schema 14，并应保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；本地未推送内容或服务器临时状态不算正式进度。
 
-2026-08-07 又基于已核对的 `origin/main` `8a9d1f943b67d9a9ef956aa905b9a057acebb5a6` 完成长期 TEST 前的正确性加固：增量订阅 Token 断线后必须等新完整盘口，公开价格、费用和开放状态失败关闭，失效首页栏目不再执行，REST 盘口核对 Condition ID，结算只接受 1/0 或 50/50，周期验证交叉核对 fills、订单、费用和持仓，soak 对无法解析的 HTTP 200 响应立即失败。最终 Standards / Spec 双轴复审均为 0 findings，运行时代码提交 `ff8b5bc9010261a349f27d7640c17789896f38d0` 已推送 GitHub 并部署服务器；后续交接文档提交不改变该运行产物。
+## 当前扫描与执行规则
 
-GitHub `main` 是唯一交付进度依据。任何本地未推送内容或服务器临时状态都不算正式进度。
+1. 扫描器流式遍历全部开放 Event 分页，不使用事件日期窗口、隐藏 Event/Market/Token 数量上限，也不在新一轮开始时清空上一轮结果。
+2. Event 必须明确开放、未关闭、未归档；每个具体 Market 必须开放、可下单、启用订单簿、有 Condition ID、费用状态明确，且具体市场时间、体育开赛时间和官方栏目符合设置。
+3. 单 Market Event 视为二元；标准 Negative Risk Multi-Market Event 以原始 `event.markets.length` 作为整体结果数。配置分为 `BINARY`、`TERNARY`、`MULTI`（4+）；升级和重置默认只启用二元/三元，多元由用户主动开启。
+4. 对所有通过静态资格的具体 Market 生成 YES/NO Token，并保留高于当前买价或暂时无有效价但仍需监控的 Token。Token 始终携带 Event、Market、Condition、direction 和整体 resultCount 身份。
+5. 盘口拉取后，每个 Token 先过现有硬资格：新鲜完整 Book、身份一致、Ask 1–3¢、有效 Bid、Bid/Ask 比例、时长、生命周期进度、官方栏目、最小下单量、tick 和体育开赛边界。
+6. 未锁 Event 只有全部静态合格兄弟 Token 的盘口状态都明确、新鲜、完整时才开始比较。完整 Book 但没有有效 Bid/Ask 只淘汰该 Token；未取得完整 Book、重连或未知状态会阻断整个 Event 本轮开仓。
+7. 每个合格 Token 使用与真实成交完全相同的 FAK 规划核心做无副作用 Preview，带入已持久化盘口消费、现金、冻结预算、费用、min size、tick、逐 Fill 目标与目标 Bid 深度。
+8. Event 仲裁依次比较：最难退出 Fill 的 `BestBid/TerminalTarget`、目标价 Bid 深度覆盖率、预计成交资金比例、`BestBid/BestAsk`、费后目标净收益率、生命周期顺序、稳定身份字段。`NO_FILL` 或 spent=0 不得成为 Winner。
+9. 执行前使用最新配置、兄弟盘口 revision、数据库锁、现金、仓位和盘口消费重新评估。变化后采用最新结果，不执行陈旧 Winner。
+10. 实际买入按 Best Ask 执行 FAK，可跨档部分成交；0 Fill 不创建锁。第一次实际 Fill、Event 锁、订单、fills、仓位、targets、资金和盘口消费在同一 SQLite 事务提交。
+11. 同一 Event 每轮最多一个 active Token。锁定后只允许该 Token 在冻结的 Event 轮次预算内继续累计；兄弟 Token 禁买，兄弟普通报价变化不再触发无意义仲裁。
+12. 每笔 Fill 的目标价为 `max(买价+1¢, 买价×1.5)`并按 tick 向上取整；Best Bid 达标后以 FAK 从高到低退出。首次实际 Sell 后整个 Event 禁止继续买入。
+13. 最后一部分仓位退出且没有活动 SELL 时，在同一事务释放 Event 锁；若 Event 仍开放，下一轮重新完整仲裁，Winner 可以变成另一个兄弟 Token。
+14. 具体 Condition 正式结算仍使用原二元 payout 模型。结算清仓与 Event 解锁同事务；只结束该 Condition，不永久关闭仍有合法开放兄弟 Market 的整个 Event。
 
-## 当前业务逻辑
-
-1. 程序启动后流式扫描 Polymarket 全部开放事件分页，不使用事件日期窗口或隐藏数量上限，也不在内存保留完整嵌套事件图。每轮完成后等待 15 秒再开始下一轮，多轮不重叠；失败或下一轮进行中都保留上一轮市场和 WebSocket 监控。
-2. 结构市场必须满足：事件明确 `active=true`、`closed=false`、`archived=false`；具体市场明确 active、未关闭/归档、允许下单、启用订单簿且有有效 Condition ID；已经开始且尚未结束。开放状态或费用启用状态缺失时失败关闭。
-3. 总生命周期按具体市场自身时间计算，缺失才回退事件时间；最短、最长值均可在 1–365 天内按完整天数自由设置，且最短不得超过最长，默认 1–30 天。
-4. 当前资格还必须同时满足：勾选的二元/三元、官方类别、完整订单簿、Best Ask 在 `1¢` 至用户上限、有效 Best Bid、`Best Bid / Best Ask` 达到配置比例（默认 50%）、生命周期进度不超过配置（默认 20%）、每轮金额满足平台最小下单量、tick 有效、体育比赛尚未开始。
-5. 先按结果数、官方栏目、自由时长区间、生命周期进度和体育开赛等不依赖盘口的条件预筛；全部静态合格 Token 都进入监控集合，包括当前价格过高或暂时无盘口者。盘口按每批 50、默认 4 路有界并发获取，不设置本地数量上限。页面“扫描市场”和新买入只使用当前满足全部资格的子集。
-6. 普通重扫差异通过同一 WebSocket 增量订阅/退订并按 500 Token 分片，不重建整条连接。真实断线保留最后有效报价用于展示，但候选标为重连/未就绪且禁止新买；大集合报价按 Token 索引更新，完整快照用待 Book Token 集合判断，单 Token 行情只定向触发该 Token 的自动资格评估。
-7. 类别只显示 Polymarket 首页顶栏当前栏目并保存官方 Tag ID；程序按公开栏目接口动态同步，默认全选且自动纳入新栏目，一个市场可以属于多个 Tag。没有官方标签的市场在“全选”模式下仍可参与，但不会生成伪造的 `OTHER` 类别。
-8. TEST 买入按实时订单簿执行限价 FAK：从最低 Ask 逐档成交，只吃用户上限内的深度；允许部分成交，未成交余量立即取消，只扣实际金额。
-9. 每个 Token 每轮累计投入上限由用户设置，默认 1U。新 Token 或新周期只有可用现金至少等于完整配置金额时才开启；已有部分周期可以在新盘口出现后用可用现金补到剩余额度。
-10. 每笔买入填充独立创建目标：`max(买价 + 1¢, 买价 × 1.5)`，再按 tick 向上取整。创建后立即复查同一盘口；Best Bid 达标即按 FAK 从高到低卖出，允许部分成交，余量继续等待原目标。
-11. 已消费的 Ask/Bid 深度按单侧完整盘口状态的稳定版本持久化到 SQLite。重复增量、等价完整快照、断线重连和进程重启不得重复使用同一深度；实际盘口状态变化后才形成新版本。
-12. 首次发生卖出后，该 Token 本轮停止继续买入。全部卖完后周期关闭；若市场仍满足资格且未正式结算，资金条件满足时自动进入下一轮，不提供手动新一轮入口。
-13. 正式关闭且官方状态为 `resolved` 或 `settled` 后自动执行 TEST 结算和模拟赎回；分类器和数据库写账边界都只接受明确的二元 1/0 或官方 0.5/0.5 结果。
-14. 动态费用计入买入份额、卖出到账和盈亏。持仓用当前可执行 Best Bid 扣预计费用估值；完整盘口没有 Bid 时可兑现价值为 0，但持仓仍继续显示和管理。
-15. 暂停只阻止新买；已有目标卖出、减仓与正式结算继续运行。周期账本验证会交叉核对 fill 行、订单成交量/费用、当前仓位、活动目标和资金守恒；失败时保留现场并暂停增仓。
-
-## 配置与 UI
-
-- 手机优先、桌面与手机共用紧凑单列页面，至少支持 320px；默认仅展示配置入口、资金摘要、当前持仓和扫描市场。
-- 左上角只有 `TEST / LIVE`，LIVE 始终锁定。
-- 配置包含：Polymarket 首页栏目多选、二元/三元、买价 1–3¢、最低 Bid/Ask 比例 1–100%（默认 50%）、最大生命周期进度 1–100%（默认 20%）、1–365 天自由总时长区间、TEST 总资金和每 Token 每轮金额。
-- TEST 初始资金默认 100U，只能在 `PAUSED` 且没有任何交易历史时修改；已有历史必须先完成双重确认的 TEST 重置。
-- 资金摘要单行显示总资金、按当前可执行净卖出价值汇总的持仓实时价值和正数量持仓数，不再显示总/已实现/未实现盈亏卡片。
-- 持仓接口仍返回全部正数量 Token；页面默认显示前 20 项，其余折叠可展开，并突出结果方向、实际加权买入价、当前可卖价、目标档位、数量和市场全生命周期进度。
-- 当前可卖价明确区分实际 Best Bid、暂无买盘、行情未就绪、重连中和已断开，不统一显示 0.00¢。
-- 扫描市场默认前 20 项并可展开；使用一个小按钮切换生命周期进度正序/倒序。价格以两位小数美分显示，页面约每 500ms 自动更新且不覆盖未保存配置草稿。
+因此用户之前询问的流程可以概括为：先扫描 Event/具体 Market 的静态结构，再取得所有参与兄弟 Token 的完整盘口，按 Token 硬资格过滤，做真实 FAK Preview，最后在 Event 内选出唯一 Winner；页面只显示完整评估后的 Event 机会。PAUSED 时发现层仍可扫描和展示，但不会执行买入。
 
 ## 数据库与升级
 
-- GitHub `main` 和服务器当前均为 Schema 14：在 Schema 13 基础上新增 `min_market_duration_days`，并解除旧版最大时长离散节点限制，使最短/最长值都可在 1–365 天内保存。
-- 每个多语句迁移及其版本登记在同一个 SQLite 事务中执行；失败会整体回滚，避免半迁移数据库。
-- Schema 12 会把升级库强制切到 `PAUSED`，不会沿用旧 `RUNNING` 状态自动开始新规则交易。
-- Schema 12 将旧兼容值 `max_market_progress_percent=100`迁移到新默认 20，其他有效用户设置保持不变。
-- Schema 13 同样强制 `PAUSED`，并保证现金完全用完的 FAK 买单满足 `FILLED => original_size_micros = filled_size_micros`。
-- Schema 14 同样强制 `PAUSED`；升级时保留旧最大时长并把最短时长设为 1 天，不改订单、成交、持仓、资金或盈亏。
-- TEST 重置会清空订单、成交、持仓、结算、配置、审计和盘口消费，并恢复 100U、1U、50%、20%、1–30 天和 `PAUSED`。
+- Schema 15 重建 `paper_trading_preferences`，新增 `multi_enabled`；重建 `paper_market_metadata`，将 `result_count` 放宽为 `NULL` 或 2 至 JavaScript 最大安全整数的 SQLite INTEGER。
+- 新增 `paper_event_locks`，正常锁为 `ACTIVE`，历史同 Event 多 Token 正仓为 `LEGACY_CONFLICT`；新增 Event/Token 查询索引。
+- 迁移与 schema version 登记在同一事务执行，并强制策略为 `PAUSED`。所有旧活动 BUY 取消并释放预留现金；活动 SELL、成交、仓位、结算、审计和盘口消费保留。
+- 旧 Event 只有一个正仓 Token 时创建对应 ACTIVE legacy lock，冻结预算为其已使用现金；同 Event 有两个及以上正仓 Token 时标记 `LEGACY_CONFLICT`，禁止新增买入，只允许减仓和正式结算，不自动挑选赢家或删除历史。
+- `validatePaperState()` 继续核对 SQLite、订单、fills、费用、仓位、targets 和资金守恒，并新增 Event 身份、单 Token 互斥、锁与正仓/target 一致、兄弟 BUY、首次 Sell 后 BUY、冻结预算、settled Condition、僵尸锁和 legacy conflict 校验。
 
-## 已完成验证
+## API 与 UI
 
-- 本轮最终全量自动测试：26 个文件、227 项全部通过。
-- TypeScript 类型检查、前端脚本语法检查、生产构建和 `git diff --check` 全部通过。
-- 覆盖统一资格、15 秒非重叠扫描、扫描失败保留、实时资格变化、FAK 买卖、部分成交、多档目标、费用、资金上限、50 个满额 Token、101 个持仓返回、自动下一轮、正式结算、重置和 LIVE 禁用。
-- 盘口消费覆盖重复 `price_change`、等价快照、增量更新后重连、SQLite 重启恢复和无关侧变化，均不重复成交。
-- Schema 12 覆盖统一资格升级与原子回滚；Schema 13 覆盖旧 FAK 订单无损归一和新订单份额不变量；Schema 14 覆盖旧设置保留、自由时长区间约束和升级强制暂停。
-- 当前固定点复审发现的 pending 栏目白名单、已知但 schema 非法的 WS 帧旧 ready、REST 混合非法价格、结算状态/身份/向量非法重放未暂停和 50/50 重放 Token 身份问题均已补回归并修复；最终 Standards / Spec 双轴复核均为 0 findings。上一轮 UI 审查发现的 Schema 13→14 迁移、栏目挂起不阻塞与 5 秒回退、旧 Schema 13 soak 兼容和窄屏长金额防护均保留。
-- 本轮本地 UI 已在 462px 与 320px Codex 侧边栏检查：14 个首页栏目默认全选、7–30 天自由输入、三项资金摘要、单排序按钮、扫描进度、候选保留和无横向溢出均通过；轮询不覆盖未保存草稿，控制台无警告或错误。
-- 隔离真实扫描使用 7–30 天、Bid/Ask ≥1%、进度 ≤20%、类别全选：18,197 个事件流式遍历后静态保留 2,544 Token，51 批盘口全部返回，零重试、零限流；首轮约 5 分 4 秒完成并找到 1 个可交易市场，2,544/2,544 行情完整快照在 3.95 秒内由单连接完成，零断线。
-- 第二轮完整扫描及第三轮进行期间，同一候选始终保留；`lastScanAt` 在扫描中保持上一轮时间，WebSocket 连接累计仍为 1。完成后 RSS 约 314MB；第三轮扫描和页面 500ms 轮询并行时，SIGINT 约 0.96 秒正常退出，退出码 0。
-- Linux 部署短时冒烟使用服务器当前放宽条件（1–365 天、1–3¢、Bid/Ask ≥1%、进度 ≤100%）：首轮发布 55 个候选；下一轮扫描到 11,800 个事件时仍保留并更新为 56 个候选，单 WebSocket 订阅 34,940 个 Token，零意外断线。
+- 配置页显示 Polymarket 首页栏目并默认全选；栏目变更由公开接口同步。市场类型为二元、三元、多元（4+）；多元默认关闭。市场总时长的最短/最长值都可在 1–365 天内自由输入。
+- 扫描主列表按 Event 聚合，显示 N 元结果数、当前参与/合格 Token 数、Winner 的 Market/YES-NO、锁/退出/冲突状态和可展开的兄弟 Token，不把多元 Event 铺成大量独立机会。
+- 手动 TEST 买入只能提交最新完整仲裁的 Winner，并在执行前再次评估；未锁 Event 盘口不完整、Winner 改变或 0 Fill 都失败关闭。
+- 持仓继续按 Token 展示实际执行细节，同时增加 Event 锁状态、active Token、周期状态、冻结预算和本轮已用金额。资金摘要单行显示总资金、持仓实时价值和持仓数；持仓与 Event 列表默认前 20 项；排序使用单按钮切换。
+- 状态与 soak 诊断增加 monitored Event/Token、完整/不完整 Event、eligible Token、仲裁/重算/stale 拒绝、锁定/退出/conflict 和最大 resultCount 指标。
 
-## 服务器交付结果
+## 本轮已完成验证
 
-- 部署前原始备份：`/home/ubuntu/pm-small-backup-20260807T015306Z`；Schema 12 现场备份：`/home/ubuntu/pm-small-backup-20260807T020959Z`。两份备份均通过 SHA-256 和隔离 SQLite 完整性检查，未删除旧备份。
-- 本轮 Schema 14 部署备份：`/home/ubuntu/pm-small-backup-20260807T063635Z`；`data/`、`.env`、`docker-compose.yml` 的 SHA-256 全部通过，备份库复制到一次性临时层后确认 `integrity_check=ok`、Schema 13、`PAPER/PAUSED` 和 1000U 资金。旧备份均保留。
-- 正确性加固部署备份：`/home/ubuntu/pm-small-backup-20260807T093031Z`；`data/`、`.env`、`docker-compose.yml` 的 SHA-256 全部通过，隔离副本确认 `integrity_check=ok`、Schema 14、`PAPER/PAUSED`。备份保留 40 个订单、24 个成交、15 个持仓、15 个结算和 24 条盘口消费记录，未重置或删除任何 TEST 数据。
-- 本轮只读盘点服务器时意外发现策略已处于 `RUNNING`，同时已有上述 TEST 账本和 985.0019U 可用现金、14.9981U 持仓成本；盘点命令未写入状态。发现后立即调用暂停接口，在停容器和备份前恢复为 `PAUSED`。启动来源尚未确认，正式长期 TEST 前必须先核对启动审计与访问边界。
-- 容器重建和重启后均为 healthy；应用仅监听 `127.0.0.1:3000`，Nginx 监听公网 80/443，配置检查通过。
-- 公网严格检查通过：HTTP 跳转、未登录 401、登录后页面 200、`TEST + LIVE_DISABLED + PAUSED`、TEST 验证和 SQLite 均正常。访问地址为 `https://43-159-133-129.sslip.io/`。
-- 部署和容器重启后再次确认 `TEST + LIVE_DISABLED + PAUSED`，1000U 初始资金、985.0019U 可用现金、0U 预留和 14.9981U 持仓成本不变；验证接口通过，关键业务表计数与备份一致。后台发现扫描恢复后保留 3 个候选，但没有启动正式 TEST 或产生新的执行授权。
+- 结果数覆盖 2、3、4、10、128 和非法/增强型负风险边界；多元默认关闭与 API 保存/恢复均有回归。
+- FAK Preview 与实际成交共用纯规划核心；覆盖多档深度、已消费盘口、费用、min size、目标、成交比例与 `NO_FILL`。
+- 仲裁覆盖全部优先级、稳定 tie-break、YES/NO 竞争和“最便宜不一定获胜”。
+- 完整性覆盖兄弟 `NOT_READY` 阻断、完整无 Bid 仅淘汰自身、锁定后兄弟断线不影响 active Token 退出。
+- 锁与轮次覆盖 0 Fill 不锁、首个部分/完整 Fill 原子锁、兄弟互斥、近同时执行、预算冻结、改单不抬额、首次 Sell 后禁买、部分退出保持锁、完整退出解锁和下一轮换 Winner。
+- 结算与迁移覆盖 Condition 结算解锁、兄弟下一轮、单 Token legacy lock、多 Token conflict、原子回滚和重启恢复。
+- 最终本地验证：29 个测试文件、276 项通过；typecheck、build、`node --check src/web/app.js`、`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
+
+## 服务器交付边界
+
+- 公网入口：`https://43-159-133-129.sslip.io/`；应用 3000 只允许绑定 `127.0.0.1`，公网只经 Nginx 80/443、HTTPS 与登录认证。
+- 部署前必须再次确认 PAUSED，停止容器后备份 `data/`、`.env` 和 `docker-compose.yml`，保存 SHA-256；在可写临时副本上执行 SQLite `integrity_check`。旧备份不得删除。
+- 迁移前后必须核对 schema、策略状态、资金、订单、fills、仓位、结算和盘口消费计数；部署后复核容器、端口、HTTPS/认证、状态与 `/api/test/validation`，并做同库重启恢复。
+- 本轮只允许部署 GitHub `main` 的同一 SHA 和 Schema 15，最终状态必须为 `TEST + LIVE_DISABLED + PAUSED`。不得调用 `/api/test/start`，不得把 PAUSED 下的发现层冒烟记为正式长期 TEST。
 
 ## 尚未完成
 
-- 由用户制定的正式长期 TEST 验证计划及执行。
-- 异常启动来源、启动接口审计和服务器访问边界的正式复核。
-- 长期接口限流、全量扫描耗时、WebSocket 容量、断线恢复、服务器资源和真实公开行情成交样本的最终验收。
-- 钱包、签名、LIVE 下单/撤单/对账和链上赎回。
-
-## 下一步与停止条件
-
-1. 继续保持 `TEST + LIVE_DISABLED + PAUSED`，先核对本次异常启动的审计记录和所有可触发启动的访问入口。
-2. 与用户共同制定正式长期 TEST 计划，明确时长、故障场景、资源门槛、成交样本、证据格式、通过标准和停止条件；未经用户确认不执行。
-3. 计划确认后才开始正式验证；任何失败都保留现场并维持 LIVE 禁用。
+- GitHub 与服务器本轮 Schema 15 同步及其部署证据回填。
+- 与用户共同制定并由用户确认的正式长期 TEST 验证计划及执行。
+- 服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核。
+- 长期接口限流、全量扫描耗时、WebSocket 容量/断线、服务器资源和公开行情成交样本验收。
+- 钱包、签名、LIVE 下单/撤单/对账和链上赎回；这些仍明确禁止。
 
 ## 接手步骤
 
@@ -101,4 +82,4 @@ npm test
 npm run build
 ```
 
-继续前依次阅读本文件、`docs/DECISIONS.md`、`docs/PLAN.md`、`SECURITY.md` 和 `docs/SERVER_DEPLOY.md`。任何历史方案与现行决定冲突时，以 GitHub `main` 上的 `docs/DECISIONS.md` 为准。
+继续前依次阅读本文件、`docs/DECISIONS.md`、`docs/PLAN.md`、`SECURITY.md` 和 `docs/SERVER_DEPLOY.md`。任何历史方案与现行决定冲突时，以 GitHub `main` 上的代码与 `docs/DECISIONS.md` 为准。

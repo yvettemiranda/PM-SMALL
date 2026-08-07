@@ -1,7 +1,8 @@
 import { calculateOrderSizeMicros } from "./price.js";
+import { isMarketTypeEnabled, type MarketType } from "./market-type.js";
 
 export type MarketEligibilitySettings = {
-  resultCounts: readonly (2 | 3)[];
+  marketTypes: readonly MarketType[];
   allCategories: boolean;
   selectedCategoryIds: readonly string[];
   minBuyPriceMicros: number;
@@ -14,7 +15,7 @@ export type MarketEligibilitySettings = {
 };
 
 export type MarketEligibilityCandidate = {
-  resultCount: 2 | 3 | null;
+  resultCount: number | null;
   category?: string | null;
   categoryIds?: readonly string[] | null;
   bestBidMicros: number | null;
@@ -83,7 +84,7 @@ export function staticMarketEligibilityRejectionReason(
 ): MarketEligibilityRejectionReason | null {
   if (
     market.resultCount === null ||
-    !settings.resultCounts.includes(market.resultCount)
+    !isMarketTypeEnabled(market.resultCount, settings.marketTypes)
   ) {
     return "RESULT_COUNT";
   }

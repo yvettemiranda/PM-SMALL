@@ -403,6 +403,21 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   background: #fff;
   color: var(--muted);
 }
+.event-status {
+  padding: 2px 6px;
+  border: 1px solid #d6dfdc;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+}
+.event-status-ready { border-color: #9ccfc2; background: var(--accent-soft); color: var(--accent); }
+.event-status-legacy_conflict { border-color: #efc0c0; background: #fff4f4; color: var(--negative); }
+.event-winner-title { display: flex; min-width: 0; gap: 7px; margin-top: 10px; align-items: baseline; }
+.event-winner-title span { flex: 0 0 auto; color: var(--muted); font-size: 9px; }
+.event-winner-title strong { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.event-outcomes { display: flex; gap: 5px; margin-top: 8px; overflow: hidden; }
+.outcome-chip { min-width: 0; max-width: 120px; padding: 3px 7px; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.outcome-chip.is-winner { border-color: #9ccfc2; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
 .market-row.is-stale .candidate-quotes strong { color: var(--muted); }
 
 .quote-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
@@ -420,6 +435,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 }
 .position-quotes > div:first-child strong,
 .candidate-quotes > div:first-child strong { color: var(--accent); }
+.cycle-summary { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 8px; color: var(--muted); font-size: 9px; }
+.cycle-summary strong { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 650; }
 .market-time strong { font-size: 10px; font-weight: 620; }
 .progress-heading { margin-top: 10px; color: var(--muted); font-size: 9px; }
 .progress-heading strong { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }

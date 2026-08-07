@@ -5,6 +5,7 @@ import type { TokenOrderBook, TradeCandidate } from "../src/domain/types.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { LiveExecutorDisabled } from "../src/infrastructure/execution/live-executor-disabled.js";
 import { CandidateService } from "../src/services/candidate-service.js";
+import { EventOpportunityService } from "../src/services/event-opportunity-service.js";
 import type {
   MarketStreamStatus,
   PaperMarketRuntime,
@@ -96,6 +97,46 @@ describe("HTTP app", () => {
     });
   });
 
+  it("groups sibling Tokens into one Event row with one displayed representative", async () => {
+    const first = makeCurrentCandidate({
+      candidateId: "event-first:20000",
+      tokenId: "event-first",
+      conditionId: "event-first-condition",
+      marketId: "event-first-market",
+    });
+    const sibling = makeCurrentCandidate({
+      candidateId: "event-sibling:20000",
+      tokenId: "event-sibling",
+      conditionId: "event-sibling-condition",
+      marketId: "event-sibling-market",
+    });
+    const { app, candidates } = makeTestApp([first, sibling], {
+      marketStream: marketRuntime(),
+    });
+    await candidates.refresh();
+
+    const dashboard = await app.inject({ method: "GET", url: "/api/dashboard" });
+
+    expect(dashboard.json().marketScan).toMatchObject({
+      eventCount: 1,
+      displayEventCount: 1,
+      tokenCount: 2,
+      displayedEventCount: 1,
+      candidates: [expect.objectContaining({ eventId: first.eventId })],
+      events: [
+        expect.objectContaining({
+          eventId: first.eventId,
+          marketCount: 2,
+          tokenCount: 2,
+          outcomes: [
+            expect.objectContaining({ tokenId: first.tokenId }),
+            expect.objectContaining({ tokenId: sibling.tokenId }),
+          ],
+        }),
+      ],
+    });
+  });
+
   it("keeps a last-known eligible market visible but not tradable while quotes reconnect", async () => {
     const candidate = makeCurrentCandidate();
     const connectedRuntime = marketRuntime();
@@ -157,7 +198,7 @@ describe("HTTP app", () => {
       method: "PUT",
       url: "/api/test/preferences",
       payload: {
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         allCategories: false,
         selectedCategoryIds: ["tag-tech"],
         maxBuyPriceCents: 3,
@@ -208,7 +249,7 @@ describe("HTTP app", () => {
       method: "PUT",
       url: "/api/test/preferences",
       payload: {
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         allCategories: true,
         selectedCategories: [],
         maxBuyPriceCents: 2,
@@ -229,14 +270,14 @@ describe("HTTP app", () => {
     });
   });
 
-  it("rejects a configuration that disables both binary and ternary markets", async () => {
+  it("rejects a configuration that disables every market type", async () => {
     const { app, tradingPreferences } = makeTestApp([]);
 
     const response = await app.inject({
       method: "PUT",
       url: "/api/test/preferences",
       payload: {
-        resultCounts: [],
+        marketTypes: [],
         allCategories: true,
         selectedCategories: [],
         maxBuyPriceCents: 3,
@@ -248,7 +289,38 @@ describe("HTTP app", () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(tradingPreferences.getSnapshot().resultCounts).toEqual([2, 3]);
+    expect(tradingPreferences.getSnapshot().marketTypes).toEqual([
+      "BINARY",
+      "TERNARY",
+    ]);
+  });
+
+  it("round-trips a multi-only market type selection through the API", async () => {
+    const { app } = makeTestApp([]);
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/test/preferences",
+      payload: {
+        marketTypes: ["MULTI"],
+        allCategories: true,
+        selectedCategoryIds: [],
+        maxBuyPriceCents: 3,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        candidateSortDirection: "ASC",
+        initialCapital: 100,
+        orderAmount: 1,
+      },
+    });
+    const restored = await app.inject({
+      method: "GET",
+      url: "/api/test/preferences",
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().preferences.marketTypes).toEqual(["MULTI"]);
+    expect(restored.json().preferences.marketTypes).toEqual(["MULTI"]);
   });
 
   it("executes a manual TEST request through the same FAK path without leaving an active buy", async () => {
@@ -283,6 +355,44 @@ describe("HTTP app", () => {
     ]);
   });
 
+  it("rejects a manual TEST request for a non-Winner sibling Token", async () => {
+    const winner = makeCurrentCandidate({
+      candidateId: "manual-winner:20000",
+      tokenId: "manual-winner",
+      conditionId: "manual-winner-condition",
+      marketId: "a-manual-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const sibling = makeCurrentCandidate({
+      candidateId: "manual-loser:20000",
+      tokenId: "manual-loser",
+      conditionId: "manual-loser-condition",
+      marketId: "z-manual-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const { app, candidates, database } = makeTestApp([winner, sibling], {
+      marketStream: marketRuntime(),
+    });
+    await candidates.refresh();
+    await app.inject({ method: "POST", url: "/api/test/start" });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/test/orders/buy",
+      payload: { candidateId: sibling.candidateId },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "Candidate is not the current Event winner",
+    });
+    expect(database.listPaperOrders()).toEqual([]);
+  });
+
   it("marks a position at zero when the live book has no executable bid", async () => {
     const candidate = makeCurrentCandidate({
       executableBuyPriceMicros: 20_000,
@@ -313,6 +423,11 @@ describe("HTTP app", () => {
       positions: [
         expect.objectContaining({
           tokenId: candidate.tokenId,
+          eventLockState: "ACTIVE",
+          activeTokenId: candidate.tokenId,
+          cycleStatus: "ACCUMULATING",
+          cycleBudget: "1",
+          cycleSpent: "1",
           currentSellPrice: null,
           currentSellPriceStatus: "NO_BID",
           unrealizedPnl: "-1",
@@ -376,7 +491,7 @@ describe("HTTP app", () => {
       method: "PUT",
       url: "/api/test/preferences",
       payload: {
-        resultCounts: [2, 3],
+        marketTypes: ["BINARY", "TERNARY"],
         allCategories: true,
         selectedCategoryIds: [],
         maxBuyPriceCents: 3,
@@ -441,13 +556,14 @@ describe("HTTP app", () => {
     expect(page.body).toContain("最低买卖盘比例");
     expect(page.body).toContain("生命周期进度");
     expect(page.body).toContain("总模拟资金");
-    expect(page.body).toContain("每单使用金额");
+    expect(page.body).toContain("每 Event 每轮金额");
+    expect(page.body).toContain("多元市场（4+）");
     expect(page.body).toContain("重置TEST");
     expect(page.body).toContain("总资金");
     expect(page.body).toContain("持仓实时价值");
     expect(page.body).toContain("持仓数");
     expect(page.body).toContain("当前持仓");
-    expect(page.body).toContain("扫描市场");
+    expect(page.body).toContain("扫描事件");
     expect(page.body).toContain('id="scan-refresh-state"');
     expect(page.body).toContain('id="position-list-controls"');
     expect(page.body).toContain('id="toggle-positions"');
@@ -488,6 +604,7 @@ describe("HTTP app", () => {
       const candidate = makeCurrentCandidate({
         candidateId: `${tokenId}:20000`,
         tokenId,
+        eventId: `partial-event-${index}`,
         conditionId: `partial-condition-${index}`,
         marketId: `partial-market-${index}`,
       });
@@ -530,6 +647,16 @@ describe("HTTP app", () => {
       database,
       testConfig,
     );
+    const eventOpportunities =
+      options.marketStream === undefined
+        ? null
+        : new EventOpportunityService(
+            candidates,
+            database,
+            options.marketStream,
+            testConfig,
+            tradingPreferences,
+          );
     const app = buildApp({
       config: testConfig,
       database,
@@ -538,7 +665,35 @@ describe("HTTP app", () => {
       liveExecutor: new LiveExecutorDisabled(),
       ...(options.marketStream === undefined
         ? {}
-        : { marketStream: options.marketStream }),
+        : {
+            marketStream: options.marketStream,
+            paperAutomation: {
+              getStatus: () => ({
+                running: false,
+                lastRunAt: null,
+                lastError: null,
+                placedBuyCount: 0,
+                cancelledFilterBuyCount: 0,
+                cancelledStartedBuyCount: 0,
+                cancelledProgressedBuyCount: 0,
+                eventsEvaluatedCount: 0,
+                incompleteEventCount: 0,
+                arbitrationCount: 0,
+                arbitrationRecomputeCount: 0,
+                staleArbitrationRejectionCount: 0,
+                skippedLockedSiblingQuoteCount: 0,
+                maxObservedResultCount: 0,
+                recovery: null,
+              }),
+              getEventEvaluations: () =>
+                candidates
+                  .getEventIds()
+                  .map((eventId) =>
+                    eventOpportunities!.evaluateEvent(eventId),
+                  ),
+              requestRun: () => {},
+            },
+          }),
     });
     resources.push(app, database);
     return { app, candidates, database, tradingPreferences };

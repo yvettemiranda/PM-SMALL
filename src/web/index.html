@@ -58,8 +58,9 @@
             <fieldset class="config-block">
               <legend>市场类型</legend>
               <div class="check-options">
-                <label><input id="binary-market" type="checkbox" value="2" /><span>二元市场</span></label>
-                <label><input id="ternary-market" type="checkbox" value="3" /><span>三元市场</span></label>
+                <label><input id="binary-market" type="checkbox" value="BINARY" /><span>二元市场</span></label>
+                <label><input id="ternary-market" type="checkbox" value="TERNARY" /><span>三元市场</span></label>
+                <label><input id="multi-market" type="checkbox" value="MULTI" /><span>多元市场（4+）</span></label>
               </div>
             </fieldset>
 
@@ -152,14 +153,14 @@
                   </span>
                 </label>
                 <label class="field">
-                  <span>每单使用金额</span>
+                  <span>每 Event 每轮金额</span>
                   <span class="unit-input">
                     <input id="order-amount" type="number" min="0.01" step="0.01" inputmode="decimal" />
                     <span>U</span>
                   </span>
                 </label>
               </div>
-              <p class="field-note">每单金额是同一结果、同一轮的累计现金上限，包含买入费用。</p>
+              <p class="field-note">首次成交时冻结为该 Event 本轮的累计现金上限，包含买入费用。</p>
               <button id="reset-test" class="button danger" type="button">重置TEST</button>
             </div>
           </div>
@@ -196,7 +197,7 @@
           <div class="scan-title">
             <span class="eyebrow">DISCOVERY</span>
             <div class="heading-line">
-              <h2>扫描市场</h2>
+              <h2>扫描事件</h2>
               <span id="candidate-count" class="count">0个</span>
             </div>
             <span id="scan-refresh-state" class="scan-state" role="status" aria-live="polite">等待首次扫描</span>

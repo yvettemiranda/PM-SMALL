@@ -30,7 +30,7 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ MAX_BUY_PRICE: "0.04" })).toThrow();
   });
 
-  it("rejects a per-token budget above the total budget", () => {
+  it("rejects a per-Event cycle budget above the total budget", () => {
     expect(() =>
       loadConfig({ ORDER_BUDGET_USD: "101", TOTAL_BUDGET_USD: "100" }),
     ).toThrow("ORDER_BUDGET_USD cannot exceed TOTAL_BUDGET_USD");

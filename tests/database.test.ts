@@ -24,6 +24,80 @@ describe("PaperDatabase", () => {
     expect(state.reservedCashMicros).toBe(1_000_000);
   });
 
+  it("atomically locks a legacy Maker Event on its first fill and cancels sibling buys", () => {
+    const winner = makeCandidate({ candidateId: "winner:20000" });
+    const sibling = makeCandidate({
+      candidateId: "sibling:20000",
+      tokenId: "sibling-token",
+      conditionId: "sibling-condition",
+      marketId: "sibling-market",
+      direction: "YES",
+    });
+    const winnerBuy = database.placePaperBuy(winner, 100_000_000);
+    const siblingBuy = database.placePaperBuy(sibling, 100_000_000);
+
+    const fill = database.applyPaperTrade({
+      orderId: winnerBuy.id,
+      sourceTradeId: "winner-first-fill",
+      tradePriceMicros: winnerBuy.priceMicros,
+      tradeSizeMicros: 12_000_000,
+      dataComplete: true,
+    });
+
+    expect(fill.incrementalFillSizeMicros).toBe(2_000_000);
+    expect(database.getPaperEventLock(winner.eventId)).toMatchObject({
+      state: "ACTIVE",
+      activeTokenId: winner.tokenId,
+      marketId: winner.marketId,
+      conditionId: winner.conditionId,
+      cycleBudgetMicros: 1_000_000,
+    });
+    expect(database.listPaperPositions()).toEqual([
+      expect.objectContaining({
+        tokenId: winner.tokenId,
+        cycleSpendMicros: 40_000,
+        grossBuySizeMicros: 2_000_000,
+        grossBuyNotionalMicros: 40_000,
+      }),
+    ]);
+    expect(database.listPaperOrders()).toContainEqual(
+      expect.objectContaining({ id: siblingBuy.id, status: "CANCELLED" }),
+    );
+    expect(
+      database.applyPaperTrade({
+        orderId: siblingBuy.id,
+        sourceTradeId: "blocked-sibling-fill",
+        tradePriceMicros: siblingBuy.priceMicros,
+        tradeSizeMicros: 12_000_000,
+        dataComplete: true,
+      }).incrementalFillSizeMicros,
+    ).toBe(0);
+  });
+
+  it("blocks a sibling legacy Maker buy while an Event lock is active", () => {
+    const winner = makeCandidate({ queueAheadSizeMicros: 0 });
+    const winnerBuy = database.placePaperBuy(winner, 100_000_000);
+    database.applyPaperTrade({
+      orderId: winnerBuy.id,
+      sourceTradeId: "winner-full-fill",
+      tradePriceMicros: winnerBuy.priceMicros,
+      tradeSizeMicros: winnerBuy.originalSizeMicros,
+      dataComplete: true,
+    });
+
+    expect(() =>
+      database.placePaperBuy(
+        makeCandidate({
+          candidateId: "blocked-sibling:20000",
+          tokenId: "blocked-sibling",
+          conditionId: "blocked-condition",
+          marketId: "blocked-market",
+        }),
+        100_000_000,
+      ),
+    ).toThrow(/Event is locked to another token/);
+  });
+
   it("keeps market display metadata with an open PAPER position", () => {
     const candidate = {
       ...makeCandidate({ queueAheadSizeMicros: 0 }),
@@ -77,6 +151,7 @@ describe("PaperDatabase", () => {
       const candidate = makeCandidate({
         candidateId: `token-${index}:20000`,
         tokenId: `token-${index}`,
+        eventId: `event-${index}`,
         conditionId: `condition-${index}`,
         marketId: `market-${index}`,
         orderSizeMicros: 1_000_000,
@@ -151,7 +226,7 @@ describe("PaperDatabase", () => {
     const databasePath = join(directory, "paper.db");
     const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
     currentDatabase.ensurePaperTradingPreferences({
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       maxBuyPriceMicros: 30_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
@@ -194,7 +269,7 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 14 });
+        ).toEqual({ version: 15 });
       } finally {
         schemaVersion.close();
       }
@@ -209,7 +284,7 @@ describe("PaperDatabase", () => {
     const databasePath = join(directory, "paper.db");
     const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
     currentDatabase.ensurePaperTradingPreferences({
-      resultCounts: [2],
+      marketTypes: ["BINARY"],
       maxBuyPriceMicros: 20_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 60,
@@ -269,9 +344,13 @@ describe("PaperDatabase", () => {
         FROM paper_trading_preferences;
         DROP TABLE paper_trading_preferences;
         ALTER TABLE paper_trading_preferences_v13 RENAME TO paper_trading_preferences;
-        DELETE FROM schema_migrations WHERE version = 14;
+        DROP TABLE paper_event_locks;
+        DELETE FROM schema_migrations WHERE version IN (14, 15);
         DELETE FROM audit_log
-        WHERE event_type = 'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED';
+        WHERE event_type IN (
+          'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED',
+          'TEST_EVENT_CYCLE_MIGRATION_COMPLETED'
+        );
       `);
     } finally {
       rawDatabase.close();
@@ -280,7 +359,7 @@ describe("PaperDatabase", () => {
     const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
-        resultCounts: [2],
+        marketTypes: ["BINARY"],
         maxBuyPriceMicros: 20_000,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 60,
@@ -311,7 +390,7 @@ describe("PaperDatabase", () => {
           inspectedDatabase
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 14 });
+        ).toEqual({ version: 15 });
         expect(
           inspectedDatabase
             .prepare(
@@ -324,6 +403,186 @@ describe("PaperDatabase", () => {
       }
     } finally {
       upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy Event positions, conflicts, active buys, and arbitrary result counts", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-event-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const legacyDatabase = new PaperDatabase(databasePath, 100_000_000);
+    const single = makeCandidate({
+      candidateId: "single-token:20000",
+      tokenId: "single-token",
+      eventId: "single-event",
+      conditionId: "single-condition",
+      marketId: "single-market",
+      queueAheadSizeMicros: 0,
+    });
+    const conflictFirst = makeCandidate({
+      candidateId: "conflict-first:20000",
+      tokenId: "conflict-first",
+      eventId: "conflict-event",
+      conditionId: "conflict-first-condition",
+      marketId: "conflict-first-market",
+      queueAheadSizeMicros: 0,
+    });
+    const conflictSecond = makeCandidate({
+      candidateId: "conflict-second:20000",
+      tokenId: "conflict-second",
+      eventId: "temporary-second-event",
+      conditionId: "conflict-second-condition",
+      marketId: "conflict-second-market",
+      queueAheadSizeMicros: 0,
+    });
+    const pending = makeCandidate({
+      candidateId: "pending-token:20000",
+      tokenId: "pending-token",
+      eventId: "pending-event",
+      conditionId: "pending-condition",
+      marketId: "pending-market",
+      queueAheadSizeMicros: 0,
+    });
+    try {
+      legacyDatabase.setStrategyStatus("RUNNING");
+      legacyDatabase.ensurePaperTradingPreferences({
+        marketTypes: ["BINARY", "TERNARY"],
+        maxBuyPriceMicros: 30_000,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 20,
+        minBidAskRatioPercent: 50,
+        candidatesSelectedByDefault: true,
+        allCategories: true,
+        selectedCategories: [],
+        candidateSortDirection: "ASC",
+        orderBudgetMicros: 1_000_000,
+      });
+      for (const [candidate, sourceTradeId] of [
+        [single, "single-fill"],
+        [conflictFirst, "conflict-first-fill"],
+        [conflictSecond, "conflict-second-fill"],
+      ] as const) {
+        const buy = legacyDatabase.placePaperBuy(candidate, 100_000_000);
+        legacyDatabase.applyPaperTrade({
+          orderId: buy.id,
+          sourceTradeId,
+          tradePriceMicros: buy.priceMicros,
+          tradeSizeMicros: buy.originalSizeMicros,
+          dataComplete: true,
+        });
+      }
+      const pendingBuy = legacyDatabase.placePaperBuy(pending, 100_000_000);
+      legacyDatabase.close();
+
+      const rawDatabase = new Database(databasePath);
+      try {
+        rawDatabase.exec(`
+          UPDATE paper_market_metadata
+          SET event_id = 'conflict-event'
+          WHERE token_id = 'conflict-second';
+          UPDATE paper_orders
+          SET event_id = 'conflict-event'
+          WHERE token_id = 'conflict-second';
+          DROP TABLE paper_event_locks;
+          DELETE FROM schema_migrations WHERE version = 15;
+          DELETE FROM audit_log
+          WHERE event_type = 'TEST_EVENT_CYCLE_MIGRATION_COMPLETED';
+        `);
+      } finally {
+        rawDatabase.close();
+      }
+
+      const upgraded = new PaperDatabase(databasePath, 100_000_000);
+      try {
+        expect(upgraded.getStrategyState()).toMatchObject({
+          status: "PAUSED",
+          reservedCashMicros: 0,
+        });
+        expect(upgraded.getPaperTradingPreferences().marketTypes).toEqual([
+          "BINARY",
+          "TERNARY",
+        ]);
+        expect(upgraded.getPaperEventLock("single-event")).toMatchObject({
+          state: "ACTIVE",
+          activeTokenId: single.tokenId,
+          cycleBudgetMicros: 1_000_000,
+        });
+        expect(upgraded.getPaperEventLock("conflict-event")).toEqual(
+          expect.objectContaining({
+            state: "LEGACY_CONFLICT",
+            activeTokenId: null,
+            cycleBudgetMicros: 0,
+          }),
+        );
+        expect(upgraded.getPaperEventLock("pending-event")).toBeNull();
+        expect(upgraded.listPaperOrders()).toContainEqual(
+          expect.objectContaining({ id: pendingBuy.id, status: "CANCELLED" }),
+        );
+        expect(upgraded.validatePaperState()).toMatchObject({ passed: true });
+
+        upgraded.setStrategyStatus("RUNNING");
+        expect(() =>
+          upgraded.placePaperBuy(
+            makeCandidate({
+              candidateId: "blocked-conflict:20000",
+              tokenId: "blocked-conflict",
+              eventId: "conflict-event",
+              conditionId: "blocked-conflict-condition",
+              marketId: "blocked-conflict-market",
+            }),
+            100_000_000,
+          ),
+        ).toThrow(/legacy conflicting positions/);
+
+        for (const tokenId of [conflictFirst.tokenId, conflictSecond.tokenId]) {
+          const sell = upgraded
+            .listActivePaperOrders(tokenId)
+            .find((order) => order.side === "SELL");
+          if (sell === undefined) throw new Error("Expected a legacy exit target");
+          upgraded.applyPaperTrade({
+            orderId: sell.id,
+            sourceTradeId: `exit-${tokenId}`,
+            tradePriceMicros: sell.priceMicros,
+            tradeSizeMicros: sell.originalSizeMicros,
+            dataComplete: true,
+          });
+        }
+        expect(upgraded.getPaperEventLock("conflict-event")).toBeNull();
+
+        const multi = makeCandidate({
+          candidateId: "multi-token:20000",
+          tokenId: "multi-token",
+          eventId: "conflict-event",
+          conditionId: "multi-condition",
+          marketId: "multi-market",
+          resultCount: 10,
+        });
+        expect(upgraded.placePaperBuy(multi, 100_000_000)).toMatchObject({
+          tokenId: multi.tokenId,
+          status: "OPEN",
+        });
+        expect(() =>
+          executeRaw(
+            databasePath,
+            "UPDATE paper_market_metadata SET result_count = 2.5 WHERE token_id = 'multi-token'",
+          ),
+        ).toThrow(/CHECK constraint failed/);
+        expect(() =>
+          executeRaw(
+            databasePath,
+            "UPDATE paper_market_metadata SET result_count = 9007199254740992 WHERE token_id = 'multi-token'",
+          ),
+        ).toThrow(/CHECK constraint failed/);
+      } finally {
+        upgraded.close();
+      }
+    } finally {
+      try {
+        legacyDatabase.close();
+      } catch {
+        // The legacy handle is already closed on the successful path.
+      }
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -809,3 +1068,12 @@ describe("PaperDatabase", () => {
     expect(afterGap.order.filledSizeMicros).toBe(4_000_000);
   });
 });
+
+function executeRaw(databasePath: string, sql: string): void {
+  const rawDatabase = new Database(databasePath);
+  try {
+    rawDatabase.exec(sql);
+  } finally {
+    rawDatabase.close();
+  }
+}

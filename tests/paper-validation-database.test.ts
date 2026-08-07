@@ -344,7 +344,159 @@ describe("paper ledger validation", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("detects a positive position whose Event lock is missing", () => {
+    const fixture = createFilledEventFixture();
+    try {
+      executeRaw(fixture.databasePath, "DELETE FROM paper_event_locks");
+
+      const result = fixture.database.validatePaperState();
+
+      expect(result.errors).toContain(
+        `Paper position is missing its Event lock: ${fixture.candidate.tokenId}`,
+      );
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects Event lock identity drift from market metadata", () => {
+    const fixture = createFilledEventFixture();
+    try {
+      executeRaw(
+        fixture.databasePath,
+        "UPDATE paper_event_locks SET active_token_id = 'wrong-token'",
+      );
+
+      const result = fixture.database.validatePaperState();
+
+      expect(result.errors).toContain(
+        `Paper Event lock identity does not match metadata: ${fixture.candidate.eventId}`,
+      );
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects cycle spend above the Event lock's frozen budget", () => {
+    const fixture = createFilledEventFixture();
+    try {
+      executeRaw(
+        fixture.databasePath,
+        "UPDATE paper_event_locks SET cycle_budget_micros = 1",
+      );
+
+      const result = fixture.database.validatePaperState();
+
+      expect(result.errors).toContain(
+        `Paper Event cycle spend exceeds frozen budget: ${fixture.candidate.eventId}`,
+      );
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a zombie Event lock without a position or active target", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
+    const databasePath = join(directory, "paper.db");
+    const database = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      executeRaw(
+        databasePath,
+        `INSERT INTO paper_event_locks(
+          event_id, active_token_id, market_id, condition_id,
+          cycle_budget_micros, state, locked_at, updated_at
+        ) VALUES (
+          'zombie-event', 'zombie-token', 'zombie-market', 'zombie-condition',
+          1000000, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )`,
+      );
+
+      const result = database.validatePaperState();
+
+      expect(result.errors).toContain(
+        "Paper Event lock has no position or active target: zombie-event",
+      );
+    } finally {
+      database.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects multiple positive Tokens in a normal Event", () => {
+    const fixture = createFilledEventFixture();
+    try {
+      fixture.database.setStrategyStatus("RUNNING");
+      const sibling = makeCandidate({
+        candidateId: "second-token:20000",
+        tokenId: "second-token",
+        eventId: "second-event",
+        conditionId: "second-condition",
+        marketId: "second-market",
+        queueAheadSizeMicros: 0,
+      });
+      const siblingBuy = fixture.database.placePaperBuy(sibling, 100_000_000);
+      fixture.database.applyPaperTrade({
+        orderId: siblingBuy.id,
+        sourceTradeId: "second-event-fill",
+        tradePriceMicros: siblingBuy.priceMicros,
+        tradeSizeMicros: siblingBuy.originalSizeMicros,
+        dataComplete: true,
+      });
+      executeRaw(
+        fixture.databasePath,
+        `UPDATE paper_market_metadata SET event_id = 'event-1'
+          WHERE token_id = 'second-token';
+        UPDATE paper_orders SET event_id = 'event-1'
+          WHERE token_id = 'second-token';
+        DELETE FROM paper_event_locks WHERE event_id = 'second-event';`,
+      );
+
+      const result = fixture.database.validatePaperState();
+
+      expect(result.errors).toContain(
+        "Paper Event has multiple positive tokens without LEGACY_CONFLICT: event-1",
+      );
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
 });
+
+function createFilledEventFixture(): {
+  directory: string;
+  databasePath: string;
+  database: PaperDatabase;
+  candidate: ReturnType<typeof makeCandidate>;
+} {
+  const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
+  const databasePath = join(directory, "paper.db");
+  const database = new PaperDatabase(databasePath, 100_000_000);
+  const candidate = makeCandidate({ queueAheadSizeMicros: 0 });
+  database.setStrategyStatus("RUNNING");
+  const buy = database.placePaperBuy(candidate, 100_000_000);
+  database.applyPaperTrade({
+    orderId: buy.id,
+    sourceTradeId: "event-validation-fill",
+    tradePriceMicros: buy.priceMicros,
+    tradeSizeMicros: buy.originalSizeMicros,
+    dataComplete: true,
+  });
+  return { directory, databasePath, database, candidate };
+}
+
+function executeRaw(databasePath: string, sql: string): void {
+  const database = new Database(databasePath);
+  try {
+    database.exec(sql);
+  } finally {
+    database.close();
+  }
+}
 
 function updateReservedCash(databasePath: string, reservedCashMicros: number): void {
   const database = new Database(databasePath);

@@ -3,11 +3,59 @@ import {
   calculateTakerFeeMicros,
   planFakBuy,
   planFakSell,
+  previewFakBuy,
   sortTradeCandidates,
 } from "../src/domain/trading-strategy.js";
 import { makeCandidate } from "./helpers.js";
 
 describe("shared trading strategy", () => {
+  it("previews FAK fills, per-fill targets, target-bound bid coverage, and net return", () => {
+    const preview = previewFakBuy({
+      asks: [
+        { priceMicros: 10_000, sizeMicros: 40_000_000 },
+        { priceMicros: 20_000, sizeMicros: 30_000_000 },
+      ],
+      bids: [
+        { priceMicros: 30_000, sizeMicros: 10_000_000 },
+        { priceMicros: 20_000, sizeMicros: 50_000_000 },
+        { priceMicros: 10_000, sizeMicros: 100_000_000 },
+      ],
+      maxPriceMicros: 30_000,
+      maxSpendMicros: 1_000_000,
+      cycleBudgetMicros: 1_000_000,
+      minOrderSizeMicros: 5_000_000,
+      tickSizeMicros: 10_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(preview).toMatchObject({
+      bestAskMicros: 10_000,
+      bestBidMicros: 30_000,
+      terminalTargetPriceMicros: 30_000,
+      exitBidCoverageSizeMicros: 50_000_000,
+      exitBidCoveragePositionSizeMicros: 70_000_000,
+      targetNetProceedsMicros: 1_700_000,
+      targetNetProfitMicros: 700_000,
+      cycleBudgetMicros: 1_000_000,
+      plan: { spentMicros: 1_000_000, netFillSizeMicros: 70_000_000 },
+    });
+    expect(preview?.fills).toEqual([
+      expect.objectContaining({
+        priceMicros: 10_000,
+        netSizeMicros: 40_000_000,
+        targetPriceMicros: 20_000,
+        exitableBidDepthMicros: 60_000_000,
+      }),
+      expect.objectContaining({
+        priceMicros: 20_000,
+        netSizeMicros: 30_000_000,
+        targetPriceMicros: 30_000,
+        exitableBidDepthMicros: 10_000_000,
+      }),
+    ]);
+  });
+
   it("plans a price-capped FAK buy across executable ask levels", () => {
     const plan = planFakBuy({
       asks: [

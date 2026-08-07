@@ -6,7 +6,7 @@ import {
 import { makeCandidate } from "./helpers.js";
 
 const settings: MarketEligibilitySettings = {
-  resultCounts: [2, 3],
+  marketTypes: ["BINARY", "TERNARY"],
   allCategories: true,
   selectedCategoryIds: [],
   minBuyPriceMicros: 10_000,
@@ -19,6 +19,20 @@ const settings: MarketEligibilitySettings = {
 };
 
 describe("market eligibility", () => {
+  it("uses binary, ternary, and multi as independent product selections", () => {
+    const multi = makeCandidate({ resultCount: 10 });
+    expect(isMarketEligible(multi, settings)).toBe(false);
+    expect(
+      isMarketEligible(multi, { ...settings, marketTypes: ["MULTI"] }),
+    ).toBe(true);
+    expect(
+      isMarketEligible(makeCandidate(), {
+        ...settings,
+        marketTypes: ["MULTI"],
+      }),
+    ).toBe(false);
+  });
+
   it("applies the fixed 1 cent floor, a valid bid, and the configured ratio", () => {
     expect(
       isMarketEligible(makeCandidate({ bestAskMicros: 9_999 }), settings),

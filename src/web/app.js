@@ -4,7 +4,7 @@ const ui = {
   dashboard: null,
   preferences: null,
   strategyStatus: "STOPPED",
-  candidates: [],
+  events: [],
   candidateCount: 0,
   displayCandidateCount: 0,
   staleCandidateCount: 0,
@@ -269,6 +269,11 @@ function renderPositions(positions = []) {
             ? `<span class="event-title">${escapeHtml(position.eventTitle)}</span>`
             : "";
           const currentSellPrice = formatCurrentSellPrice(position);
+          const cycleStatus = {
+            ACCUMULATING: "仍可累计",
+            EXITING: "退出阶段",
+            LEGACY_CONFLICT: "旧仓冲突·只减仓",
+          }[position.cycleStatus] || "周期状态待确认";
           return `<article class="position-row">
             <div class="row-heading">
               <div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div>
@@ -279,6 +284,11 @@ function renderPositions(positions = []) {
               <div><span>当前可卖</span><strong>${currentSellPrice}</strong></div>
               <div title="${escapeHtml(targets.map(formatCents).join("、"))}"><span>目标卖价</span><strong>${targetLabel}</strong></div>
               <div><span>持仓数量</span><strong>${formatQuantity(position.quantity)}</strong></div>
+            </div>
+            <div class="cycle-summary">
+              <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
+              <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
+              <span>本轮已用 <strong>${formatMoney(position.cycleSpent)}</strong></span>
             </div>
             <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
             ${progressMarkup(position.progressPercent, "市场生命周期")}
@@ -301,10 +311,10 @@ function formatCurrentSellPrice(position) {
 }
 
 function renderCandidates() {
-  const visible = ui.candidates;
+  const visible = ui.events;
   $("#candidate-count").textContent = ui.staleCandidateCount > 0
-    ? `可交易${formatCount(ui.candidateCount)} · 重连${formatCount(ui.staleCandidateCount)}`
-    : `${formatCount(ui.candidateCount)}个`;
+    ? `可交易${formatCount(ui.candidateCount)}个事件 · 待定${formatCount(ui.staleCandidateCount)}`
+    : `${formatCount(ui.candidateCount)}个事件`;
   $("#display-count").textContent = `当前显示 ${formatCount(visible.length)} / ${formatCount(ui.displayCandidateCount)}`;
   const loadMore = $("#load-more");
   const allVisible = visible.length >= ui.displayCandidateCount;
@@ -313,8 +323,9 @@ function renderCandidates() {
 
   $("#candidates").innerHTML = visible.length
     ? visible
-        .map((candidate) => {
-          const progress = Number(candidate.progressPercent);
+        .map((event) => {
+          const candidate = event.winner || event.representative;
+          const progress = Number(event.progressPercent);
           const progressText = Number.isFinite(progress) ? `${progress.toFixed(1)}%` : "待更新";
           const labels = Array.isArray(candidate.categoryLabels)
             ? candidate.categoryLabels.slice(0, 2)
@@ -324,39 +335,46 @@ function renderCandidates() {
           const category = labels
             .map((label) => `<span class="meta-pill">${escapeHtml(label)}</span>`)
             .join("");
-          const quoteStatus = candidate.tradable === false
-            ? {
-                RECONNECTING: "行情重连中",
-                DISCONNECTED: "行情已断开",
-                NOT_READY: "行情加载中",
-                NO_BID: "暂无买盘",
-              }[candidate.quoteStatus] || "暂不可交易"
-            : "";
-          const quoteStatusMarkup = quoteStatus
-            ? `<span class="quote-status">${escapeHtml(quoteStatus)}</span>`
-            : "";
-          const buyLabel = candidate.tradable === false ? "上次可买" : "当前可买";
-          const sellLabel = candidate.tradable === false ? "上次可卖" : "当前可卖";
-          return `<article class="market-row${candidate.tradable === false ? " is-stale" : ""}">
+          const statusText = {
+            READY: event.locked ? "本轮已锁定" : "Winner已确定",
+            INCOMPLETE: "等待兄弟盘口",
+            NO_WINNER: event.locked ? "本轮已锁定·等待退出" : "暂无合格Winner",
+            LEGACY_CONFLICT: "旧仓冲突·仅退出",
+          }[event.status] || "等待评估";
+          const outcomeChips = (event.outcomes || [])
+            .slice(0, 4)
+            .map((outcome) => `<span class="outcome-chip${outcome.isWinner ? " is-winner" : ""}">${escapeHtml(`${outcome.marketQuestion || "结果"} · ${outcome.direction || "—"}`)}</span>`)
+            .join("");
+          const remainingOutcomeCount = Math.max(0, Number(event.tokenCount || 0) - 4);
+          const eventTitle = escapeHtml(event.eventTitle || candidate.eventTitle || "未命名事件");
+          const eventLink = event.marketUrl
+            ? `<a class="market-link" href="${escapeHtml(event.marketUrl)}" target="_blank" rel="noreferrer">${eventTitle}<span>↗</span></a>`
+            : `<span class="market-link">${eventTitle}</span>`;
+          const isReady = event.status === "READY" && event.winner;
+          const buyLabel = isReady ? "Winner可买" : "参考买价";
+          const sellLabel = isReady ? "Winner可卖" : "参考卖价";
+          return `<article class="market-row event-row${isReady ? "" : " is-stale"}">
             <div class="row-heading">
               <div class="market-copy">
-                ${marketTitleMarkup(candidate)}
-                <div class="market-meta">${category}<span>${escapeHtml(candidate.resultCount)}元市场</span>${quoteStatusMarkup}</div>
+                ${eventLink}
+                <div class="market-meta">${category}<span>${escapeHtml(event.resultCount)}元市场</span><span>${escapeHtml(event.eligibleTokenCount)}合格 / ${escapeHtml(event.tokenCount)} Token</span><span>${escapeHtml(event.marketCount)}市场</span><span class="event-status event-status-${escapeHtml(String(event.status).toLowerCase())}">${escapeHtml(statusText)}</span></div>
               </div>
-              <span class="market-outcome">${escapeHtml(candidate.direction || "—")}</span>
+              <span class="market-outcome">${event.winner ? `WIN ${escapeHtml(candidate.direction || "—")}` : "待定"}</span>
             </div>
+            <div class="event-winner-title"><span>${event.winner ? "当前 Winner" : "当前代表"}</span><strong>${escapeHtml(candidate.marketQuestion || candidate.direction || "暂无")}</strong></div>
             <div class="quote-grid candidate-quotes">
               <div><span>${buyLabel}</span><strong>${formatCents(candidate.executableBuyPrice)}</strong></div>
               <div><span>${sellLabel}</span><strong>${formatCents(candidate.bestBid)}</strong></div>
-              <div class="market-time"><span>开始</span><strong>${formatDate(candidate.openedAt)}</strong></div>
-              <div class="market-time"><span>结束</span><strong>${formatDate(candidate.endsAt)}</strong></div>
+              <div class="market-time"><span>开始</span><strong>${formatDate(event.openedAt)}</strong></div>
+              <div class="market-time"><span>结束</span><strong>${formatDate(event.endsAt)}</strong></div>
             </div>
+            <div class="event-outcomes">${outcomeChips}${remainingOutcomeCount > 0 ? `<span class="outcome-chip">+${remainingOutcomeCount}</span>` : ""}</div>
             <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
-            ${progressMarkup(candidate.progressPercent, "市场生命周期")}
+            ${progressMarkup(event.progressPercent, "市场生命周期")}
           </article>`;
         })
         .join("")
-    : '<p class="empty-state">当前没有符合配置且可立即买入的市场</p>';
+    : '<p class="empty-state">当前没有符合配置的事件</p>';
 }
 
 function renderScanStatus(status) {
@@ -376,7 +394,7 @@ function renderScanStatus(status) {
     if (diagnostics?.phase === "ORDER_BOOKS") {
       element.textContent = `盘口 ${formatCount(diagnostics.orderBookCount)} / ${formatCount(diagnostics.orderBookTargetTokenCount)} · 保留 ${formatCount(status.displayCandidateCount)}`;
     } else {
-      element.textContent = `扫描事件 ${formatCount(diagnostics?.eventCount)} · 保留 ${formatCount(status.displayCandidateCount)}`;
+      element.textContent = `扫描事件 ${formatCount(diagnostics?.eventCount)} · 保留事件 ${formatCount(status.displayEventCount ?? status.displayCandidateCount)}`;
     }
     return;
   }
@@ -388,7 +406,7 @@ function renderScanStatus(status) {
   }
 
   if (status?.lastScanAt) {
-    element.textContent = `扫描完成 · 监控 ${formatCount(diagnostics?.monitoredTokenCount)} · 可交易 ${formatCount(status.candidateCount)}`;
+    element.textContent = `扫描完成 · 监控 ${formatCount(status.tokenCount ?? diagnostics?.monitoredTokenCount)} Token · 可交易 ${formatCount(status.eventCount ?? status.candidateCount)} 个事件`;
     return;
   }
   element.textContent = "等待首次扫描";
@@ -428,8 +446,9 @@ function renderCategories(preferences) {
 
 function renderPreferences(preferences, strategy, force = false) {
   if (ui.configDirty && !force) return;
-  $("#binary-market").checked = preferences.resultCounts.includes(2);
-  $("#ternary-market").checked = preferences.resultCounts.includes(3);
+  $("#binary-market").checked = preferences.marketTypes.includes("BINARY");
+  $("#ternary-market").checked = preferences.marketTypes.includes("TERNARY");
+  $("#multi-market").checked = preferences.marketTypes.includes("MULTI");
   $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
   $("#bid-ask-ratio").value = String(preferences.minBidAskRatioPercent);
   $("#bid-ask-ratio-value").textContent = String(preferences.minBidAskRatioPercent);
@@ -465,10 +484,10 @@ function applyDashboard(dashboard) {
   ui.dashboard = dashboard;
   ui.preferences = dashboard.preferences;
   ui.strategyStatus = dashboard.strategy.status;
-  ui.candidates = dashboard.marketScan.candidates ?? [];
-  ui.candidateCount = dashboard.marketScan.candidateCount ?? ui.candidates.length;
-  ui.displayCandidateCount = dashboard.marketScan.displayCandidateCount ?? ui.candidates.length;
-  ui.staleCandidateCount = dashboard.marketScan.staleCandidateCount ?? 0;
+  ui.events = dashboard.marketScan.events ?? [];
+  ui.candidateCount = dashboard.marketScan.eventCount ?? dashboard.marketScan.candidateCount ?? ui.events.length;
+  ui.displayCandidateCount = dashboard.marketScan.displayEventCount ?? dashboard.marketScan.displayCandidateCount ?? ui.events.length;
+  ui.staleCandidateCount = dashboard.marketScan.pendingEventCount ?? dashboard.marketScan.staleCandidateCount ?? 0;
   renderRunControls();
   renderPortfolio(dashboard.portfolio, dashboard.positions);
   renderPositions(dashboard.positions);
@@ -510,10 +529,11 @@ function selectedCategoriesFromForm() {
 }
 
 function collectConfigPayload() {
-  const resultCounts = [];
-  if ($("#binary-market").checked) resultCounts.push(2);
-  if ($("#ternary-market").checked) resultCounts.push(3);
-  if (resultCounts.length === 0) throw new Error("请至少选择一种市场类型");
+  const marketTypes = [];
+  if ($("#binary-market").checked) marketTypes.push("BINARY");
+  if ($("#ternary-market").checked) marketTypes.push("TERNARY");
+  if ($("#multi-market").checked) marketTypes.push("MULTI");
+  if (marketTypes.length === 0) throw new Error("请至少选择一种市场类型");
 
   const allCategories = $("#all-categories").checked;
   const selectedCategoryIds = selectedCategoriesFromForm();
@@ -541,8 +561,8 @@ function collectConfigPayload() {
     throw new Error("最短市场总时长不能超过最长市场总时长");
   }
   if (!Number.isFinite(initialCapital) || initialCapital <= 0) throw new Error("总模拟资金必须大于0");
-  if (!Number.isFinite(orderAmount) || orderAmount <= 0) throw new Error("每单使用金额必须大于0");
-  if (orderAmount > initialCapital) throw new Error("每单使用金额不能超过总模拟资金");
+  if (!Number.isFinite(orderAmount) || orderAmount <= 0) throw new Error("每 Event 每轮金额必须大于0");
+  if (orderAmount > initialCapital) throw new Error("每 Event 每轮金额不能超过总模拟资金");
   if (!Number.isInteger(minBidAskRatioPercent) || minBidAskRatioPercent < 1 || minBidAskRatioPercent > 100) {
     throw new Error("最低买卖盘比例必须是1至100之间的整数");
   }
@@ -551,7 +571,7 @@ function collectConfigPayload() {
   }
 
   return {
-    resultCounts,
+    marketTypes,
     allCategories,
     selectedCategoryIds,
     maxBuyPriceCents,
@@ -567,7 +587,7 @@ function collectConfigPayload() {
 
 function savedPreferencePayload(overrides = {}) {
   return {
-    resultCounts: ui.preferences.resultCounts,
+    marketTypes: ui.preferences.marketTypes,
     allCategories: ui.preferences.allCategories,
     selectedCategoryIds: ui.preferences.selectedCategoryIds ?? ui.preferences.selectedCategories,
     maxBuyPriceCents: ui.preferences.maxBuyPriceCents,
@@ -691,7 +711,7 @@ $("#reset-test").addEventListener("click", async () => {
     return;
   }
   if (!window.confirm("重置会彻底清空TEST资金、订单、成交、持仓、盈亏、结算和配置。此操作无法恢复，继续吗？")) return;
-  if (!window.confirm("最后确认：确定将TEST恢复为100U总资金、每单1U和默认筛选条件吗？")) return;
+  if (!window.confirm("最后确认：确定将TEST恢复为100U总资金、每 Event 每轮1U和默认筛选条件吗？")) return;
   const button = $("#reset-test");
   ui.controlPending = true;
   setButtonPending(button, true, "重置中");

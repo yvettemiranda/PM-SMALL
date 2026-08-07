@@ -1,7 +1,12 @@
 import type { AppConfig } from "../config.js";
 import {
+  normalizeMarketTypes,
+  type MarketType,
+} from "../domain/market-type.js";
+import {
   currentMarketProgressPercent,
   isMarketEligible,
+  staticMarketEligibilityRejectionReason,
   type MarketEligibilityCandidate,
   type MarketEligibilitySettings,
 } from "../domain/market-eligibility.js";
@@ -16,10 +21,8 @@ import type { PaperDatabase } from "../infrastructure/db/database.js";
 const MIN_MARKET_DURATION_DAYS = 1;
 const MAX_MARKET_DURATION_DAYS = 365;
 
-export type PaperMarketResultCount = 2 | 3;
-
 export type PaperTradingPreferencesSnapshot = {
-  resultCounts: PaperMarketResultCount[];
+  marketTypes: MarketType[];
   allCategories: boolean;
   selectedCategories: string[];
   candidateSortDirection: CandidateSortDirection;
@@ -35,7 +38,7 @@ export type PaperTradingPreferencesSnapshot = {
 
 type MarketFilterUpdate = Pick<
   PaperTradingPreferencesSnapshot,
-  "resultCounts" | "maxBuyPriceMicros" | "maxMarketDurationDays"
+  "marketTypes" | "maxBuyPriceMicros" | "maxMarketDurationDays"
 > & {
   minMarketDurationDays?: number;
   allCategories?: boolean;
@@ -48,7 +51,7 @@ type MarketFilterUpdate = Pick<
 
 type NormalizedMarketFilters = Pick<
   PaperTradingPreferencesSnapshot,
-  | "resultCounts"
+  | "marketTypes"
   | "maxBuyPriceMicros"
   | "minBidAskRatioPercent"
   | "minMarketDurationDays"
@@ -78,7 +81,7 @@ export class PaperTradingPreferencesService {
     this.defaultInitialCapitalMicros = config.initialCapitalMicros;
     this.minBuyPriceMicros = config.minBuyPriceMicros;
     this.defaults = {
-      resultCounts: [2, 3],
+      marketTypes: ["BINARY", "TERNARY"],
       allCategories: true,
       selectedCategories: [],
       candidateSortDirection: "ASC",
@@ -98,7 +101,7 @@ export class PaperTradingPreferencesService {
   public getSnapshot(): PaperTradingPreferencesSnapshot {
     return {
       ...this.snapshot,
-      resultCounts: [...this.snapshot.resultCounts],
+      marketTypes: [...this.snapshot.marketTypes],
       selectedCategories: [...this.snapshot.selectedCategories],
     };
   }
@@ -117,7 +120,7 @@ export class PaperTradingPreferencesService {
 
   public getMarketScanPreferences(): MarketScanPreferences {
     return {
-      resultCounts: [...this.snapshot.resultCounts],
+      marketTypes: [...this.snapshot.marketTypes],
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
       minBuyPriceMicros: this.minBuyPriceMicros,
       minBidAskRatioPercent: this.snapshot.minBidAskRatioPercent,
@@ -143,6 +146,27 @@ export class PaperTradingPreferencesService {
     return toEligibilitySettings(this.snapshot, this.minBuyPriceMicros);
   }
 
+  public getCandidateSortDirection(): CandidateSortDirection {
+    return this.snapshot.candidateSortDirection;
+  }
+
+  public getStateVersion(): string {
+    return JSON.stringify(this.snapshot);
+  }
+
+  public candidateMatchesStaticFilters(
+    candidate: TradeCandidate,
+    now?: Date,
+  ): boolean {
+    return (
+      staticMarketEligibilityRejectionReason(
+        candidate,
+        this.getEligibilitySettings(),
+        now,
+      ) === null
+    );
+  }
+
   public getOrderedCandidates(
     candidates: readonly TradeCandidate[],
     now: Date = new Date(),
@@ -163,10 +187,10 @@ export class PaperTradingPreferencesService {
   public updateMarketFilters(
     update: MarketFilterUpdate,
   ): PaperMarketFilterUpdateResult {
-    const resultCounts = normalizeResultCounts(update.resultCounts);
+    const marketTypes = normalizeSelectedMarketTypes(update.marketTypes);
 
     const normalizedUpdate: NormalizedMarketFilters = {
-      resultCounts,
+      marketTypes,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
       minBidAskRatioPercent:
         update.minBidAskRatioPercent ?? this.snapshot.minBidAskRatioPercent,
@@ -189,7 +213,7 @@ export class PaperTradingPreferencesService {
       normalizedUpdate.orderBudgetMicros >
       this.database.getStrategyState().initialCapitalMicros
     ) {
-      throw new Error("Per-order TEST amount cannot exceed total TEST capital");
+      throw new Error("Per-Event cycle TEST amount cannot exceed total TEST capital");
     }
     const result = this.database.updatePaperTradingPreferences(
       {
@@ -271,7 +295,7 @@ function toEligibilitySettings(
   minBuyPriceMicros: number,
 ): MarketEligibilitySettings {
   return {
-    resultCounts: filters.resultCounts,
+    marketTypes: filters.marketTypes,
     allCategories: filters.allCategories,
     selectedCategoryIds: filters.selectedCategories,
     minBuyPriceMicros,
@@ -335,19 +359,19 @@ function validateMarketFilterValues(
     throw new Error("Maximum market progress must be an integer from 1 to 100 percent");
   }
   if (!Number.isSafeInteger(values.orderBudgetMicros) || values.orderBudgetMicros <= 0) {
-    throw new Error("Per-order TEST amount must be positive");
+    throw new Error("Per-Event cycle TEST amount must be positive");
   }
 }
 
-function normalizeResultCounts(
-  resultCounts: readonly PaperMarketResultCount[],
-): PaperMarketResultCount[] {
-  const normalized = Array.from(new Set(resultCounts)).sort();
+function normalizeSelectedMarketTypes(
+  marketTypes: readonly MarketType[],
+): MarketType[] {
+  const normalized = normalizeMarketTypes(marketTypes);
   if (normalized.length === 0) {
     throw new Error("Select at least one TEST market type");
   }
-  if (normalized.some((resultCount) => resultCount !== 2 && resultCount !== 3)) {
-    throw new Error("TEST market types may only contain binary or ternary events");
+  if (normalized.length !== new Set(marketTypes).size) {
+    throw new Error("TEST market types contain an unsupported value");
   }
   return normalized;
 }

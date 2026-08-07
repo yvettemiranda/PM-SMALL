@@ -235,7 +235,7 @@ describe("PaperDatabase paper settlement", () => {
     expect(database.getPaperSettlement(target.conditionId)).toBeNull();
   });
 
-  it("does not use a position from another condition when finding settlement targets", () => {
+  it("rejects reusing a locked Token identity for another condition", () => {
     const sharedToken = "shared-token";
     const first = makeCandidate({
       tokenId: sharedToken,
@@ -262,15 +262,9 @@ describe("PaperDatabase paper settlement", () => {
     });
     database.setStrategyStatus("STOPPED");
     database.setStrategyStatus("RUNNING");
-    database.placePaperBuy(second, 100_000_000);
-    database.setStrategyStatus("STOPPED");
-
-    const targets = database.listPaperSettlementTargets(
-      new Date("2026-01-01T00:00:00.000Z"),
+    expect(() => database.placePaperBuy(second, 100_000_000)).toThrow(
+      /Event is locked to another token/,
     );
-    expect(targets).toEqual([
-      expect.objectContaining({ conditionId: "condition-a" }),
-    ]);
   });
 
   it("simulates winning redemption, cancels remaining orders, and is idempotent", () => {
@@ -428,6 +422,51 @@ describe("PaperDatabase paper settlement", () => {
     expect(database.recoverPaperState()).toMatchObject({ passed: true });
   });
 
+  it("releases only the settled Condition cycle so an open sibling can start later", () => {
+    const active = makeCandidate({
+      eventId: "multi-result-event",
+      tokenId: "settled-token",
+      candidateId: "settled-token:20000",
+      conditionId: "settled-condition",
+      marketId: "settled-market",
+      queueAheadSizeMicros: 0,
+    });
+    const buy = database.placePaperBuy(active, 100_000_000);
+    database.applyPaperTrade({
+      orderId: buy.id,
+      sourceTradeId: "settled-condition-fill",
+      tradePriceMicros: buy.priceMicros,
+      tradeSizeMicros: buy.originalSizeMicros,
+      dataComplete: true,
+    });
+    database.applyPaperSettlement({
+      target: {
+        conditionId: active.conditionId,
+        marketId: active.marketId,
+        eventId: active.eventId,
+      },
+      closed: true,
+      resolutionStatus: "resolved",
+      winningTokenId: "losing-opposite-token",
+      winningOutcome: "No",
+    });
+
+    expect(database.getPaperEventLock(active.eventId)).toBeNull();
+    const sibling = makeCandidate({
+      eventId: active.eventId,
+      tokenId: "open-sibling-token",
+      candidateId: "open-sibling-token:20000",
+      conditionId: "open-sibling-condition",
+      marketId: "open-sibling-market",
+    });
+    expect(database.placePaperBuy(sibling, 100_000_000)).toMatchObject({
+      eventId: active.eventId,
+      tokenId: sibling.tokenId,
+      conditionId: sibling.conditionId,
+      status: "OPEN",
+    });
+  });
+
   it("simulates proportional recovery for an official 50/50 result", () => {
     const yesCandidate = makeCandidate({
       openedAt: "2026-01-01T00:00:00.000Z",
@@ -477,14 +516,14 @@ describe("PaperDatabase paper settlement", () => {
     expect(result.settlement).toMatchObject({
       outcome: "WIN",
       redemptionStatus: "SIMULATED",
-      payoutMicros: 2_000_000,
-      realizedPnlMicros: 1_920_000,
+      payoutMicros: 1_000_000,
+      realizedPnlMicros: 960_000,
     });
     expect(database.getStrategyState()).toMatchObject({
-      availableCashMicros: 101_920_000,
+      availableCashMicros: 100_960_000,
       reservedCashMicros: 0,
       positionCostMicros: 0,
-      realizedPnlMicros: 1_920_000,
+      realizedPnlMicros: 960_000,
     });
     expect(database.recoverPaperState()).toMatchObject({ passed: true });
   });
