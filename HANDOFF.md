@@ -6,9 +6,9 @@
 
 PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“任意标准多元、Event 仲裁与 Event 周期锁”的 Schema 15 架构升级。标准 Event 统一支持安全整数 `resultCount >= 2`；增强型负风险 Event 继续排除。交易、订单、Fill、Position 和 Condition 结算仍以 Token/Market 为底层单位，候选择优、单轮资金上限和同 Event 互斥提升到 Event 级。
 
-本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、276 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动 TEST、接钱包、签名、提交真实订单或执行链上操作。
+本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、276 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
 
-当前正在同步 GitHub `main` 和 Linux 服务器。同步完成前，固定本地/远端基线仍为 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`；服务器仍为旧运行时代码 `ff8b5bc9010261a349f27d7640c17789896f38d0`、Schema 14，并应保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；本地未推送内容或服务器临时状态不算正式进度。
+运行时代码提交 `cb1472c90039ed72e9038821434cf22b45153f43` 已推送 GitHub `main` 并部署到 Linux，服务器数据库已原子升级到 Schema 15。容器重启恢复、账本验证、SQLite 完整性、端口、HTTP→HTTPS、未认证 401、认证后 200 均通过；最终保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；服务器仓库在本交接记录提交后也必须以 `git pull --ff-only` 同步到最新 `main`，但无需因纯文档提交重建运行镜像。
 
 ## 当前扫描与执行规则
 
@@ -62,11 +62,18 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 迁移前后必须核对 schema、策略状态、资金、订单、fills、仓位、结算和盘口消费计数；部署后复核容器、端口、HTTPS/认证、状态与 `/api/test/validation`，并做同库重启恢复。
 - 本轮只允许部署 GitHub `main` 的同一 SHA 和 Schema 15，最终状态必须为 `TEST + LIVE_DISABLED + PAUSED`。不得调用 `/api/test/start`，不得把 PAUSED 下的发现层冒烟记为正式长期 TEST。
 
+## 本轮服务器交付证据
+
+- 本轮任何写操作前的实际服务器盘点为：旧代码 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`、Schema 14、`TEST + LIVE_DISABLED + PAUSED`、初始/可用资金均为 100U，订单、Fill、持仓、结算和盘口消费均为 0。该状态与旧交接所记 1000U 和历史账本不一致，但不是本轮重置造成；本轮没有删除或改写旧备份。
+- 停止 `bot` 后创建 `/home/ubuntu/pm-small-backup-20260807T161243Z`，包含 `data/`、`.env` 和 `docker-compose.yml`；`SHA256SUMS` 全部通过，在隔离可写副本上确认 `integrity_check=ok`、Schema 14 与上述六类计数均为 0。更早的备份全部保留。
+- 服务器以 `git pull --ff-only` 更新到运行时代码 `cb1472c90039ed72e9038821434cf22b45153f43`，重建并启动 `bot`。迁移后及同库重启后均为 Schema 15、Event 锁 0、订单/Fill/持仓/结算/盘口消费 0、资金 100U、验证 `ok`；迁移和恢复审计已写入。
+- Docker 容器最终为 `healthy`，3000 仅绑定 `127.0.0.1`；Nginx 只在 80/443 对外。公网脚本确认 HTTP 跳转 HTTPS、未认证 401、认证后首页 200、页面为 `TEST + LIVE_DISABLED + PAUSED`，TEST 验证和 SQLite 完整性均通过。
+- 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
+
 ## 尚未完成
 
-- GitHub 与服务器本轮 Schema 15 同步及其部署证据回填。
 - 与用户共同制定并由用户确认的正式长期 TEST 验证计划及执行。
-- 服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核。
+- 旧交接所记 1000U/历史账本与本轮部署前实际空账本 100U 的状态变化来源，以及服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核。
 - 长期接口限流、全量扫描耗时、WebSocket 容量/断线、服务器资源和公开行情成交样本验收。
 - 钱包、签名、LIVE 下单/撤单/对账和链上赎回；这些仍明确禁止。
 
