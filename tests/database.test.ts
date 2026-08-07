@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
-import { makeCandidate } from "./helpers.js";
+import { makeCandidate, testEligibilitySettings } from "./helpers.js";
 
 describe("PaperDatabase", () => {
   let database: PaperDatabase;
@@ -192,10 +192,78 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 12 });
+        ).toEqual({ version: 13 });
       } finally {
         schemaVersion.close();
       }
+    } finally {
+      upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes legacy fully spent FAK buys when upgrading to schema 13", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-fak-invariant-upgrade-"));
+    const databasePath = join(directory, "paper.db");
+    const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
+    const now = Date.now();
+    const candidate = makeCandidate({
+      openedAt: new Date(now - 86_400_000).toISOString(),
+      endsAt: new Date(now + 9 * 86_400_000).toISOString(),
+      durationDays: 10,
+      progressPercent: 10,
+      bestBidMicros: 10_000,
+      bestAskMicros: 20_000,
+    });
+    currentDatabase.setStrategyStatus("RUNNING");
+    const executed = currentDatabase.executeTestFakBuy({
+      candidate,
+      book: {
+        tokenId: candidate.tokenId,
+        conditionId: candidate.conditionId,
+        bookVersion: "SCHEMA-13-LEGACY-BOOK",
+        bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+        asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        tickSizeMicros: 10_000,
+        isNegativeRisk: false,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+    expect(executed.order).toMatchObject({
+      status: "FILLED",
+      originalSizeMicros: 50_000_000,
+      filledSizeMicros: 50_000_000,
+    });
+    currentDatabase.close();
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase
+        .prepare(
+          "UPDATE paper_orders SET original_size_micros = filled_size_micros + 1000000 WHERE id = ?",
+        )
+        .run(executed.order?.id);
+      rawDatabase.exec("DELETE FROM schema_migrations WHERE version = 13;");
+    } finally {
+      rawDatabase.close();
+    }
+
+    const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(
+        upgradedDatabase.listPaperOrders().find((order) => order.id === executed.order?.id),
+      ).toMatchObject({
+        status: "FILLED",
+        originalSizeMicros: 50_000_000,
+        filledSizeMicros: 50_000_000,
+      });
+      expect(upgradedDatabase.getStrategyState().status).toBe("PAUSED");
+      expect(upgradedDatabase.validatePaperState()).toMatchObject({ passed: true });
     } finally {
       upgradedDatabase.close();
       rmSync(directory, { recursive: true, force: true });
