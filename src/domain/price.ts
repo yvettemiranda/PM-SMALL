@@ -52,7 +52,7 @@ export function calculateFixedSellPriceMicros(
   return roundUpToTick(Math.max(plusOneCent, fiftyPercentProfit), tickMicros);
 }
 
-function bestBid(bids: BookLevel[]): BookLevel | null {
+export function bestBidLevel(bids: readonly BookLevel[]): BookLevel | null {
   return bids.reduce<BookLevel | null>(
     (best, level) =>
       level.sizeMicros > 0 &&
@@ -65,7 +65,7 @@ function bestBid(bids: BookLevel[]): BookLevel | null {
   );
 }
 
-function bestAsk(asks: BookLevel[]): BookLevel | null {
+export function bestAskLevel(asks: readonly BookLevel[]): BookLevel | null {
   return asks.reduce<BookLevel | null>(
     (best, level) =>
       level.sizeMicros > 0 &&
@@ -80,14 +80,16 @@ function bestAsk(asks: BookLevel[]): BookLevel | null {
 
 export function buildMonitoredCandidate(
   token: MarketToken,
-  book: TokenOrderBook,
+  book: TokenOrderBook | null,
   orderBudgetMicros: number,
-): TradeCandidate | null {
-  if (book.minOrderSizeMicros <= 0 || book.tickSizeMicros <= 0) {
-    return null;
-  }
-  const bid = bestBid(book.bids);
-  const ask = bestAsk(book.asks);
+): TradeCandidate {
+  const minOrderSizeMicros =
+    book?.minOrderSizeMicros ?? token.minOrderSizeMicros;
+  const tickSizeMicros = book?.tickSizeMicros ?? token.tickSizeMicros;
+  const bookReady =
+    book !== null && minOrderSizeMicros > 0 && tickSizeMicros > 0;
+  const bid = bookReady ? bestBidLevel(book.bids) : null;
+  const ask = bookReady ? bestAskLevel(book.asks) : null;
   const executableBuyPriceMicros = ask?.priceMicros ?? 0;
   const orderSizeMicros =
     executableBuyPriceMicros === 0
@@ -97,6 +99,7 @@ export function buildMonitoredCandidate(
   return {
     ...token,
     candidateId: token.tokenId,
+    bookReady,
     bestBidMicros: bid?.priceMicros ?? null,
     bestAskMicros: ask?.priceMicros ?? null,
     executableBuyPriceMicros,
@@ -108,12 +111,12 @@ export function buildMonitoredCandidate(
         ? 0
         : calculateFixedSellPriceMicros(
             executableBuyPriceMicros,
-            book.tickSizeMicros,
+            tickSizeMicros,
           ),
     orderSizeMicros,
     queueAheadSizeMicros: 0,
-    minOrderSizeMicros: book.minOrderSizeMicros,
-    tickSizeMicros: book.tickSizeMicros,
+    minOrderSizeMicros,
+    tickSizeMicros,
   };
 }
 
@@ -127,7 +130,7 @@ export function buildTradeCandidate(
   const candidate = buildMonitoredCandidate(token, book, orderBudgetMicros);
 
   if (
-    candidate === null ||
+    !candidate.bookReady ||
     candidate.bestAskMicros === null ||
     candidate.bestAskMicros < minBuyPriceMicros ||
     candidate.bestAskMicros > maxBuyPriceMicros ||

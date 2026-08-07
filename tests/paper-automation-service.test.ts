@@ -7,7 +7,11 @@ import type {
 } from "../src/services/market-stream-service.js";
 import { PaperAutomationService } from "../src/services/paper-automation-service.js";
 import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
-import { makeCandidate, testConfig } from "./helpers.js";
+import {
+  makeCandidate,
+  testConfig,
+  testEligibilitySettings,
+} from "./helpers.js";
 import type { BookLevel, TokenOrderBook, TradeCandidate } from "../src/domain/types.js";
 
 class FakeMarketRuntime implements PaperMarketRuntime {
@@ -17,7 +21,7 @@ class FakeMarketRuntime implements PaperMarketRuntime {
   public asks: BookLevel[] | null = null;
   public consumeLiquidity = false;
   public bids: BookLevel[] = [
-    { priceMicros: 10_000, sizeMicros: 100_000_000 },
+    { priceMicros: 20_000, sizeMicros: 100_000_000 },
   ];
   public executeTargetSellsForToken: ((tokenId: string) => void) | null = null;
 
@@ -55,6 +59,7 @@ class FakeMarketRuntime implements PaperMarketRuntime {
     return {
       tokenId: candidate.tokenId,
       conditionId: candidate.conditionId,
+      bookVersion: `FAKE-BOOK-${this.bookRevision}`,
       bids: this.bids.map((level) => ({ ...level })),
       asks:
         this.asks?.map((level) => ({ ...level })) ??
@@ -160,6 +165,7 @@ describe("PaperAutomationService", () => {
     marketStream.executeTargetSellsForToken = (tokenId) => {
       database.executeTestFakSells({
         tokenId,
+        bookVersion: `FAKE-BOOK-${marketStream.bookRevision}`,
         bids: marketStream.bids,
         minOrderSizeMicros: candidate.minOrderSizeMicros,
         feeRateMicros: candidate.feeRateMicros,
@@ -359,6 +365,107 @@ describe("PaperAutomationService", () => {
     expect(database.listPaperPositions()[0]?.cycleSpendMicros).toBe(1_000_000);
   });
 
+  it("retries the same book after another position releases enough cash", async () => {
+    const database = new PaperDatabase(":memory:", 2_000_000);
+    database.setStrategyStatus("RUNNING");
+    const buyDirectly = (
+      candidate: TradeCandidate,
+      bookVersion: string,
+      askSizeMicros: number,
+    ) =>
+      database.executeTestFakBuy({
+        candidate,
+        book: {
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion,
+          bids: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
+          asks: [{ priceMicros: 20_000, sizeMicros: askSizeMicros }],
+          minOrderSizeMicros: candidate.minOrderSizeMicros,
+          tickSizeMicros: candidate.tickSizeMicros,
+          isNegativeRisk: candidate.isNegativeRisk,
+        },
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        feeRateMicros: 0,
+        feeExponent: 1,
+        eligibility: testEligibilitySettings(),
+      });
+    const committed = makeCurrentCandidate({
+      candidateId: "committed-token",
+      tokenId: "committed-token",
+      conditionId: "committed-condition",
+      marketId: "committed-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const releasable = makeCurrentCandidate({
+      candidateId: "releasable-token",
+      tokenId: "releasable-token",
+      conditionId: "releasable-condition",
+      marketId: "releasable-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    expect(buyDirectly(committed, "COMMITTED", 50_000_000).spentMicros).toBe(
+      1_000_000,
+    );
+    expect(buyDirectly(releasable, "RELEASABLE", 10_000_000).spentMicros).toBe(
+      200_000,
+    );
+    expect(database.getStrategyState().availableCashMicros).toBe(800_000);
+
+    const candidate = makeCurrentCandidate({
+      candidateId: "waiting-token",
+      tokenId: "waiting-token",
+      conditionId: "waiting-condition",
+      marketId: "waiting-market",
+      bestAskMicros: 20_000,
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [candidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const marketStream = new FakeMarketRuntime();
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+    expect(
+      database
+        .listPaperPositions()
+        .find((position) => position.tokenId === candidate.tokenId),
+    ).toBeUndefined();
+
+    database.executeTestFakSells({
+      tokenId: releasable.tokenId,
+      bookVersion: "RELEASABLE-SELL",
+      bids: [{ priceMicros: 30_000, sizeMicros: 10_000_000 }],
+      minOrderSizeMicros: releasable.minOrderSizeMicros,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+    expect(database.getStrategyState().availableCashMicros).toBe(1_100_000);
+    automation.requestRun();
+
+    await waitFor(() =>
+      database
+        .listPaperPositions()
+        .some((position) => position.tokenId === candidate.tokenId),
+    );
+  });
+
   it("does not place automatic buys for a token excluded in the TEST UI", async () => {
     const candidates = new CandidateService(
       { scan: async () => [makeCurrentCandidate()] },
@@ -382,7 +489,7 @@ describe("PaperAutomationService", () => {
     expect(database.listPaperOrders()).toHaveLength(0);
   });
 
-  it("does not use lifecycle progress as a hidden buy eligibility cut-off", async () => {
+  it("does not buy after the saved lifecycle progress limit", async () => {
     const now = Date.now();
     const candidate = makeCandidate({
       openedAt: new Date(now - 9.9 * 86_400_000).toISOString(),
@@ -413,9 +520,7 @@ describe("PaperAutomationService", () => {
     automation.start();
     await waitFor(() => automation.getStatus().lastRunAt !== null);
 
-    expect(database.listPaperPositions()).toEqual([
-      expect.objectContaining({ tokenId: candidate.tokenId, quantityMicros: expect.any(Number) }),
-    ]);
+    expect(database.listPaperPositions()).toEqual([]);
   });
 
   it("cancels an existing buy whose total duration is less than one day", async () => {

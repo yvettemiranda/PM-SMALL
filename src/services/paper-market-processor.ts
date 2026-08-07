@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   BookLevel,
   MarketBookSnapshot,
@@ -17,6 +18,8 @@ type BookState = {
   asks: Map<number, number>;
   snapshotTimestampMs: number | null;
   revision: number;
+  bidExternalVersion: string;
+  askExternalVersion: string;
 };
 
 export type PaperMarketProcessorStatus = {
@@ -118,13 +121,11 @@ export class PaperMarketProcessor {
   }
 
   public consumeTestBuyLiquidity(
-    tokenId: string,
-    consumedAsks: readonly BookLevel[],
+    _tokenId: string,
+    _consumedAsks: readonly BookLevel[],
   ): void {
-    const book = this.books.get(tokenId);
-    if (book !== undefined && this.readyTokens.has(tokenId)) {
-      consumeBookLevels(book.asks, consumedAsks);
-    }
+    // TEST depth consumption is persisted by book version in SQLite. Keep the
+    // streamed book as the external source of truth for quotes and recovery.
   }
 
   public getOrderBook(candidate: TradeCandidate): TokenOrderBook | null {
@@ -138,6 +139,7 @@ export class PaperMarketProcessor {
     return {
       tokenId: candidate.tokenId,
       conditionId: candidate.conditionId,
+      bookVersion: book.askExternalVersion,
       bids: mapToLevels(book.bids),
       asks: mapToLevels(book.asks),
       minOrderSizeMicros: candidate.minOrderSizeMicros,
@@ -160,11 +162,15 @@ export class PaperMarketProcessor {
 
   private handleBook(event: MarketBookSnapshot): void {
     const requiresRebase = !this.readyTokens.has(event.tokenId);
+    const bids = levelsToMap(event.bids);
+    const asks = levelsToMap(event.asks);
     this.books.set(event.tokenId, {
-      bids: levelsToMap(event.bids),
-      asks: levelsToMap(event.asks),
+      bids,
+      asks,
       snapshotTimestampMs: event.timestampMs,
       revision: ++this.bookRevisionCounter,
+      bidExternalVersion: snapshotVersion("BID", mapToLevels(bids)),
+      askExternalVersion: snapshotVersion("ASK", mapToLevels(asks)),
     });
     if (requiresRebase) {
       this.database.rebaseActivePaperOrderQueues(
@@ -184,12 +190,28 @@ export class PaperMarketProcessor {
     }
 
     const levels = event.side === "BUY" ? book.bids : book.asks;
+    const previousSizeMicros = levels.get(event.priceMicros) ?? 0;
+    if (previousSizeMicros === event.sizeMicros) {
+      this.executeTargetSells(event.tokenId);
+      return;
+    }
     if (event.sizeMicros === 0) {
       levels.delete(event.priceMicros);
     } else {
       levels.set(event.priceMicros, event.sizeMicros);
     }
     book.revision = ++this.bookRevisionCounter;
+    if (event.side === "BUY") {
+      book.bidExternalVersion = snapshotVersion(
+        "BID",
+        mapToLevels(book.bids),
+      );
+    } else {
+      book.askExternalVersion = snapshotVersion(
+        "ASK",
+        mapToLevels(book.asks),
+      );
+    }
     this.executeTargetSells(event.tokenId);
   }
 
@@ -251,12 +273,12 @@ export class PaperMarketProcessor {
     }
     const result = this.executor.executeTargetSells({
       tokenId,
+      bookVersion: book.bidExternalVersion,
       bids: mapToLevels(book.bids),
       minOrderSizeMicros: metadata.minOrderSizeMicros,
       feeRateMicros: metadata.feeRateMicros,
       feeExponent: metadata.feeExponent,
     });
-    consumeBookLevels(book.bids, result.consumedBids);
     this.paperSellFillCount += result.filledOrderCount;
   }
 
@@ -269,26 +291,31 @@ export class PaperMarketProcessor {
   }
 }
 
+function snapshotVersion(
+  side: "BID" | "ASK",
+  levels: readonly BookLevel[],
+): string {
+  const hash = createHash("sha256");
+  hash.update(side);
+  hash.update(JSON.stringify(canonicalLevels(levels)));
+  return `BOOK:${side}:${hash.digest("hex")}`;
+}
+
+function canonicalLevels(levels: readonly BookLevel[]): BookLevel[] {
+  return levels
+    .map((level) => ({ ...level }))
+    .sort(
+      (left, right) =>
+        left.priceMicros - right.priceMicros ||
+        left.sizeMicros - right.sizeMicros,
+    );
+}
+
 function mapToLevels(levels: ReadonlyMap<number, number>): BookLevel[] {
   return Array.from(levels, ([priceMicros, sizeMicros]) => ({
     priceMicros,
     sizeMicros,
   }));
-}
-
-function consumeBookLevels(
-  levels: Map<number, number>,
-  consumed: readonly BookLevel[],
-): void {
-  for (const fill of consumed) {
-    const available = levels.get(fill.priceMicros) ?? 0;
-    const remaining = Math.max(0, available - fill.sizeMicros);
-    if (remaining === 0) {
-      levels.delete(fill.priceMicros);
-    } else {
-      levels.set(fill.priceMicros, remaining);
-    }
-  }
 }
 
 function oppositeSide(side: PaperOrderSide): PaperOrderSide {

@@ -95,8 +95,14 @@ describe("MarketStreamService", () => {
 
     service.start();
     await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+    expect(service.getQuoteStatus("yes-token")).toBe("NO_BID");
     source.disconnectCurrent(new Error("test disconnect"));
+    await waitFor(() => service.getStatus().unexpectedDisconnectCount === 1);
+    expect(service.getQuoteStatus("yes-token")).toBe("RECONNECTING");
+    expect(candidates.getSnapshot().candidates[0]?.bookReady).toBe(false);
     await waitFor(() => service.getStatus().recoveryCount === 1);
+    expect(service.getQuoteStatus("yes-token")).toBe("NO_BID");
+    expect(candidates.getSnapshot().candidates[0]?.bookReady).toBe(true);
 
     expect(source.calls).toEqual([["yes-token"], ["yes-token"]]);
     expect(service.getStatus()).toMatchObject({
@@ -111,6 +117,46 @@ describe("MarketStreamService", () => {
       lastFullSnapshotDurationMs: expect.any(Number),
       lastRecoveryDurationMs: expect.any(Number),
     });
+  });
+
+  it("restores live quotes after a scan replaces candidates without changing subscriptions", async () => {
+    let scannedCandidate = makeCandidate();
+    const candidates = new CandidateService(
+      { scan: async () => [scannedCandidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const source = new ControllableDisconnectSource();
+    const service = new MarketStreamService(
+      source,
+      candidates,
+      database,
+      new PaperMarketProcessor(database),
+      5,
+    );
+    resources.push(database, service);
+
+    service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+    expect(candidates.getSnapshot().candidates[0]).toMatchObject({
+      bestBidMicros: null,
+      bestAskMicros: null,
+      bookReady: true,
+    });
+
+    scannedCandidate = makeCandidate({
+      bestBidMicros: 900_000,
+      bestAskMicros: 910_000,
+    });
+    await candidates.refresh();
+
+    expect(candidates.getSnapshot().candidates[0]).toMatchObject({
+      bestBidMicros: null,
+      bestAskMicros: null,
+      bookReady: true,
+    });
+    expect(source.calls).toEqual([["yes-token"]]);
   });
 
   it("restores a full snapshot after each repeated disconnect", async () => {

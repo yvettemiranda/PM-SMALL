@@ -4,6 +4,7 @@ import type {
   TokenOrderBook,
   TradeCandidate,
 } from "./types.js";
+import type { MarketEligibilitySettings } from "./market-eligibility.js";
 
 export type ExecutionMode = "TEST" | "LIVE";
 export type ImmediateBuyOutcome = "FILLED" | "PARTIAL" | "NO_FILL" | "BLOCKED";
@@ -26,6 +27,7 @@ export type ImmediateBuyIntent = {
   orderBudgetMicros: number;
   feeRateMicros: number;
   feeExponent: number;
+  eligibility: MarketEligibilitySettings;
 };
 
 export type ImmediateBuyExecution = {
@@ -39,6 +41,7 @@ export type ImmediateBuyExecution = {
 
 export type TargetSellIntent = {
   tokenId: string;
+  bookVersion: string;
   bids: readonly BookLevel[];
   minOrderSizeMicros: number;
   feeRateMicros: number;

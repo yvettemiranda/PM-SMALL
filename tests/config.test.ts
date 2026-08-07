@@ -8,8 +8,16 @@ describe("loadConfig", () => {
     expect(config.orderBudgetMicros).toBe(1_000_000);
     expect(config.minBuyPriceMicros).toBe(10_000);
     expect(config.maxBuyPriceMicros).toBe(30_000);
+    expect(config.minBidAskRatioPercent).toBe(50);
+    expect(config.maxMarketProgressPercent).toBe(20);
     expect(config.paperValidationIntervalMs).toBe(60_000);
     expect(config.scanEventPageSize).toBe(100);
+  });
+
+  it("keeps the minimum buy price fixed at one cent", () => {
+    expect(loadConfig({ MIN_BUY_PRICE: "0.001" }).minBuyPriceMicros).toBe(
+      10_000,
+    );
   });
 
   it("rejects a per-token budget above the total budget", () => {

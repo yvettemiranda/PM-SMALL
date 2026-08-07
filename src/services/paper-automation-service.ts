@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config.js";
 import type { TradingExecutionAdapter } from "../domain/execution.js";
 import type { TradeCandidate } from "../domain/types.js";
+import type { MarketEligibilitySettings } from "../domain/market-eligibility.js";
 import type {
   PaperDatabase,
   PaperRecoveryResult,
@@ -30,6 +31,7 @@ export interface PaperCandidateSelection {
   reconcileActiveBuys?(now?: Date): number;
   getMaxBuyPriceMicros?(): number;
   getOrderBudgetMicros?(): number;
+  getEligibilitySettings?(): MarketEligibilitySettings;
   getOrderedCandidates?(
     candidates: readonly TradeCandidate[],
     now?: Date,
@@ -167,8 +169,8 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       const cancelled =
         tokenIds === null ? this.database.cancelStartedGameBuys(now) : 0;
       this.cancelledStartedBuyCount += cancelled;
-      // Lifecycle progress is an ordering/display value only. Keep the
-      // compatibility counter, but never use progress to cancel or block buys.
+      // Filter reconciliation applies the saved lifecycle threshold to any
+      // legacy active buy orders before new FAK executions are considered.
       const cancelledProgressed = 0;
       this.cancelledProgressedBuyCount += cancelledProgressed;
       let placedThisRun = 0;
@@ -201,10 +203,11 @@ export class PaperAutomationService implements PaperAutomationRuntime {
           const orderBudgetMicros =
             this.candidateSelection?.getOrderBudgetMicros?.() ??
             this.config.orderBudgetMicros;
+          const strategyBeforeAttempt = this.database.getStrategyState();
           const buyIntentKey =
             bookRevision === null
               ? null
-              : `${bookRevision}:${maxPriceMicros}:${orderBudgetMicros}`;
+              : `${bookRevision}:${maxPriceMicros}:${orderBudgetMicros}:${strategyBeforeAttempt.availableCashMicros}:${strategyBeforeAttempt.updatedAt}`;
           if (
             buyIntentKey !== null &&
             this.attemptedBuyIntentByToken.get(candidate.tokenId) === buyIntentKey
@@ -222,6 +225,19 @@ export class PaperAutomationService implements PaperAutomationRuntime {
               orderBudgetMicros,
               feeRateMicros: candidate.feeRateMicros,
               feeExponent: candidate.feeExponent,
+              eligibility:
+                this.candidateSelection?.getEligibilitySettings?.() ?? {
+                  resultCounts: [2, 3],
+                  allCategories: true,
+                  selectedCategoryIds: [],
+                  minBuyPriceMicros: this.config.minBuyPriceMicros,
+                  maxBuyPriceMicros: maxPriceMicros,
+                  minBidAskRatioPercent: this.config.minBidAskRatioPercent,
+                  maxMarketDurationDays: this.config.maxMarketDurationDays,
+                  maxMarketProgressPercent:
+                    this.config.maxMarketProgressPercent,
+                  orderBudgetMicros,
+                },
             });
             if (execution.order !== null) {
               this.marketStream.consumeTestBuyLiquidity?.(
@@ -236,6 +252,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
             }
           } catch (error) {
             if (!isExpectedPlacementRejection(error)) {
+              this.attemptedBuyIntentByToken.delete(candidate.tokenId);
               throw error;
             }
           }

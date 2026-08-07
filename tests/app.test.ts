@@ -10,7 +10,7 @@ import type {
   PaperMarketRuntime,
 } from "../src/services/market-stream-service.js";
 import { PaperTradingPreferencesService } from "../src/services/paper-trading-preferences-service.js";
-import { makeCandidate, testConfig } from "./helpers.js";
+import { makeCandidate, testConfig, testEligibilitySettings } from "./helpers.js";
 
 describe("HTTP app", () => {
   const resources: Array<{ close: () => void | Promise<void> }> = [];
@@ -32,6 +32,7 @@ describe("HTTP app", () => {
       executionMode: "TEST",
       liveExecutionEnabled: false,
       strategy: { mode: "TEST", status: "PAUSED" },
+      capitalEditable: true,
     });
 
     const dashboard = await app.inject({
@@ -96,8 +97,20 @@ describe("HTTP app", () => {
 
   it("saves category, market, price, duration, ordering, capital, and order amount settings", async () => {
     const { app, candidates } = makeTestApp([
-      makeCurrentCandidate({ tokenId: "tech", category: "Tech" }),
-      makeCurrentCandidate({ tokenId: "sports", category: "Sports" }),
+      makeCurrentCandidate({
+        candidateId: "tech:30000",
+        tokenId: "tech",
+        category: "Tech",
+        categoryIds: ["tag-tech"],
+        categoryLabels: ["Technology"],
+      }),
+      makeCurrentCandidate({
+        candidateId: "sports:30000",
+        tokenId: "sports",
+        category: "Sports",
+        categoryIds: ["tag-sports"],
+        categoryLabels: ["Sports"],
+      }),
     ]);
     await candidates.refresh();
 
@@ -107,8 +120,10 @@ describe("HTTP app", () => {
       payload: {
         resultCounts: [2, 3],
         allCategories: false,
-        selectedCategories: ["Tech"],
+        selectedCategoryIds: ["tag-tech"],
         maxBuyPriceCents: 3,
+        minBidAskRatioPercent: 60,
+        maxMarketProgressPercent: 15,
         maxMarketDurationDays: 30,
         candidateSortDirection: "DESC",
         initialCapital: 120,
@@ -121,8 +136,11 @@ describe("HTTP app", () => {
       strategy: { initialCapital: "120", availableCash: "120" },
       preferences: {
         allCategories: false,
-        selectedCategories: ["Tech"],
+        selectedCategoryIds: ["tag-tech"],
+        selectedCategories: ["tag-tech"],
         candidateSortDirection: "DESC",
+        minBidAskRatioPercent: 60,
+        maxMarketProgressPercent: 15,
         orderAmount: "2",
       },
     });
@@ -253,6 +271,7 @@ describe("HTTP app", () => {
         expect.objectContaining({
           tokenId: candidate.tokenId,
           currentSellPrice: null,
+          currentSellPriceStatus: "NO_BID",
           unrealizedPnl: "-1",
         }),
       ],
@@ -310,6 +329,26 @@ describe("HTTP app", () => {
     expect(whileRunning.statusCode).toBe(409);
 
     await app.inject({ method: "POST", url: "/api/test/pause" });
+    const capitalChangeAfterHistory = await app.inject({
+      method: "PUT",
+      url: "/api/test/preferences",
+      payload: {
+        resultCounts: [2, 3],
+        allCategories: true,
+        selectedCategoryIds: [],
+        maxBuyPriceCents: 3,
+        maxMarketDurationDays: 30,
+        candidateSortDirection: "ASC",
+        initialCapital: 120,
+        orderAmount: 1,
+      },
+    });
+    expect(capitalChangeAfterHistory.statusCode).toBe(409);
+    const dashboardAfterHistory = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+    });
+    expect(dashboardAfterHistory.json()).toMatchObject({ capitalEditable: false });
     const wrongConfirmation = await app.inject({
       method: "POST",
       url: "/api/test/reset",
@@ -355,6 +394,8 @@ describe("HTTP app", () => {
     expect(page.body).toContain("LIVE");
     expect(page.body).toContain("交易配置");
     expect(page.body).toContain("市场类别");
+    expect(page.body).toContain("最低买卖盘比例");
+    expect(page.body).toContain("生命周期进度");
     expect(page.body).toContain("总模拟资金");
     expect(page.body).toContain("每单使用金额");
     expect(page.body).toContain("重置TEST");
@@ -366,7 +407,7 @@ describe("HTTP app", () => {
     expect(page.body).not.toContain("全选");
     expect(page.body).not.toContain("清空TEST交易范围");
     expect(page.body).not.toContain("进入时市场进度");
-    expect(page.body).not.toContain('id="market-progress-filter"');
+    expect(page.body).toContain('id="market-progress-filter"');
     expect(page.body).not.toContain("开始新一轮");
     expect(page.body).not.toContain('id="new-cycle"');
     expect(page.body).not.toContain("PAPER");
@@ -381,6 +422,45 @@ describe("HTTP app", () => {
     });
 
     expect(response.statusCode).toBe(404);
+  });
+
+  it("returns all 101 distinct current token positions", async () => {
+    const { app, database } = makeTestApp([]);
+    database.setStrategyStatus("RUNNING");
+    for (let index = 0; index < 101; index += 1) {
+      const tokenId = `partial-token-${index}`;
+      const candidate = makeCurrentCandidate({
+        candidateId: `${tokenId}:20000`,
+        tokenId,
+        conditionId: `partial-condition-${index}`,
+        marketId: `partial-market-${index}`,
+      });
+      const result = database.executeTestFakBuy({
+        candidate,
+        book: {
+          tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: `PARTIAL-BOOK-${index}`,
+          bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+          asks: [{ priceMicros: 20_000, sizeMicros: 25_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          tickSizeMicros: 10_000,
+          isNegativeRisk: false,
+        },
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+      expect(result.spentMicros).toBe(500_000);
+    }
+
+    const positions = await app.inject({ method: "GET", url: "/api/test/positions" });
+    expect(positions.statusCode).toBe(200);
+    expect(positions.json().positions).toHaveLength(101);
+    const dashboard = await app.inject({ method: "GET", url: "/api/dashboard" });
+    expect(dashboard.json().positions).toHaveLength(101);
   });
 
   function makeTestApp(
@@ -450,6 +530,7 @@ function marketRuntime(): PaperMarketRuntime {
     getOrderBook: (candidate: TradeCandidate): TokenOrderBook => ({
       tokenId: candidate.tokenId,
       conditionId: candidate.conditionId,
+      bookVersion: "APP-TEST-BOOK-1",
       bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
       asks: [{ priceMicros: 20_000, sizeMicros: 100_000_000 }],
       minOrderSizeMicros: candidate.minOrderSizeMicros,

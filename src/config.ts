@@ -11,8 +11,9 @@ const configSchema = z.object({
   TOTAL_BUDGET_USD: numberFromEnvironment(100),
   ORDER_BUDGET_USD: numberFromEnvironment(1),
   MAX_MARKET_DURATION_DAYS: numberFromEnvironment(30),
-  MIN_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.01),
   MAX_BUY_PRICE: z.coerce.number().min(0.0001).max(0.99).default(0.03),
+  MIN_BID_ASK_RATIO_PERCENT: z.coerce.number().int().min(1).max(100).default(50),
+  MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().int().min(1).max(100).default(20),
   SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
   MARKET_STREAM_RECONNECT_MS: z.coerce.number().int().min(250).default(2_000),
   PAPER_SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(250).default(1_000),
@@ -31,6 +32,8 @@ export type AppConfig = {
   maxMarketDurationDays: number;
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
+  minBidAskRatioPercent: number;
+  maxMarketProgressPercent: number;
   scanIntervalMs: number;
   marketStreamReconnectMs: number;
   paperSchedulerIntervalMs: number;
@@ -56,10 +59,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     throw new Error("TOTAL_BUDGET_USD cannot exceed INITIAL_CAPITAL_USD");
   }
 
-  if (parsed.MIN_BUY_PRICE > parsed.MAX_BUY_PRICE) {
-    throw new Error("MIN_BUY_PRICE cannot exceed MAX_BUY_PRICE");
-  }
-
   return {
     host: parsed.HOST,
     port: parsed.PORT,
@@ -68,8 +67,10 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     totalBudgetMicros: toMicros(parsed.TOTAL_BUDGET_USD),
     orderBudgetMicros: toMicros(parsed.ORDER_BUDGET_USD),
     maxMarketDurationDays: parsed.MAX_MARKET_DURATION_DAYS,
-    minBuyPriceMicros: toMicros(parsed.MIN_BUY_PRICE),
+    minBuyPriceMicros: 10_000,
     maxBuyPriceMicros: toMicros(parsed.MAX_BUY_PRICE),
+    minBidAskRatioPercent: parsed.MIN_BID_ASK_RATIO_PERCENT,
+    maxMarketProgressPercent: parsed.MAX_MARKET_PROGRESS_PERCENT,
     scanIntervalMs: parsed.SCAN_INTERVAL_MS,
     marketStreamReconnectMs: parsed.MARKET_STREAM_RECONNECT_MS,
     paperSchedulerIntervalMs: parsed.PAPER_SCHEDULER_INTERVAL_MS,

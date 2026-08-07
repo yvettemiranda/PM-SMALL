@@ -85,11 +85,13 @@ export class CandidateService {
     tokenId: string,
     bestBidMicros: number | null,
     bestAskMicros: number | null,
+    bookReady = true,
   ): void {
     const candidate = this.candidates.find((item) => item.tokenId === tokenId);
     if (candidate === undefined) {
       return;
     }
+    candidate.bookReady = bookReady;
     candidate.bestBidMicros = bestBidMicros;
     candidate.bestAskMicros = bestAskMicros;
     if (bestAskMicros !== null) {
@@ -99,6 +101,10 @@ export class CandidateService {
         bestAskMicros,
         candidate.tickSizeMicros,
       );
+    } else {
+      candidate.executableBuyPriceMicros = 0;
+      candidate.makerBuyPriceMicros = 0;
+      candidate.fixedSellPriceMicros = 0;
     }
     for (const listener of this.quoteListeners) {
       listener(tokenId);

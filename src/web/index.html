@@ -64,9 +64,9 @@
             </fieldset>
 
             <label class="field config-block">
-              <span>最高买入价</span>
+              <span>买入价范围</span>
               <span class="price-input">
-                <span>≤</span>
+                <span>1–</span>
                 <input
                   id="max-buy-price"
                   type="number"
@@ -81,7 +81,7 @@
             </label>
 
             <div class="range-fields config-block">
-              <div class="duration-field">
+              <div class="duration-field range-field">
                 <div class="range-heading">
                   <span>市场总时长</span>
                   <strong>1–<span id="duration-value">30</span>天</strong>
@@ -97,6 +97,38 @@
                   aria-valuetext="1至30天"
                 />
                 <div id="duration-marks" class="range-marks" aria-hidden="true"></div>
+              </div>
+              <div class="range-field">
+                <div class="range-heading">
+                  <span>最低买卖盘比例</span>
+                  <strong>≥<span id="bid-ask-ratio-value">50</span>%</strong>
+                </div>
+                <input
+                  id="bid-ask-ratio"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="50"
+                  aria-label="最低买卖盘比例"
+                  aria-valuetext="至少50%"
+                />
+              </div>
+              <div class="range-field">
+                <div class="range-heading">
+                  <span>生命周期进度</span>
+                  <strong>≤<span id="market-progress-value">20</span>%</strong>
+                </div>
+                <input
+                  id="market-progress-filter"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="20"
+                  aria-label="允许买入的最大生命周期进度"
+                  aria-valuetext="不超过20%"
+                />
               </div>
             </div>
 

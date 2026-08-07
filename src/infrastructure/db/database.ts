@@ -15,10 +15,14 @@ import {
   type PaperSettlementPayout,
 } from "../../domain/paper-settlement.js";
 import {
+  bestAskLevel,
+  bestBidLevel,
   calculateFixedSellPriceMicros,
   calculateOrderCostMicros,
   calculateOrderSizeMicros,
 } from "../../domain/price.js";
+import { isMarketEligible } from "../../domain/market-eligibility.js";
+import type { MarketEligibilitySettings } from "../../domain/market-eligibility.js";
 import {
   planFakBuy,
   planFakSell,
@@ -143,6 +147,7 @@ export type PaperTradingPreferences = {
   candidateSortDirection: "ASC" | "DESC";
   orderBudgetMicros: number;
   maxBuyPriceMicros: number;
+  minBidAskRatioPercent: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
@@ -158,11 +163,16 @@ export type ActivePaperBuyMarket = {
   tokenId: string;
   makerBuyPriceMicros: number;
   bestAskMicros: number;
+  bestBidMicros: number;
+  bookReady: boolean;
   category: string | null;
+  categoryIds: string[];
   resultCount: 2 | 3 | null;
   durationDays: number | null;
   openedAt: string | null;
   endsAt: string | null;
+  minOrderSizeMicros: number;
+  tickSizeMicros: number;
 };
 
 export type TestMarketExecutionMetadata = {
@@ -343,6 +353,7 @@ function rowToPaperTradingPreferences(row: {
   binary_enabled: number;
   ternary_enabled: number;
   max_buy_price_micros: number;
+  min_bid_ask_ratio_percent: number;
   max_market_duration_days: number;
   max_market_progress_percent: number;
   candidates_selected_by_default: number;
@@ -362,6 +373,7 @@ function rowToPaperTradingPreferences(row: {
     candidateSortDirection: row.candidate_sort_direction,
     orderBudgetMicros: row.order_budget_micros,
     maxBuyPriceMicros: row.max_buy_price_micros,
+    minBidAskRatioPercent: row.min_bid_ask_ratio_percent,
     maxMarketDurationDays: row.max_market_duration_days,
     maxMarketProgressPercent: row.max_market_progress_percent,
     candidatesSelectedByDefault: row.candidates_selected_by_default === 1,
@@ -396,7 +408,9 @@ export class PaperDatabase {
     }
 
     this.database = new Database(databasePath);
-    this.database.exec("PRAGMA busy_timeout = 5000;");
+    this.database.exec(
+      "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;",
+    );
     this.applyMigrations();
     this.ensureStrategyState(initialCapitalMicros);
   }
@@ -420,6 +434,7 @@ export class PaperDatabase {
       { version: 9, file: "009_test_fak_execution.sql" },
       { version: 10, file: "010_test_strategy_preferences.sql" },
       { version: 11, file: "011_legacy_target_exit_metadata.sql" },
+      { version: 12, file: "012_final_market_eligibility.sql" },
     ];
 
     for (const migration of migrations) {
@@ -435,12 +450,15 @@ export class PaperDatabase {
       const migrationPath = fileURLToPath(
         new URL(`./migrations/${migration.file}`, import.meta.url),
       );
-      this.database.exec(readFileSync(migrationPath, "utf8"));
-      this.database
-        .prepare(
-          "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-        )
-        .run(migration.version, new Date().toISOString());
+      const migrationSql = readFileSync(migrationPath, "utf8");
+      this.database.transaction(() => {
+        this.database.exec(migrationSql);
+        this.database
+          .prepare(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+          )
+          .run(migration.version, new Date().toISOString());
+      })();
     }
   }
 
@@ -584,8 +602,14 @@ export class PaperDatabase {
     }
     return this.transaction(() => {
       const state = this.getStrategyState();
-      if (state.status === "RUNNING") {
+      if (state.status !== "PAUSED") {
         throw new Error("Pause TEST before changing total capital");
+      }
+      const historyCount = this.getTestTradingHistoryCount();
+      if (historyCount > 0) {
+        throw new Error(
+          "Reset TEST before changing total capital after trading history exists",
+        );
       }
       const deltaMicros = initialCapitalMicros - state.initialCapitalMicros;
       if (state.availableCashMicros + deltaMicros < 0) {
@@ -608,6 +632,26 @@ export class PaperDatabase {
     });
   }
 
+  public canUpdateTestInitialCapital(): boolean {
+    return (
+      this.getStrategyState().status === "PAUSED" &&
+      this.getTestTradingHistoryCount() === 0
+    );
+  }
+
+  private getTestTradingHistoryCount(): number {
+    const row = this.database
+      .prepare(
+        `SELECT
+          (SELECT COUNT(*) FROM paper_orders) +
+          (SELECT COUNT(*) FROM paper_fills) +
+          (SELECT COUNT(*) FROM paper_positions) +
+          (SELECT COUNT(*) FROM paper_settlements) AS count`,
+      )
+      .get() as { count: number };
+    return row.count;
+  }
+
   public resetTestState(
     initialCapitalMicros: number,
     defaultPreferences: Omit<PaperTradingPreferences, "updatedAt">,
@@ -620,6 +664,7 @@ export class PaperDatabase {
         throw new Error("Pause TEST before resetting it");
       }
       this.database.prepare("DELETE FROM processed_market_trades").run();
+      this.database.prepare("DELETE FROM test_order_book_consumption").run();
       this.database.prepare("DELETE FROM paper_fills").run();
       this.database
         .prepare("DELETE FROM paper_orders WHERE side = 'SELL'")
@@ -662,8 +707,8 @@ export class PaperDatabase {
             max_market_duration_days, max_market_progress_percent,
             candidates_selected_by_default, all_categories_enabled,
             selected_categories_json, candidate_sort_direction,
-            order_budget_micros, updated_at
-          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            order_budget_micros, min_bid_ask_ratio_percent, updated_at
+          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           defaults.resultCounts.includes(2) ? 1 : 0,
@@ -676,6 +721,7 @@ export class PaperDatabase {
           JSON.stringify(defaults.selectedCategories),
           defaults.candidateSortDirection,
           defaults.orderBudgetMicros,
+          defaults.minBidAskRatioPercent,
           now,
         );
     }
@@ -715,7 +761,7 @@ export class PaperDatabase {
               max_market_duration_days = ?, max_market_progress_percent = ?,
               candidates_selected_by_default = ?, all_categories_enabled = ?,
               selected_categories_json = ?, candidate_sort_direction = ?,
-              order_budget_micros = ?, updated_at = ?
+              order_budget_micros = ?, min_bid_ask_ratio_percent = ?, updated_at = ?
           WHERE id = 1`,
         )
         .run(
@@ -729,6 +775,7 @@ export class PaperDatabase {
           JSON.stringify(preferences.selectedCategories),
           preferences.candidateSortDirection,
           preferences.orderBudgetMicros,
+          preferences.minBidAskRatioPercent,
           now,
         );
       let cancelledBuyCount = 0;
@@ -742,6 +789,7 @@ export class PaperDatabase {
       this.writeAudit("PAPER_TRADING_FILTERS_UPDATED", "strategy", "1", {
         resultCounts: preferences.resultCounts,
         maxBuyPriceMicros: preferences.maxBuyPriceMicros,
+        minBidAskRatioPercent: preferences.minBidAskRatioPercent,
         maxMarketDurationDays: preferences.maxMarketDurationDays,
         maxMarketProgressPercent: preferences.maxMarketProgressPercent,
         allCategories: preferences.allCategories,
@@ -760,8 +808,10 @@ export class PaperDatabase {
   public listActivePaperBuyMarkets(): ActivePaperBuyMarket[] {
     const rows = this.database
       .prepare(
-        `SELECT po.token_id, po.price_micros, pm.category, pm.result_count, pm.duration_days,
-          pm.opened_at, pm.ends_at
+        `SELECT po.token_id, po.price_micros, pm.category,
+          pm.category_ids_json, pm.result_count, pm.duration_days,
+          pm.opened_at, pm.ends_at, pm.min_order_size_micros,
+          pm.tick_size_micros
         FROM paper_orders po
         LEFT JOIN paper_market_metadata pm ON pm.token_id = po.token_id
         WHERE po.side = 'BUY' AND po.status IN ('OPEN', 'PARTIALLY_FILLED')
@@ -771,20 +821,34 @@ export class PaperDatabase {
       token_id: string;
       price_micros: number;
       category: string | null;
+      category_ids_json: string | null;
       result_count: 2 | 3 | null;
       duration_days: number | null;
       opened_at: string | null;
       ends_at: string | null;
+      min_order_size_micros: number | null;
+      tick_size_micros: number | null;
     }>;
     return rows.map((row) => ({
       tokenId: row.token_id,
       makerBuyPriceMicros: row.price_micros,
       bestAskMicros: row.price_micros,
+      bestBidMicros: row.price_micros,
+      bookReady: true,
       category: row.category,
+      categoryIds: parseCategoryJson(row.category_ids_json ?? "[]"),
       resultCount: row.result_count,
       durationDays: row.duration_days,
       openedAt: row.opened_at,
       endsAt: row.ends_at,
+      minOrderSizeMicros:
+        row.min_order_size_micros !== null && row.min_order_size_micros > 0
+          ? row.min_order_size_micros
+          : 1,
+      tickSizeMicros:
+        row.tick_size_micros !== null && row.tick_size_micros > 0
+          ? row.tick_size_micros
+          : 1,
     }));
   }
 
@@ -1679,6 +1743,7 @@ export class PaperDatabase {
     orderBudgetMicros: number;
     feeRateMicros: number;
     feeExponent: number;
+    eligibility: MarketEligibilitySettings;
   }): ImmediateBuyExecution {
     this.assertPaperAccountingMutationAllowed();
     return this.transaction(() => {
@@ -1688,7 +1753,38 @@ export class PaperDatabase {
         state.status !== "RUNNING" ||
         candidate.tokenId !== book.tokenId ||
         candidate.conditionId !== book.conditionId ||
-        candidate.isNegativeRisk !== book.isNegativeRisk
+        candidate.isNegativeRisk !== book.isNegativeRisk ||
+        book.bookVersion.trim().length === 0
+      ) {
+        return emptyTestFakBuy("BLOCKED");
+      }
+      const availableBids = this.availableTestBookLevels(
+        candidate.tokenId,
+        book.bookVersion,
+        "BID",
+        book.bids,
+      );
+      const availableAsks = this.availableTestBookLevels(
+        candidate.tokenId,
+        book.bookVersion,
+        "ASK",
+        book.asks,
+      );
+      const currentBestBid = bestBidLevel(availableBids)?.priceMicros ?? null;
+      const currentBestAsk = bestAskLevel(availableAsks)?.priceMicros ?? null;
+      if (
+        !isMarketEligible(
+          {
+            ...candidate,
+            bookReady: true,
+            bestBidMicros: currentBestBid,
+            bestAskMicros: currentBestAsk,
+            minOrderSizeMicros: book.minOrderSizeMicros,
+            tickSizeMicros: book.tickSizeMicros,
+          },
+          input.eligibility,
+          new Date(),
+        )
       ) {
         return emptyTestFakBuy("BLOCKED");
       }
@@ -1726,7 +1822,8 @@ export class PaperDatabase {
         if (
           position.quantity_micros !== 0 ||
           position.cost_micros !== 0 ||
-          position.cycle_closed_at === null
+          position.cycle_closed_at === null ||
+          state.availableCashMicros < input.orderBudgetMicros
         ) {
           return emptyTestFakBuy("BLOCKED");
         }
@@ -1765,12 +1862,18 @@ export class PaperDatabase {
         0,
         input.orderBudgetMicros - (position?.cycle_spend_micros ?? 0),
       );
+      if (
+        (position?.cycle_spend_micros ?? 0) === 0 &&
+        state.availableCashMicros < input.orderBudgetMicros
+      ) {
+        return emptyTestFakBuy("BLOCKED");
+      }
       const maxSpendMicros = Math.min(
         remainingCycleBudget,
         state.availableCashMicros,
       );
       const plan = planFakBuy({
-        asks: book.asks,
+        asks: availableAsks,
         maxPriceMicros: input.maxPriceMicros,
         maxSpendMicros,
         minOrderSizeMicros: book.minOrderSizeMicros,
@@ -1926,7 +2029,18 @@ export class PaperDatabase {
         grossFillSizeMicros: plan.grossFillSizeMicros,
         netFillSizeMicros: plan.netFillSizeMicros,
         feeMicros: plan.feeMicros,
+        bookVersion: book.bookVersion,
       });
+      this.recordTestBookConsumption(
+        candidate.tokenId,
+        book.bookVersion,
+        "ASK",
+        plan.fills.map((fill) => ({
+          priceMicros: fill.priceMicros,
+          sizeMicros: fill.grossSizeMicros,
+        })),
+        now,
+      );
       return {
         outcome: plan.fullySpent ? "FILLED" : "PARTIAL",
         order: this.getPaperOrder(orderId),
@@ -1943,6 +2057,7 @@ export class PaperDatabase {
 
   public executeTestFakSells(input: {
     tokenId: string;
+    bookVersion: string;
     bids: readonly BookLevel[];
     minOrderSizeMicros: number;
     feeRateMicros: number;
@@ -1951,7 +2066,15 @@ export class PaperDatabase {
     // A validation pause blocks new exposure, but an existing position must
     // still be allowed to reduce risk at its already-recorded target price.
     return this.transaction(() => {
-      const mutableBids = input.bids.map((level) => ({ ...level }));
+      if (input.bookVersion.trim().length === 0) {
+        return emptyTestFakSell();
+      }
+      const mutableBids = this.availableTestBookLevels(
+        input.tokenId,
+        input.bookVersion,
+        "BID",
+        input.bids,
+      );
       let filledSizeMicros = 0;
       let grossProceedsMicros = 0;
       let netProceedsMicros = 0;
@@ -2061,6 +2184,13 @@ export class PaperDatabase {
           "FIRST_SELL",
         );
       }
+      this.recordTestBookConsumption(
+        input.tokenId,
+        input.bookVersion,
+        "BID",
+        consumedBids,
+        new Date().toISOString(),
+      );
       return {
         filledSizeMicros,
         grossProceedsMicros,
@@ -2141,11 +2271,12 @@ export class PaperDatabase {
       const now = new Date().toISOString();
       this.database
         .prepare(
-          `INSERT INTO paper_market_metadata(
-            token_id, event_id, event_slug, event_title, market_id,
-            market_question, direction, opened_at, ends_at, result_count,
-            duration_days, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO paper_market_metadata(
+          token_id, event_id, event_slug, event_title, market_id,
+          market_question, direction, opened_at, ends_at, result_count,
+          duration_days, category, category_ids_json, category_labels_json,
+          updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(token_id) DO UPDATE SET
             event_id = excluded.event_id,
             event_slug = excluded.event_slug,
@@ -2157,6 +2288,9 @@ export class PaperDatabase {
             ends_at = excluded.ends_at,
             result_count = excluded.result_count,
             duration_days = excluded.duration_days,
+            category = excluded.category,
+            category_ids_json = excluded.category_ids_json,
+            category_labels_json = excluded.category_labels_json,
             updated_at = excluded.updated_at`,
         )
         .run(
@@ -2171,6 +2305,9 @@ export class PaperDatabase {
           candidate.endsAt,
           candidate.resultCount,
           candidate.durationDays,
+          candidate.category,
+          JSON.stringify(candidate.categoryIds),
+          JSON.stringify(candidate.categoryLabels),
           now,
         );
       this.database
@@ -2499,9 +2636,10 @@ export class PaperDatabase {
         `INSERT INTO paper_market_metadata(
           token_id, event_id, event_slug, event_title, market_id,
           market_question, direction, opened_at, ends_at, result_count,
-          duration_days, category, fees_enabled, fee_rate_micros,
+          duration_days, category, category_ids_json, category_labels_json,
+          fees_enabled, fee_rate_micros,
           fee_exponent, min_order_size_micros, tick_size_micros, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(token_id) DO UPDATE SET
           event_id = excluded.event_id,
           event_slug = excluded.event_slug,
@@ -2514,6 +2652,8 @@ export class PaperDatabase {
           result_count = excluded.result_count,
           duration_days = excluded.duration_days,
           category = excluded.category,
+          category_ids_json = excluded.category_ids_json,
+          category_labels_json = excluded.category_labels_json,
           fees_enabled = excluded.fees_enabled,
           fee_rate_micros = excluded.fee_rate_micros,
           fee_exponent = excluded.fee_exponent,
@@ -2534,6 +2674,8 @@ export class PaperDatabase {
         candidate.resultCount,
         candidate.durationDays,
         candidate.category,
+        JSON.stringify(candidate.categoryIds),
+        JSON.stringify(candidate.categoryLabels),
         feeRateMicros > 0 ? 1 : 0,
         feeRateMicros,
         feeExponent,
@@ -2541,6 +2683,71 @@ export class PaperDatabase {
         candidate.tickSizeMicros,
         now,
       );
+  }
+
+  private availableTestBookLevels(
+    tokenId: string,
+    bookVersion: string,
+    side: "ASK" | "BID",
+    levels: readonly BookLevel[],
+  ): BookLevel[] {
+    const consumedRows = this.database
+      .prepare(
+        `SELECT price_micros, size_micros
+        FROM test_order_book_consumption
+        WHERE token_id = ? AND book_version = ? AND side = ?`,
+      )
+      .all(tokenId, bookVersion, side) as Array<{
+      price_micros: number;
+      size_micros: number;
+    }>;
+    const consumedByPrice = new Map(
+      consumedRows.map((row) => [row.price_micros, row.size_micros]),
+    );
+    return levels
+      .map((level) => ({
+        ...level,
+        sizeMicros: Math.max(
+          0,
+          level.sizeMicros - (consumedByPrice.get(level.priceMicros) ?? 0),
+        ),
+      }))
+      .filter((level) => level.sizeMicros > 0);
+  }
+
+  private recordTestBookConsumption(
+    tokenId: string,
+    bookVersion: string,
+    side: "ASK" | "BID",
+    consumed: readonly ConsumedBookLevel[],
+    now: string,
+  ): void {
+    const totals = new Map<number, number>();
+    for (const level of consumed) {
+      if (level.sizeMicros <= 0) continue;
+      totals.set(
+        level.priceMicros,
+        (totals.get(level.priceMicros) ?? 0) + level.sizeMicros,
+      );
+    }
+    const statement = this.database.prepare(
+      `INSERT INTO test_order_book_consumption(
+        token_id, book_version, side, price_micros, size_micros, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(token_id, book_version, side, price_micros) DO UPDATE SET
+        size_micros = size_micros + excluded.size_micros,
+        updated_at = excluded.updated_at`,
+    );
+    for (const [priceMicros, sizeMicros] of totals) {
+      statement.run(
+        tokenId,
+        bookVersion,
+        side,
+        priceMicros,
+        sizeMicros,
+        now,
+      );
+    }
   }
 
   private applyTestFakSellAccounting(
@@ -2674,6 +2881,7 @@ export class PaperDatabase {
         max_buy_price_micros: number;
         max_market_duration_days: number;
         max_market_progress_percent: number;
+        min_bid_ask_ratio_percent: number;
         candidates_selected_by_default: number;
         all_categories_enabled: number;
         selected_categories_json: string;
@@ -2686,6 +2894,7 @@ export class PaperDatabase {
       .prepare(
         `SELECT binary_enabled, ternary_enabled, max_buy_price_micros,
           max_market_duration_days, max_market_progress_percent,
+          min_bid_ask_ratio_percent,
           candidates_selected_by_default, all_categories_enabled,
           selected_categories_json, candidate_sort_direction,
           order_budget_micros, updated_at
@@ -2698,6 +2907,7 @@ export class PaperDatabase {
           max_buy_price_micros: number;
           max_market_duration_days: number;
           max_market_progress_percent: number;
+          min_bid_ask_ratio_percent: number;
           candidates_selected_by_default: number;
           all_categories_enabled: number;
           selected_categories_json: string;
@@ -2814,5 +3024,16 @@ function emptyTestFakBuy(
     spentMicros: 0,
     feeMicros: 0,
     consumedAsks: [],
+  };
+}
+
+function emptyTestFakSell(): TargetSellExecution {
+  return {
+    filledSizeMicros: 0,
+    grossProceedsMicros: 0,
+    netProceedsMicros: 0,
+    feeMicros: 0,
+    filledOrderCount: 0,
+    consumedBids: [],
   };
 }

@@ -1,4 +1,8 @@
 export type TradeDirection = "YES" | "NO";
+export type MarketCategory = {
+  id: string;
+  label: string;
+};
 export type PaperOrderSide = "BUY" | "SELL";
 export type OrderExecutionKind = "LEGACY_MAKER" | "FAK" | "TARGET";
 export type PaperOrderStatus =
@@ -12,6 +16,7 @@ export type EligibleEvent = {
   eventSlug: string | null;
   title: string;
   category: string;
+  categories: MarketCategory[];
   resultCount: 2 | 3;
   isNegativeRisk: boolean;
 };
@@ -21,6 +26,8 @@ export type MarketToken = {
   eventSlug: string | null;
   eventTitle: string;
   category: string;
+  categoryIds: string[];
+  categoryLabels: string[];
   resultCount: 2 | 3;
   isNegativeRisk: boolean;
   marketId: string;
@@ -36,6 +43,8 @@ export type MarketToken = {
   feesEnabled: boolean;
   feeRateMicros: number;
   feeExponent: number;
+  minOrderSizeMicros: number;
+  tickSizeMicros: number;
 };
 
 export type BookLevel = {
@@ -46,6 +55,8 @@ export type BookLevel = {
 export type TokenOrderBook = {
   tokenId: string;
   conditionId: string;
+  /** Stable across a replay of the same external book state. */
+  bookVersion: string;
   bids: BookLevel[];
   asks: BookLevel[];
   minOrderSizeMicros: number;
@@ -55,6 +66,7 @@ export type TokenOrderBook = {
 
 export type TradeCandidate = MarketToken & {
   candidateId: string;
+  bookReady: boolean;
   bestBidMicros: number | null;
   bestAskMicros: number | null;
   executableBuyPriceMicros: number;
@@ -64,8 +76,6 @@ export type TradeCandidate = MarketToken & {
   orderSizeMicros: number;
   /** @deprecated FAK orders never wait behind a maker queue. */
   queueAheadSizeMicros: number;
-  minOrderSizeMicros: number;
-  tickSizeMicros: number;
 };
 
 export type PaperOrder = {

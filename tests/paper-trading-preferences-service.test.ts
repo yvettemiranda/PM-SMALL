@@ -25,6 +25,8 @@ describe("PaperTradingPreferencesService", () => {
       resultCounts: [2, 3],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
+      minBidAskRatioPercent: 50,
+      maxMarketProgressPercent: 20,
       candidatesSelectedByDefault: true,
     });
 
@@ -32,12 +34,16 @@ describe("PaperTradingPreferencesService", () => {
       resultCounts: [3],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 60,
+      minBidAskRatioPercent: 60,
+      maxMarketProgressPercent: 80,
     });
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
       resultCounts: [3],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 60,
+      minBidAskRatioPercent: 60,
+      maxMarketProgressPercent: 80,
       candidatesSelectedByDefault: true,
     });
   });
@@ -70,7 +76,7 @@ describe("PaperTradingPreferencesService", () => {
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
       allCategories: false,
-      selectedCategories: ["Tech"],
+      selectedCategories: ["tag-tech"],
       candidateSortDirection: "DESC",
       orderBudgetMicros: 2_000_000,
     });
@@ -78,12 +84,18 @@ describe("PaperTradingPreferencesService", () => {
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
       allCategories: false,
-      selectedCategories: ["Tech"],
+      selectedCategories: ["tag-tech"],
       candidateSortDirection: "DESC",
       orderBudgetMicros: 2_000_000,
     });
     expect(
-      restored.isCandidateEnabled(makeCandidate({ category: "Sports" })),
+      restored.isCandidateEnabled(
+        makeCandidate({
+          category: "Sports",
+          categoryIds: ["tag-sports"],
+          categoryLabels: ["Sports"],
+        }),
+      ),
     ).toBe(false);
     expect(
       restored
@@ -91,31 +103,33 @@ describe("PaperTradingPreferencesService", () => {
           makeCandidate({ tokenId: "early", progressPercent: 10 }),
           makeCandidate({
             tokenId: "late",
-            openedAt: "2025-12-31T00:00:00.000Z",
-            endsAt: "2026-01-09T00:00:00.000Z",
-            progressPercent: 22,
+            openedAt: "2026-01-01T00:00:00.000Z",
+            endsAt: "2026-01-06T00:00:00.000Z",
+            durationDays: 5,
+            progressPercent: 20,
           }),
         ])
         .map((candidate) => candidate.tokenId),
     ).toEqual(["late", "early"]);
   });
 
-  it("uses lifecycle progress for ordering without a hidden eligibility cut-off", () => {
+  it("uses lifecycle progress as an inclusive configurable eligibility cut-off", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
     const preferences = new PaperTradingPreferencesService(database, testConfig);
     const progressedCandidate = makeCandidate({ progressPercent: 35 });
 
-    expect(preferences.isCandidateEnabled(progressedCandidate)).toBe(true);
+    expect(preferences.isCandidateEnabled(progressedCandidate)).toBe(false);
     preferences.updateMarketFilters({
       resultCounts: [2, 3],
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
+      maxMarketProgressPercent: 40,
     });
 
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
-      maxMarketProgressPercent: 100,
+      maxMarketProgressPercent: 40,
       candidatesSelectedByDefault: true,
     });
     expect(restored.isCandidateEnabled(progressedCandidate)).toBe(true);
@@ -212,7 +226,7 @@ describe("PaperTradingPreferencesService", () => {
       }),
       100_000_000,
     );
-    const retainedLateProgress = database.placePaperBuy(
+    const excludedLateProgress = database.placePaperBuy(
       makeCandidate({
         candidateId: "progressed-token:20000",
         tokenId: "progressed-token",
@@ -232,7 +246,7 @@ describe("PaperTradingPreferencesService", () => {
       maxMarketDurationDays: 30,
     });
 
-    expect(update.cancelledBuyCount).toBe(2);
+    expect(update.cancelledBuyCount).toBe(3);
     expect(database.listPaperOrders()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: retained.id, status: "OPEN" }),
@@ -245,8 +259,8 @@ describe("PaperTradingPreferencesService", () => {
           status: "CANCELLED",
         }),
         expect.objectContaining({
-          id: retainedLateProgress.id,
-          status: "OPEN",
+          id: excludedLateProgress.id,
+          status: "CANCELLED",
         }),
       ]),
     );

@@ -43,9 +43,14 @@ describe("PaperDatabase", () => {
         tokenId: "yes-token",
         makerBuyPriceMicros: 20_000,
         bestAskMicros: 20_000,
-        category: null,
+        bestBidMicros: 20_000,
+        bookReady: true,
+        category: "Tech",
+        categoryIds: ["tag-tech"],
         resultCount: 2,
         durationDays: 10,
+        minOrderSizeMicros: 1,
+        tickSizeMicros: 1,
         openedAt: "2026-01-01T00:00:00.000Z",
         endsAt: "2026-01-11T00:00:00.000Z",
       },
@@ -141,7 +146,7 @@ describe("PaperDatabase", () => {
     }
   });
 
-  it("adds the default progress preference when upgrading a version 7 database", () => {
+  it("adds the final eligibility defaults when upgrading a version 7 database", () => {
     const directory = mkdtempSync(join(tmpdir(), "pm-small-progress-upgrade-"));
     const databasePath = join(directory, "paper.db");
     const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
@@ -150,18 +155,25 @@ describe("PaperDatabase", () => {
       maxBuyPriceMicros: 30_000,
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 20,
+      minBidAskRatioPercent: 50,
       candidatesSelectedByDefault: true,
       allCategories: true,
       selectedCategories: [],
       candidateSortDirection: "ASC",
       orderBudgetMicros: 1_000_000,
     });
+    currentDatabase.setStrategyStatus("RUNNING");
     currentDatabase.close();
 
     const rawDatabase = new Database(databasePath);
     try {
       rawDatabase.exec(
-        "ALTER TABLE paper_trading_preferences DROP COLUMN max_market_progress_percent; DELETE FROM schema_migrations WHERE version = 8;",
+        `ALTER TABLE paper_trading_preferences DROP COLUMN max_market_progress_percent;
+        ALTER TABLE paper_trading_preferences DROP COLUMN min_bid_ask_ratio_percent;
+        ALTER TABLE paper_market_metadata DROP COLUMN category_ids_json;
+        ALTER TABLE paper_market_metadata DROP COLUMN category_labels_json;
+        DROP TABLE test_order_book_consumption;
+        DELETE FROM schema_migrations WHERE version IN (8, 12);`,
       );
     } finally {
       rawDatabase.close();
@@ -170,20 +182,69 @@ describe("PaperDatabase", () => {
     const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
-        maxMarketProgressPercent: 100,
+        maxMarketProgressPercent: 20,
+        minBidAskRatioPercent: 50,
       });
+      expect(upgradedDatabase.getStrategyState().status).toBe("PAUSED");
       const schemaVersion = new Database(databasePath, { readonly: true });
       try {
         expect(
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 11 });
+        ).toEqual({ version: 12 });
       } finally {
         schemaVersion.close();
       }
     } finally {
       upgradedDatabase.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back a multi-statement migration when a later statement fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-migration-atomic-"));
+    const databasePath = join(directory, "paper.db");
+    const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
+    currentDatabase.close();
+
+    const rawDatabase = new Database(databasePath);
+    try {
+      rawDatabase.exec(
+        `ALTER TABLE paper_trading_preferences DROP COLUMN min_bid_ask_ratio_percent;
+        ALTER TABLE paper_market_metadata DROP COLUMN category_ids_json;
+        DROP TABLE test_order_book_consumption;
+        DELETE FROM schema_migrations WHERE version = 12;`,
+      );
+    } finally {
+      rawDatabase.close();
+    }
+
+    expect(() => new PaperDatabase(databasePath, 100_000_000)).toThrow(
+      /duplicate column name: category_labels_json/,
+    );
+
+    const inspectedDatabase = new Database(databasePath);
+    try {
+      const preferenceColumns = inspectedDatabase
+        .prepare("PRAGMA table_info(paper_trading_preferences)")
+        .all() as Array<{ name: string }>;
+      const metadataColumns = inspectedDatabase
+        .prepare("PRAGMA table_info(paper_market_metadata)")
+        .all() as Array<{ name: string }>;
+      expect(preferenceColumns.map((column) => column.name)).not.toContain(
+        "min_bid_ask_ratio_percent",
+      );
+      expect(metadataColumns.map((column) => column.name)).not.toContain(
+        "category_ids_json",
+      );
+      expect(
+        inspectedDatabase
+          .prepare("SELECT 1 FROM schema_migrations WHERE version = 12")
+          .get(),
+      ).toBeUndefined();
+    } finally {
+      inspectedDatabase.close();
       rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -272,6 +333,7 @@ describe("PaperDatabase", () => {
       expect(
         upgradedDatabase.executeTestFakSells({
           tokenId: "yes-token",
+          bookVersion: "DATABASE-UPGRADE-BID-1",
           bids: [{ priceMicros: 30_000, sizeMicros: 5_000_000 }],
           minOrderSizeMicros: metadata?.minOrderSizeMicros ?? 0,
           feeRateMicros: metadata?.feeRateMicros ?? 0,

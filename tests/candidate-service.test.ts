@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CandidateScanner } from "../src/domain/market-scanner.js";
 import {
   CandidateService,
@@ -7,6 +7,59 @@ import {
 import { makeCandidate } from "./helpers.js";
 
 describe("CandidateService", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("waits the full interval after a scan completes before starting the next one", async () => {
+    vi.useFakeTimers();
+    let scanCount = 0;
+    const service = new CandidateService(
+      {
+        scan: async () => {
+          scanCount += 1;
+          return [];
+        },
+      },
+      15_000,
+    );
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(scanCount).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(scanCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scanCount).toBe(2);
+    service.stop();
+  });
+
+  it("coalesces concurrent refresh requests into one full scan", async () => {
+    let scanCount = 0;
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = new CandidateService(
+      {
+        scan: async () => {
+          scanCount += 1;
+          await pending;
+          return [];
+        },
+      },
+      15_000,
+    );
+
+    const first = service.refresh();
+    const second = service.refresh();
+    expect(first).toBe(second);
+    expect(scanCount).toBe(1);
+
+    release();
+    await Promise.all([first, second]);
+    expect(scanCount).toBe(1);
+  });
+
   it("aborts an active scan when stopped", async () => {
     let receivedSignal: AbortSignal | undefined;
     let releaseScan: () => void = () => {};
@@ -90,5 +143,27 @@ describe("CandidateService", () => {
       lastError: "temporary Gamma failure",
     });
     expect(notifications[3]).toEqual(recovered);
+  });
+
+  it("marks quote readiness explicitly across disconnect and recovery", async () => {
+    const service = new CandidateService(
+      { scan: async () => [makeCandidate()] },
+      15_000,
+    );
+    await service.refresh();
+
+    service.updateQuote("yes-token", null, null, false);
+    expect(service.getSnapshot().candidates[0]).toMatchObject({
+      bookReady: false,
+      bestBidMicros: null,
+      bestAskMicros: null,
+    });
+
+    service.updateQuote("yes-token", 10_000, 20_000, true);
+    expect(service.getSnapshot().candidates[0]).toMatchObject({
+      bookReady: true,
+      bestBidMicros: 10_000,
+      bestAskMicros: 20_000,
+    });
   });
 });

@@ -1,6 +1,7 @@
 import type { Event, Market } from "@polymarket/client";
 import type { AppConfig } from "../src/config.js";
 import type { TradeCandidate } from "../src/domain/types.js";
+import type { MarketEligibilitySettings } from "../src/domain/market-eligibility.js";
 
 export const testConfig: AppConfig = {
   host: "127.0.0.1",
@@ -12,6 +13,8 @@ export const testConfig: AppConfig = {
   maxMarketDurationDays: 30,
   minBuyPriceMicros: 10_000,
   maxBuyPriceMicros: 30_000,
+  minBidAskRatioPercent: 50,
+  maxMarketProgressPercent: 20,
   scanIntervalMs: 15_000,
   marketStreamReconnectMs: 2_000,
   paperSchedulerIntervalMs: 1_000,
@@ -19,6 +22,23 @@ export const testConfig: AppConfig = {
   paperValidationIntervalMs: 60_000,
   scanEventPageSize: 50,
 };
+
+export function testEligibilitySettings(
+  overrides: Partial<MarketEligibilitySettings> = {},
+): MarketEligibilitySettings {
+  return {
+    resultCounts: [2, 3],
+    allCategories: true,
+    selectedCategoryIds: [],
+    minBuyPriceMicros: 10_000,
+    maxBuyPriceMicros: 30_000,
+    minBidAskRatioPercent: 50,
+    maxMarketDurationDays: 30,
+    maxMarketProgressPercent: 20,
+    orderBudgetMicros: 1_000_000,
+    ...overrides,
+  };
+}
 
 export function makeMarket(overrides: Record<string, unknown> = {}): Market {
   return {
@@ -89,6 +109,8 @@ export function makeCandidate(
     eventSlug: "test-event",
     eventTitle: "Test event",
     category: "Tech",
+    categoryIds: ["tag-tech"],
+    categoryLabels: ["Tech"],
     resultCount: 2,
     isNegativeRisk: false,
     marketId: "market-1",
@@ -104,7 +126,8 @@ export function makeCandidate(
     feesEnabled: false,
     feeRateMicros: 0,
     feeExponent: 1,
-    bestBidMicros: 10_000,
+    bookReady: true,
+    bestBidMicros: 20_000,
     bestAskMicros: 30_000,
     executableBuyPriceMicros: 30_000,
     makerBuyPriceMicros: 20_000,

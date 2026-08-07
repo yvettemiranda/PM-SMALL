@@ -55,6 +55,8 @@ function publicConfig(
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
+    minBidAskRatioPercent: preferences.minBidAskRatioPercent,
+    maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     scanIntervalMs: config.scanIntervalMs,
     paperSettlementIntervalMs: config.paperSettlementIntervalMs,
     paperValidationIntervalMs: config.paperValidationIntervalMs,
@@ -160,11 +162,14 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
     resultCounts: preferences.resultCounts,
     allCategories: preferences.allCategories,
     selectedCategories: preferences.selectedCategories,
+    selectedCategoryIds: preferences.selectedCategories,
     candidateSortDirection: preferences.candidateSortDirection,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     updatedAt: preferences.updatedAt,
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     maxBuyPriceCents: preferences.maxBuyPriceMicros / 10_000,
+    minBidAskRatioPercent: preferences.minBidAskRatioPercent,
+    maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
     durationOptions: [...MARKET_DURATION_DAY_OPTIONS],
   };
@@ -247,6 +252,11 @@ function serializePositionView(
     dependencies,
     candidate,
   );
+  const currentSellPriceStatus = quoteStatusForPosition(
+    position.tokenId,
+    currentMarkPriceMicros,
+    dependencies,
+  );
   const marketValueMicros = positionMarketValueMicros(
     position,
     currentMarkPriceMicros,
@@ -286,6 +296,7 @@ function serializePositionView(
       currentMarkPriceMicros === null
         ? null
         : microsToDecimalString(currentMarkPriceMicros),
+    currentSellPriceStatus,
     targetSellPrice:
       targetSellPrices[0] === undefined
         ? null
@@ -296,6 +307,25 @@ function serializePositionView(
     ),
     progressPercent: currentMarketProgress(openedAt, endsAt, now),
   };
+}
+
+function quoteStatusForPosition(
+  tokenId: string,
+  currentMarkPriceMicros: number | null,
+  dependencies: AppDependencies,
+) {
+  const explicitStatus = dependencies.marketStream?.getQuoteStatus?.(tokenId);
+  if (explicitStatus !== undefined) {
+    return explicitStatus;
+  }
+  if (currentMarkPriceMicros !== null) {
+    return "READY" as const;
+  }
+  const streamStatus = dependencies.marketStream?.getStatus();
+  if (streamStatus === undefined || !streamStatus.running) {
+    return "DISCONNECTED" as const;
+  }
+  return streamStatus.connected ? ("NO_BID" as const) : ("RECONNECTING" as const);
 }
 
 function serializePortfolio(
@@ -375,6 +405,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       executionMode: "TEST",
       liveExecutionEnabled: dependencies.liveExecutor.enabled,
       strategy: serializeState(strategy),
+      capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
       portfolio: serializePortfolio(strategy, positions, dependencies),
       configuration: publicConfig(dependencies.config, preferences, strategy),
       runtime: runtimeStatus(),
@@ -457,6 +488,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         serializePositionView(position, dependencies, new Date()),
       ),
       preferences: serializePreferences(preferences),
+      capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
       marketScan: {
         ...marketScanStatus,
         candidateCount: orderedCandidates.length,
@@ -506,6 +538,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/api/test/preferences", async () => ({
     preferences: serializePreferences(dependencies.tradingPreferences.getSnapshot()),
+    capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
   }));
 
   app.put("/api/test/preferences", async (request) => {
@@ -518,12 +551,23 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
           .int()
           .refine((value) => MARKET_DURATION_DAY_OPTIONS.includes(value as never)),
         allCategories: z.boolean().optional(),
+        selectedCategoryIds: z.array(z.string().trim().min(1).max(80)).optional(),
         selectedCategories: z.array(z.string().trim().min(1).max(80)).optional(),
         candidateSortDirection: z.enum(["ASC", "DESC"]).optional(),
+        minBidAskRatioPercent: z.number().int().min(1).max(100).optional(),
+        maxMarketProgressPercent: z.number().int().min(1).max(100).optional(),
         orderAmount: z.number().finite().positive().max(1_000_000).optional(),
         initialCapital: z.number().finite().positive().max(1_000_000).optional(),
       })
       .parse(request.body);
+    const selectedCategoryIds =
+      body.selectedCategoryIds ?? body.selectedCategories;
+    if (
+      body.allCategories === false &&
+      (selectedCategoryIds === undefined || selectedCategoryIds.length === 0)
+    ) {
+      throw new Error("Select at least one official market category");
+    }
     const currentStrategy = dependencies.database.getStrategyState();
     const requestedInitialCapitalMicros =
       body.initialCapital === undefined
@@ -535,6 +579,14 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         : unitsToMicros(body.orderAmount);
     if (requestedOrderBudgetMicros > requestedInitialCapitalMicros) {
       throw new Error("Per-order TEST amount cannot exceed total TEST capital");
+    }
+    if (
+      requestedInitialCapitalMicros !== currentStrategy.initialCapitalMicros &&
+      !dependencies.database.canUpdateTestInitialCapital()
+    ) {
+      throw new Error(
+        "Pause and reset TEST before changing total capital after trading history exists",
+      );
     }
     const strategy =
       requestedInitialCapitalMicros === currentStrategy.initialCapitalMicros
@@ -549,15 +601,21 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       ...(body.allCategories === undefined
         ? {}
         : { allCategories: body.allCategories }),
-      ...(body.selectedCategories === undefined
+      ...(selectedCategoryIds === undefined
         ? {}
-        : { selectedCategories: body.selectedCategories }),
+        : { selectedCategories: selectedCategoryIds }),
       ...(body.candidateSortDirection === undefined
         ? {}
         : { candidateSortDirection: body.candidateSortDirection }),
       ...(body.orderAmount === undefined
         ? {}
         : { orderBudgetMicros: requestedOrderBudgetMicros }),
+      ...(body.minBidAskRatioPercent === undefined
+        ? {}
+        : { minBidAskRatioPercent: body.minBidAskRatioPercent }),
+      ...(body.maxMarketProgressPercent === undefined
+        ? {}
+        : { maxMarketProgressPercent: body.maxMarketProgressPercent }),
     });
     dependencies.paperAutomation?.requestRun();
     dependencies.marketStream?.refreshSubscriptions();
@@ -569,6 +627,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       preferences: serializePreferences(update.preferences),
       cancelledBuyCount: update.cancelledBuyCount,
       strategy: serializeState(strategy),
+      capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
     };
   });
 
@@ -618,6 +677,7 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         dependencies.tradingPreferences.getSnapshot().orderBudgetMicros,
       feeRateMicros: candidate.feeRateMicros,
       feeExponent: candidate.feeExponent,
+      eligibility: dependencies.tradingPreferences.getEligibilitySettings(),
     });
     if (execution.order === null) {
       return reply.code(409).send({

@@ -5,7 +5,7 @@ import type { MarketDataSource } from "../src/infrastructure/polymarket/market-d
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
 describe("MarketScanner", () => {
-  it("uses current duration/type filters while ignoring progress as an eligibility cut-off", async () => {
+  it("keeps the structural pool while applying current filters to diagnostics", async () => {
     const requestedWindows: unknown[] = [];
     const source: MarketDataSource = {
       listOpenEvents: async (request) => {
@@ -18,7 +18,7 @@ describe("MarketScanner", () => {
             ({
               tokenId,
               conditionId: "0xcondition",
-              bids: [{ price: tokenId === "yes-token" ? "0.01" : "0.97", size: "30" }],
+              bids: [{ price: tokenId === "yes-token" ? "0.02" : "0.97", size: "30" }],
               asks: [{ price: tokenId === "yes-token" ? "0.03" : "0.99", size: "30" }],
               minOrderSize: "5",
               tickSize: "0.01",
@@ -30,7 +30,10 @@ describe("MarketScanner", () => {
     let filters = {
       resultCounts: [2] as Array<2 | 3>,
       maxBuyPriceMicros: 30_000,
+      minBuyPriceMicros: 10_000,
+      minBidAskRatioPercent: 50,
       maxMarketDurationDays: 7,
+      maxMarketProgressPercent: 20,
       allCategories: true,
       selectedCategories: [] as string[],
       candidateSortDirection: "ASC" as const,
@@ -41,11 +44,11 @@ describe("MarketScanner", () => {
     });
     const now = new Date("2026-01-02T00:00:00.000Z");
 
-    expect(await scanner.scan(now)).toEqual([]);
+    expect(await scanner.scan(now)).toHaveLength(2);
     filters = { ...filters, maxMarketDurationDays: 14 };
     expect(await scanner.scan(now)).toHaveLength(2);
     filters = { ...filters, resultCounts: [3] };
-    expect(await scanner.scan(now)).toEqual([]);
+    expect(await scanner.scan(now)).toHaveLength(2);
 
     expect(requestedWindows).toEqual([{ pageSize: 50 }, { pageSize: 50 }, { pageSize: 50 }]);
   });
@@ -129,7 +132,7 @@ describe("MarketScanner", () => {
             conditionId: `condition-${tokenId
               .replace("yes-token-", "")
               .replace("no-token-", "")}`,
-            bids: [{ price: isYes ? "0.01" : "0.97", size: "30" }],
+            bids: [{ price: isYes ? "0.02" : "0.97", size: "30" }],
             asks: [{ price: isYes ? "0.03" : "0.99", size: "30" }],
             minOrderSize: "5",
             tickSize: "0.01",
@@ -192,6 +195,40 @@ describe("MarketScanner", () => {
     });
   });
 
+  it("keeps a structurally valid token monitored when its initial book is unavailable", async () => {
+    const source: MarketDataSource = {
+      listOpenEvents: async () => [makeEvent()],
+      fetchOrderBooks: async () => [
+        {
+          tokenId: "yes-token",
+          conditionId: "0xcondition",
+          bids: [{ price: "0.02", size: "30" }],
+          asks: [{ price: "0.03", size: "30" }],
+          minOrderSize: "5",
+          tickSize: "0.01",
+          negRisk: false,
+          hash: "hash",
+        } as unknown as OrderBook,
+      ],
+    };
+
+    const scanner = new MarketScanner(source, testConfig);
+    const candidates = await scanner.scan(
+      new Date("2026-01-02T00:00:00.000Z"),
+    );
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates.find((candidate) => candidate.tokenId === "yes-token")).toMatchObject({
+      bookReady: true,
+      bestBidMicros: 20_000,
+    });
+    expect(candidates.find((candidate) => candidate.tokenId === "no-token")).toMatchObject({
+      bookReady: false,
+      bestBidMicros: null,
+      bestAskMicros: null,
+    });
+  });
+
   it("retains failed-scan diagnostics", async () => {
     const source: MarketDataSource = {
       listOpenEvents: async (_request, reportProgress) => {
@@ -234,7 +271,7 @@ describe("MarketScanner", () => {
               conditionId: "0xcondition",
               bids:
                 tokenId === "yes-token"
-                  ? [{ price: "0.01", size: "30" }]
+                  ? [{ price: "0.02", size: "30" }]
                   : [{ price: "0.97", size: "30" }],
               asks:
                 tokenId === "yes-token"

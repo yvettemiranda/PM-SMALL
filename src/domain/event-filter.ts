@@ -1,6 +1,6 @@
 import type { Event, Market } from "@polymarket/client";
 import type { AppConfig } from "../config.js";
-import type { EligibleEvent, MarketToken } from "./types.js";
+import type { EligibleEvent, MarketCategory, MarketToken } from "./types.js";
 
 const DAY_MS = 86_400_000;
 
@@ -59,6 +59,7 @@ export function filterEligibleEvent(
     return null;
   }
 
+  const categories = officialCategories(event.tags ?? []);
   return {
     eventId: String(event.id),
     eventSlug:
@@ -66,10 +67,41 @@ export function filterEligibleEvent(
         ? (event as Event & { slug: string }).slug
         : null,
     title: event.title ?? "Untitled event",
-    category: event.category ?? "Other",
+    category: categories[0]?.label ?? "",
+    categories,
     resultCount,
     isNegativeRisk: event.trading.negRisk === true,
   };
+}
+
+function officialCategories(
+  tags: ReadonlyArray<{
+    id: unknown;
+    label?: string | null;
+    slug?: string | null;
+  }>,
+): MarketCategory[] {
+  const categories = new Map<string, MarketCategory>();
+  for (const tag of tags) {
+    const id = String(tag.id ?? "").trim();
+    if (id.length === 0 || categories.has(id)) {
+      continue;
+    }
+    const label = tag.label?.trim() || tag.slug?.trim() || id;
+    categories.set(id, { id, label });
+  }
+  return [...categories.values()];
+}
+
+function marketCategories(event: Event, market: Market): MarketCategory[] {
+  return officialCategories([...(event.tags ?? []), ...(market.tags ?? [])]);
+}
+
+function optionalPositiveMicros(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.round(parsed * 1_000_000)
+    : 0;
 }
 
 function marketIsOpen(market: Market): boolean {
@@ -114,7 +146,8 @@ export function extractEligibleTokens(
   const tokens: MarketToken[] = [];
 
   for (const market of event.markets) {
-    if (!marketIsOpen(market) || market.conditionId === null) {
+    const conditionId = String(market.conditionId ?? "").trim();
+    if (!marketIsOpen(market) || conditionId.length === 0) {
       continue;
     }
     const schedule = resolveMarketSchedule(event, market);
@@ -145,15 +178,19 @@ export function extractEligibleTokens(
       continue;
     }
 
+    const categories = marketCategories(event, market);
+
     const base = {
       eventId: eligibleEvent.eventId,
       eventSlug: eligibleEvent.eventSlug,
       eventTitle: eligibleEvent.title,
-      category: eligibleEvent.category,
+      category: categories[0]?.label ?? "",
+      categoryIds: categories.map((category) => category.id),
+      categoryLabels: categories.map((category) => category.label),
       resultCount: eligibleEvent.resultCount,
       isNegativeRisk: eligibleEvent.isNegativeRisk,
       marketId: String(market.id),
-      conditionId: String(market.conditionId),
+      conditionId,
       marketQuestion: market.question ?? "Untitled market",
       openedAt: new Date(schedule.openedAt).toISOString(),
       endsAt: new Date(schedule.endsAt).toISOString(),
@@ -161,6 +198,10 @@ export function extractEligibleTokens(
       progressPercent,
       gameStartsAt,
       ...feeParameters,
+      minOrderSizeMicros: optionalPositiveMicros(
+        market.trading.minimumOrderSize,
+      ),
+      tickSizeMicros: optionalPositiveMicros(market.trading.minimumTickSize),
     } as const;
 
     if (market.outcomes.yes.tokenId !== null) {

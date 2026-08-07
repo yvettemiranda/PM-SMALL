@@ -1,17 +1,14 @@
 import type { OrderBook } from "@polymarket/client";
 import type { AppConfig } from "../config.js";
 import type { MarketDataSource } from "../infrastructure/polymarket/market-data.js";
+import { isMarketEligible } from "./market-eligibility.js";
 import { extractEligibleTokens, filterEligibleEvent } from "./event-filter.js";
-import {
-  buildMonitoredCandidate,
-  buildTradeCandidate,
-  decimalStringToMicros,
-} from "./price.js";
+import { buildMonitoredCandidate, decimalStringToMicros } from "./price.js";
 import {
   sortTradeCandidates,
   type CandidateSortDirection,
 } from "./trading-strategy.js";
-import type { TokenOrderBook, TradeCandidate } from "./types.js";
+import type { MarketCategory, TokenOrderBook, TradeCandidate } from "./types.js";
 
 export type MarketScanDiagnostics = {
   phase: "EVENTS" | "ORDER_BOOKS" | "COMPLETE" | "FAILED";
@@ -27,7 +24,7 @@ export type MarketScanDiagnostics = {
   orderBookCount: number;
   monitoredTokenCount: number;
   candidateCount: number;
-  availableCategories: string[];
+  availableCategories: MarketCategory[];
   retryCount: number;
   rateLimitCount: number;
   transientErrorCount: number;
@@ -35,8 +32,11 @@ export type MarketScanDiagnostics = {
 
 export type MarketScanPreferences = {
   resultCounts: readonly (2 | 3)[];
+  minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
+  minBidAskRatioPercent: number;
   maxMarketDurationDays: number;
+  maxMarketProgressPercent: number;
   allCategories: boolean;
   selectedCategories: readonly string[];
   candidateSortDirection: CandidateSortDirection;
@@ -51,6 +51,7 @@ function normalizeOrderBook(book: OrderBook): TokenOrderBook {
   return {
     tokenId: String(book.tokenId),
     conditionId: String(book.conditionId),
+    bookVersion: `REST:${String(book.tokenId)}`,
     bids: book.bids.map((level) => ({
       priceMicros: decimalStringToMicros(level.price),
       sizeMicros: decimalStringToMicros(level.size),
@@ -99,8 +100,11 @@ export class MarketScanner implements CandidateScanner {
   ): Promise<TradeCandidate[]> {
     const scanPreferences = this.preferences?.getMarketScanPreferences() ?? {
       resultCounts: [2, 3],
+      minBuyPriceMicros: this.config.minBuyPriceMicros,
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
+      minBidAskRatioPercent: this.config.minBidAskRatioPercent,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
+      maxMarketProgressPercent: this.config.maxMarketProgressPercent,
       allCategories: true,
       selectedCategories: [],
       candidateSortDirection: "ASC",
@@ -109,7 +113,7 @@ export class MarketScanner implements CandidateScanner {
     const scanConfig: AppConfig = {
       ...this.config,
       maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
-      maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
+      maxMarketDurationDays: 365,
     };
     const startedAt = new Date();
     const startedAtMs = Date.now();
@@ -177,14 +181,19 @@ export class MarketScanner implements CandidateScanner {
         extractEligibleTokens(event, eligibleEvent, scanConfig, now),
       );
       const availableCategories = Array.from(
-        new Set(eligibleTokens.map((token) => token.category)),
-      ).sort((left, right) => left.localeCompare(right));
-      const tokens = eligibleTokens.filter(
-        (token) =>
-          scanPreferences.resultCounts.includes(token.resultCount) &&
-          (scanPreferences.allCategories ||
-            scanPreferences.selectedCategories.includes(token.category)),
+        new Map(
+          eligibleTokens.flatMap((token) =>
+            token.categoryIds.map((id, index) => [
+              id,
+              { id, label: token.categoryLabels[index] ?? id },
+            ] as const),
+          ),
+        ).values(),
+      ).sort(
+        (left, right) =>
+          left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
       );
+      const tokens = eligibleTokens;
 
       this.updateDiagnostics({
         phase: "ORDER_BOOKS",
@@ -229,28 +238,29 @@ export class MarketScanner implements CandidateScanner {
       const monitoredCandidates: TradeCandidate[] = [];
       let candidateCount = 0;
       for (const token of tokens) {
-        const book = bookByToken.get(token.tokenId);
-        if (book === undefined || book.isNegativeRisk !== token.isNegativeRisk) {
-          continue;
-        }
+        const fetchedBook = bookByToken.get(token.tokenId);
+        const book =
+          fetchedBook !== undefined &&
+          fetchedBook.isNegativeRisk === token.isNegativeRisk
+            ? fetchedBook
+            : null;
         const monitored = buildMonitoredCandidate(
           token,
           book,
           scanPreferences.orderBudgetMicros,
         );
-        if (monitored === null) {
-          continue;
-        }
         monitoredCandidates.push(monitored);
-        if (
-          buildTradeCandidate(
-            token,
-            book,
-            scanPreferences.orderBudgetMicros,
-            1,
-            scanPreferences.maxBuyPriceMicros,
-          ) !== null
-        ) {
+        if (isMarketEligible(monitored, {
+          resultCounts: scanPreferences.resultCounts,
+          allCategories: scanPreferences.allCategories,
+          selectedCategoryIds: scanPreferences.selectedCategories,
+          minBuyPriceMicros: scanPreferences.minBuyPriceMicros,
+          maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
+          minBidAskRatioPercent: scanPreferences.minBidAskRatioPercent,
+          maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
+          maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
+          orderBudgetMicros: scanPreferences.orderBudgetMicros,
+        }, now)) {
           candidateCount += 1;
         }
       }

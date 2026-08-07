@@ -42,6 +42,35 @@ describe("event filtering", () => {
     });
   });
 
+  it("uses stable official tag ids and keeps every official category", () => {
+    const event = makeEvent({
+      tags: [{ id: "tag-politics", label: "Politics", slug: "politics" }],
+      markets: [
+        makeMarket({
+          tags: [{ id: "tag-us", label: "United States", slug: "us" }],
+        }),
+      ],
+    });
+    const eligible = filterEligibleEvent(event);
+
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)[0]).toMatchObject({
+      category: "Politics",
+      categoryIds: ["tag-politics", "tag-us"],
+      categoryLabels: ["Politics", "United States"],
+    });
+  });
+
+  it("keeps untagged markets in all-categories mode without inventing a tag", () => {
+    const event = makeEvent({ category: "Title-derived text", tags: [] });
+    const eligible = filterEligibleEvent(event);
+
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)[0]).toMatchObject({
+      category: "",
+      categoryIds: [],
+      categoryLabels: [],
+    });
+  });
+
   it("uses the configured maximum duration as a filter", () => {
     const event = makeEvent();
     const eligible = filterEligibleEvent(event);
@@ -222,6 +251,16 @@ describe("event filtering", () => {
       expect(eligible).not.toBeNull();
       expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
     }
+  });
+
+  it("rejects a market without a usable condition id", () => {
+    const event = makeEvent({
+      markets: [makeMarket({ conditionId: "   " })],
+    });
+    const eligible = filterEligibleEvent(event);
+
+    expect(eligible).not.toBeNull();
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
   });
 
   it("carries the market fee schedule into every executable token", () => {

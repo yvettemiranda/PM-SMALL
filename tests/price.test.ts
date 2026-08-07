@@ -12,6 +12,8 @@ const token: MarketToken = {
   eventSlug: "event",
   eventTitle: "Event",
   category: "Tech",
+  categoryIds: ["tag-tech"],
+  categoryLabels: ["Tech"],
   resultCount: 2,
   isNegativeRisk: false,
   marketId: "market-1",
@@ -27,6 +29,8 @@ const token: MarketToken = {
   feesEnabled: false,
   feeRateMicros: 0,
   feeExponent: 1,
+  minOrderSizeMicros: 5_000_000,
+  tickSizeMicros: 10_000,
 };
 
 describe("price rules", () => {
@@ -43,6 +47,7 @@ describe("price rules", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
+      bookVersion: "PRICE-BOOK-1",
       bids: [{ priceMicros: 15_000, sizeMicros: 30_000_000 }],
       asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
       minOrderSizeMicros: 5_000_000,
@@ -65,6 +70,7 @@ describe("price rules", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
+      bookVersion: "PRICE-BOOK-2",
       bids: [{ priceMicros: 10_000, sizeMicros: 30_000_000 }],
       asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
       minOrderSizeMicros: 5_000_000,
@@ -85,6 +91,7 @@ describe("price rules", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
+      bookVersion: "PRICE-BOOK-3",
       bids: [{ priceMicros: 30_000, sizeMicros: 30_000_000 }],
       asks: [{ priceMicros: 40_000, sizeMicros: 10_000_000 }],
       minOrderSizeMicros: 5_000_000,
@@ -103,6 +110,7 @@ describe("price rules", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
+      bookVersion: "PRICE-BOOK-4",
       bids: [],
       asks: [],
       minOrderSizeMicros: 5_000_000,
@@ -123,6 +131,7 @@ describe("price rules", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",
       conditionId: "condition-1",
+      bookVersion: "PRICE-BOOK-5",
       bids: [{ priceMicros: 10_000, sizeMicros: 30_000_000 }],
       asks: [],
       minOrderSizeMicros: 5_000_000,

@@ -31,12 +31,20 @@ export type MarketStreamStatus = {
   lastError: string | null;
 };
 
+export type MarketQuoteStatus =
+  | "READY"
+  | "NO_BID"
+  | "NOT_READY"
+  | "RECONNECTING"
+  | "DISCONNECTED";
+
 export interface PaperMarketRuntime {
   getStatus(): MarketStreamStatus;
   refreshSubscriptions(): void;
   isTokenReady(tokenId: string): boolean;
   getBestBidMicros?(tokenId: string): number | null;
   getBestAskMicros?(tokenId: string): number | null;
+  getQuoteStatus?(tokenId: string): MarketQuoteStatus;
   getOrderBookRevision?(tokenId: string): number | null;
   getOrderBook?(candidate: TradeCandidate): TokenOrderBook | null;
   consumeTestBuyLiquidity?(
@@ -109,6 +117,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.currentConnectionDataComplete = false;
     this.recoveryStartedAtMs = null;
     this.processor.markDisconnected(tokenIds);
+    this.markCandidateQuotesDisconnected(tokenIds);
     await Promise.all([
       handle === null
         ? Promise.resolve()
@@ -134,6 +143,17 @@ export class MarketStreamService implements PaperMarketRuntime {
           .map((order) => order.tokenId),
       ]),
     ).sort();
+
+    if (this.connected) {
+      for (const candidate of this.candidates.getSnapshot().candidates) {
+        if (!this.processor.isTokenReady(candidate.tokenId)) continue;
+        this.candidates.updateQuote(
+          candidate.tokenId,
+          this.processor.getBestBidMicros(candidate.tokenId),
+          this.processor.getBestAskMicros(candidate.tokenId),
+        );
+      }
+    }
 
     if (
       this.handle !== null &&
@@ -170,6 +190,21 @@ export class MarketStreamService implements PaperMarketRuntime {
 
   public getBestAskMicros(tokenId: string): number | null {
     return this.connected ? this.processor.getBestAskMicros(tokenId) : null;
+  }
+
+  public getQuoteStatus(tokenId: string): MarketQuoteStatus {
+    if (!this.started) {
+      return "DISCONNECTED";
+    }
+    if (!this.connected) {
+      return "RECONNECTING";
+    }
+    if (!this.processor.isTokenReady(tokenId)) {
+      return "NOT_READY";
+    }
+    return this.processor.getBestBidMicros(tokenId) === null
+      ? "NO_BID"
+      : "READY";
   }
 
   public getOrderBookRevision(tokenId: string): number | null {
@@ -239,6 +274,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     this.currentConnectionStartedAtMs = null;
     this.currentConnectionDataComplete = false;
     this.processor.markDisconnected(previousTokenIds);
+    this.markCandidateQuotesDisconnected(previousTokenIds);
 
     if (previousHandle !== null) {
       await this.closeHandle(previousHandle, "previous stream close");
@@ -304,6 +340,7 @@ export class MarketStreamService implements PaperMarketRuntime {
         this.currentConnectionStartedAtMs = null;
         this.currentConnectionDataComplete = false;
         this.processor.markDisconnected(tokenIds);
+        this.markCandidateQuotesDisconnected(tokenIds);
         this.scheduleReconnect();
       }
     }
@@ -332,6 +369,12 @@ export class MarketStreamService implements PaperMarketRuntime {
         completedAtMs - this.recoveryStartedAtMs,
       );
       this.recoveryStartedAtMs = null;
+    }
+  }
+
+  private markCandidateQuotesDisconnected(tokenIds: readonly string[]): void {
+    for (const tokenId of tokenIds) {
+      this.candidates.updateQuote(tokenId, null, null, false);
     }
   }
 
