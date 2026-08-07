@@ -435,6 +435,7 @@ export class PaperDatabase {
       { version: 10, file: "010_test_strategy_preferences.sql" },
       { version: 11, file: "011_legacy_target_exit_metadata.sql" },
       { version: 12, file: "012_final_market_eligibility.sql" },
+      { version: 13, file: "013_fak_buy_fill_invariant.sql" },
     ];
 
     for (const migration of migrations) {
@@ -1897,6 +1898,9 @@ export class PaperDatabase {
         plan.fills[0]?.priceMicros ?? input.maxPriceMicros,
       );
       const status: PaperOrderStatus = plan.fullySpent ? "FILLED" : "CANCELLED";
+      const originalSizeMicros = plan.fullySpent
+        ? plan.grossFillSizeMicros
+        : Math.max(requestedSizeMicros, plan.grossFillSizeMicros);
       this.database
         .prepare(
           `INSERT INTO paper_orders(
@@ -1919,7 +1923,7 @@ export class PaperDatabase {
           candidate.openedAt,
           candidate.endsAt,
           input.maxPriceMicros,
-          Math.max(requestedSizeMicros, plan.grossFillSizeMicros),
+          originalSizeMicros,
           plan.grossFillSizeMicros,
           status,
           maxSpendMicros,
