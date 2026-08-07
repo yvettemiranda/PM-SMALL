@@ -4,8 +4,8 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 最终 TEST 功能已部署到 Linux；运行时代码对应 GitHub 功能提交 `40a09e36a9cb1bd27f3b39a11bc96b71083ba4ee`，Schema 13，公网入口 `https://43-159-133-129.sslip.io/`。
-- 2026-08-07 本地分支基于已核对的 `origin/main` `b9143b921fec3e366034faa29be04d84529093c1` 进行最终 UI 调整；隔离预览为 Schema 14、`TEST + LIVE_DISABLED + PAUSED`，尚未推送或部署，不能视为 GitHub/服务器正式进度。
+- 最终 UI 与扫描稳定性功能提交 `4d5c357c86db40c402693289cdab87c1dacdad48` 已推送 GitHub `main` 并部署 Linux；数据库为 Schema 14，公网入口 `https://43-159-133-129.sslip.io/`。
+- 部署前备份 `/home/ubuntu/pm-small-backup-20260807T063635Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、1000U 历史资金和原业务表数据。
 - 现行规则以 `HANDOFF.md`、`docs/DECISIONS.md` 和 `docs/PLAN.md` 为准；历史完整方案只作背景。
 
 ## 不可越过的边界
@@ -14,7 +14,7 @@
 - 纸面闭环和用户制定的正式长期验证全部完成前，不接钱包、不签名、不提交真实订单、不执行链上写操作。
 - 到正式长期验证阶段立即停止，由用户确定时长、故障场景、资源门槛和通过标准；短时测试与部署冒烟不计入长期验收。
 - Linux 交付必须先备份 SQLite 与部署配置，再部署 GitHub `main` 同一 SHA；应用 3000 只绑定 `127.0.0.1`，公网只通过 HTTPS、Nginx 和登录认证访问。
-- 本轮短时部署冒烟已经通过，服务器保持 `TEST + LIVE_DISABLED + PAUSED`；现在必须停止在正式长期验证前，等待用户制定验证计划。
+- 本轮短时部署冒烟已经通过：放宽条件首轮找到 55 个候选，下一轮扫描中候选持续保留且行情流零断线；现在必须停止在正式长期验证前，等待用户制定验证计划。
 
 ## 当前业务规则
 
