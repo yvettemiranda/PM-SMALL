@@ -5,7 +5,153 @@ import type { MarketDataSource } from "../src/infrastructure/polymarket/market-d
 import { makeEvent, makeMarket, testConfig } from "./helpers.js";
 
 describe("MarketScanner", () => {
-  it("keeps the structural pool while applying current filters to diagnostics", async () => {
+  it("processes real event pages as a stream instead of retaining the full event graph", async () => {
+    const first = makeEvent({ id: "streamed-event-1" });
+    const second = makeEvent({
+      id: "streamed-event-2",
+      markets: [
+        makeMarket({
+          id: "streamed-market-2",
+          conditionId: "streamed-condition-2",
+          outcomes: {
+            yes: { label: "Yes", tokenId: "streamed-yes-2", price: "0.02" },
+            no: { label: "No", tokenId: "streamed-no-2", price: "0.98" },
+          },
+        }),
+      ],
+    });
+    let listCalled = false;
+    const source: MarketDataSource = {
+      streamOpenEventPages: async function* () {
+        yield [first];
+        yield [second];
+      },
+      listOpenEvents: async () => {
+        listCalled = true;
+        return [];
+      },
+      fetchOrderBooks: async () => [],
+    };
+    const scanner = new MarketScanner(source, testConfig);
+
+    const candidates = await scanner.scan(
+      new Date("2026-01-02T00:00:00.000Z"),
+    );
+
+    expect(listCalled).toBe(false);
+    expect(candidates).toHaveLength(4);
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      eventCount: 2,
+      eligibleTokenCount: 4,
+      monitoredTokenCount: 4,
+    });
+  });
+
+  it("prefilters static rules before order books while retaining every matching token", async () => {
+    const matchingMarket = makeMarket({
+      id: "matching-market",
+      conditionId: "matching-condition",
+      outcomes: {
+        yes: { label: "Yes", tokenId: "matching-yes", price: "0.99" },
+        no: { label: "No", tokenId: "matching-no", price: "0.01" },
+      },
+    });
+    const wrongCategoryMarket = makeMarket({
+      id: "wrong-category-market",
+      conditionId: "wrong-category-condition",
+      outcomes: {
+        yes: { label: "Yes", tokenId: "wrong-category-yes", price: "0.02" },
+        no: { label: "No", tokenId: "wrong-category-no", price: "0.98" },
+      },
+    });
+    const shortMarket = makeMarket({
+      id: "short-market",
+      conditionId: "short-condition",
+      outcomes: {
+        yes: { label: "Yes", tokenId: "short-yes", price: "0.02" },
+        no: { label: "No", tokenId: "short-no", price: "0.98" },
+      },
+    });
+    const events = [
+      makeEvent({
+        id: "matching-event",
+        tags: [{ id: "2", label: "Politics", slug: "politics" }],
+        markets: [matchingMarket],
+      }),
+      makeEvent({
+        id: "wrong-category-event",
+        tags: [{ id: "1", label: "Sports", slug: "sports" }],
+        markets: [wrongCategoryMarket],
+      }),
+      makeEvent({
+        id: "short-event",
+        schedule: {
+          startDate: "2026-01-01T00:00:00.000Z",
+          endDate: "2026-01-06T00:00:00.000Z",
+        },
+        tags: [{ id: "2", label: "Politics", slug: "politics" }],
+        markets: [shortMarket],
+      }),
+    ];
+    let requestedTokenIds: readonly string[] = [];
+    const source: MarketDataSource = {
+      listOpenEvents: async () => events,
+      fetchOrderBooks: async (tokenIds) => {
+        requestedTokenIds = tokenIds;
+        return [
+          {
+            tokenId: "matching-yes",
+            conditionId: "matching-condition",
+            bids: [{ price: "0.97", size: "30" }],
+            asks: [{ price: "0.99", size: "30" }],
+            minOrderSize: "5",
+            tickSize: "0.01",
+            negRisk: false,
+            hash: "hash",
+          } as unknown as OrderBook,
+        ];
+      },
+    };
+    const scanner = new MarketScanner(source, testConfig, {
+      getMarketScanPreferences: () => ({
+        resultCounts: [2],
+        minBuyPriceMicros: 10_000,
+        maxBuyPriceMicros: 30_000,
+        minBidAskRatioPercent: 50,
+        minMarketDurationDays: 7,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 20,
+        allCategories: false,
+        selectedCategories: ["2"],
+        candidateSortDirection: "ASC",
+        orderBudgetMicros: 1_000_000,
+      }),
+    });
+
+    const candidates = await scanner.scan(
+      new Date("2026-01-02T00:00:00.000Z"),
+    );
+
+    expect(requestedTokenIds).toEqual(["matching-yes", "matching-no"]);
+    expect(
+      candidates.map((candidate) => candidate.tokenId).sort(),
+    ).toEqual(["matching-no", "matching-yes"]);
+    expect(scanner.getLastDiagnostics()).toMatchObject({
+      eligibleTokenCount: 6,
+      staticEligibleTokenCount: 2,
+      orderBookTargetTokenCount: 2,
+      monitoredTokenCount: 2,
+      candidateCount: 0,
+      rejectionCounts: {
+        CATEGORY: 2,
+        DURATION_BELOW_MIN: 2,
+        ASK_ABOVE_MAX: 1,
+        BOOK_NOT_READY: 1,
+      },
+    });
+  });
+
+  it("updates the monitored pool when static filters change", async () => {
     const requestedWindows: unknown[] = [];
     const source: MarketDataSource = {
       listOpenEvents: async (request) => {
@@ -45,11 +191,11 @@ describe("MarketScanner", () => {
     });
     const now = new Date("2026-01-02T00:00:00.000Z");
 
-    expect(await scanner.scan(now)).toHaveLength(2);
+    expect(await scanner.scan(now)).toHaveLength(0);
     filters = { ...filters, maxMarketDurationDays: 14 };
     expect(await scanner.scan(now)).toHaveLength(2);
     filters = { ...filters, resultCounts: [3] };
-    expect(await scanner.scan(now)).toHaveLength(2);
+    expect(await scanner.scan(now)).toHaveLength(0);
 
     expect(requestedWindows).toEqual([{ pageSize: 50 }, { pageSize: 50 }, { pageSize: 50 }]);
   });

@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   MarketStreamHandle,
   MarketStreamSource,
+  MarketStreamSubscriptionUpdate,
 } from "../src/infrastructure/polymarket/market-stream.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { CandidateService } from "../src/services/candidate-service.js";
@@ -11,6 +12,7 @@ import { makeCandidate } from "./helpers.js";
 
 class ControllableDisconnectSource implements MarketStreamSource {
   public calls: string[][] = [];
+  public updates: MarketStreamSubscriptionUpdate[] = [];
   private endCurrent: ((error?: Error) => void) | null = null;
 
   public async subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle> {
@@ -23,7 +25,14 @@ class ControllableDisconnectSource implements MarketStreamSource {
     });
     this.endCurrent = (error) =>
       error === undefined ? release() : reject(error);
+    const source = this;
     return {
+      updateSubscriptions: async (update) => {
+        source.updates.push({
+          subscribe: [...update.subscribe],
+          unsubscribe: [...update.unsubscribe],
+        });
+      },
       close: async () => release(),
       async *[Symbol.asyncIterator]() {
         yield makeBookEvent(tokenIds[0]);
@@ -51,6 +60,7 @@ class HangingCloseSource implements MarketStreamSource {
   public async subscribe(): Promise<MarketStreamHandle> {
     const source = this;
     return {
+      updateSubscriptions: async () => {},
       close: async () => {
         source.closeStarted = true;
         await source.closed;
@@ -63,6 +73,27 @@ class HangingCloseSource implements MarketStreamSource {
 
   public release(): void {
     this.releaseClose();
+  }
+}
+
+class BurstSnapshotSource implements MarketStreamSource {
+  private release: () => void = () => {};
+  private readonly closed = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  public async subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle> {
+    const source = this;
+    return {
+      updateSubscriptions: async () => {},
+      close: async () => source.release(),
+      async *[Symbol.asyncIterator]() {
+        for (const tokenId of tokenIds) {
+          yield makeBookEvent(tokenId);
+        }
+        await source.closed;
+      },
+    };
   }
 }
 
@@ -159,6 +190,52 @@ describe("MarketStreamService", () => {
     expect(source.calls).toEqual([["yes-token"]]);
   });
 
+  it("updates changed scan subscriptions without disconnecting retained candidates", async () => {
+    const retainedCandidate = makeCandidate();
+    const addedCandidate = makeCandidate({
+      candidateId: "added-token:20000",
+      tokenId: "added-token",
+    });
+    let scannedCandidates = [retainedCandidate];
+    const candidates = new CandidateService(
+      { scan: async () => scannedCandidates },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const source = new ControllableDisconnectSource();
+    const service = new MarketStreamService(
+      source,
+      candidates,
+      database,
+      new PaperMarketProcessor(database),
+      5,
+    );
+    resources.push(database, service);
+
+    service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+    scannedCandidates = [retainedCandidate, addedCandidate];
+    await candidates.refresh();
+    await waitFor(() => source.updates.length === 1);
+
+    expect(source.calls).toEqual([["yes-token"]]);
+    expect(source.updates).toEqual([
+      { subscribe: ["added-token"], unsubscribe: [] },
+    ]);
+    expect(service.getStatus()).toMatchObject({
+      connected: true,
+      subscribedTokenCount: 2,
+      connectionCount: 1,
+      unexpectedDisconnectCount: 0,
+    });
+    expect(
+      candidates
+        .getSnapshot()
+        .candidates.find((candidate) => candidate.tokenId === "yes-token"),
+    ).toMatchObject({ bookReady: true });
+  });
+
   it("restores a full snapshot after each repeated disconnect", async () => {
     const candidates = new CandidateService(
       { scan: async () => [makeCandidate()] },
@@ -247,6 +324,40 @@ describe("MarketStreamService", () => {
     expect(source.closeStarted).toBe(true);
     expect(outcome).toBe("stopped");
     expect(service.getStatus().lastError).toContain("timed out after 10ms");
+  });
+
+  it("records a large initial snapshot without rescanning every subscribed token", async () => {
+    const scannedCandidates = Array.from({ length: 200 }, (_value, index) =>
+      makeCandidate({
+        candidateId: `token-${index}:30000`,
+        tokenId: `token-${index}`,
+      }),
+    );
+    const candidates = new CandidateService(
+      { scan: async () => scannedCandidates },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const processor = new PaperMarketProcessor(database);
+    const readinessChecks = vi.spyOn(processor, "isTokenReady");
+    const service = new MarketStreamService(
+      new BurstSnapshotSource(),
+      candidates,
+      database,
+      processor,
+      5,
+    );
+    resources.push(database, service);
+
+    service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+
+    expect(service.getStatus()).toMatchObject({
+      subscribedTokenCount: 200,
+      dataCompleteTokenCount: 200,
+    });
+    expect(readinessChecks.mock.calls.length).toBeLessThanOrEqual(200);
   });
 });
 

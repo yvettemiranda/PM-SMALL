@@ -96,6 +96,44 @@ describe("HTTP app", () => {
     });
   });
 
+  it("keeps a last-known eligible market visible but not tradable while quotes reconnect", async () => {
+    const candidate = makeCurrentCandidate();
+    const connectedRuntime = marketRuntime();
+    const reconnectingRuntime: PaperMarketRuntime = {
+      ...connectedRuntime,
+      getStatus: () => ({
+        ...connectedRuntime.getStatus(),
+        connected: false,
+        dataCompleteTokenCount: 0,
+        unexpectedDisconnectCount: 1,
+      }),
+      isTokenReady: () => false,
+      getQuoteStatus: () => "RECONNECTING",
+    };
+    const { app, candidates } = makeTestApp([candidate], {
+      marketStream: reconnectingRuntime,
+    });
+    await candidates.refresh();
+    candidates.updateQuote(candidate.tokenId, null, null, false);
+
+    const response = await app.inject({ method: "GET", url: "/api/dashboard" });
+
+    expect(response.json().marketScan).toMatchObject({
+      candidateCount: 0,
+      displayCandidateCount: 1,
+      staleCandidateCount: 1,
+      displayedCandidateCount: 1,
+      candidates: [
+        expect.objectContaining({
+          tokenId: candidate.tokenId,
+          executableBuyPrice: "0.03",
+          tradable: false,
+          quoteStatus: "RECONNECTING",
+        }),
+      ],
+    });
+  });
+
   it("saves category, market, price, duration, ordering, capital, and order amount settings", async () => {
     const { app, candidates } = makeTestApp([
       makeCurrentCandidate({

@@ -226,6 +226,85 @@ describe("PolymarketMarketDataSource", () => {
     });
   });
 
+  it("fetches every order-book batch with bounded concurrency", async () => {
+    const calls: string[][] = [];
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async (requests: Array<{ tokenId: string }>) => {
+          const tokenIds = requests.map((request) => request.tokenId);
+          calls.push(tokenIds);
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise<void>((resolve) => releases.push(resolve));
+          active -= 1;
+          return tokenIds.map((tokenId) => ({ tokenId })) as never;
+        },
+      } as unknown as PublicClient,
+      [],
+      globalThis.fetch,
+      2,
+    );
+    const tokenIds = Array.from(
+      { length: 151 },
+      (_, index) => `token-${index}`,
+    );
+
+    const pending = source.fetchOrderBooks(tokenIds);
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(maxActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    releases.splice(0).forEach((release) => release());
+
+    await expect(pending).resolves.toHaveLength(151);
+    expect(calls.flat()).toEqual(tokenIds);
+    expect(maxActive).toBe(2);
+  });
+
+  it("cancels sibling order-book workers after one batch fails", async () => {
+    const calls: string[] = [];
+    let releaseSecond: () => void = () => {};
+    let markTwoStarted: () => void = () => {};
+    const twoStarted = new Promise<void>((resolve) => {
+      markTwoStarted = resolve;
+    });
+    const secondPending = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const source = new PolymarketMarketDataSource(
+      {
+        fetchOrderBooks: async (requests: Array<{ tokenId: string }>) => {
+          const firstTokenId = requests[0]?.tokenId ?? "missing";
+          calls.push(firstTokenId);
+          if (calls.length === 2) markTwoStarted();
+          if (firstTokenId === "token-0") {
+            await twoStarted;
+            throw new RequestRejectedError("invalid first batch", {
+              status: 400,
+            });
+          }
+          await secondPending;
+          return [] as never;
+        },
+      } as unknown as PublicClient,
+      [],
+      globalThis.fetch,
+      2,
+    );
+    const pending = source.fetchOrderBooks(
+      Array.from({ length: 151 }, (_, index) => `token-${index}`),
+    );
+
+    await expect(pending).rejects.toThrow("invalid first batch");
+    releaseSecond();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(calls).toEqual(["token-0", "token-50"]);
+  });
+
   it("does not retry a permanent order-book rejection", async () => {
     let attempts = 0;
     const progress: Array<Record<string, number>> = [];

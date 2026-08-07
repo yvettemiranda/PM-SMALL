@@ -13,6 +13,7 @@ const CLOSE_TIMEOUT_MS = 1_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const HEARTBEAT_STALE_MS = 30_000;
 const HEARTBEAT_WATCHDOG_INTERVAL_MS = 5_000;
+const SUBSCRIPTION_BATCH_SIZE = 500;
 
 const timestampSchema = z.union([z.string(), z.number()]).nullish();
 const levelSchema = z.object({
@@ -51,8 +52,14 @@ const rawMarketEventSchema = z.discriminatedUnion("event_type", [
 ]);
 
 export interface MarketStreamHandle extends AsyncIterable<MarketStreamEvent> {
+  updateSubscriptions(update: MarketStreamSubscriptionUpdate): Promise<void>;
   close(): Promise<void>;
 }
+
+export type MarketStreamSubscriptionUpdate = {
+  subscribe: readonly string[];
+  unsubscribe: readonly string[];
+};
 
 export interface MarketStreamSource {
   subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle>;
@@ -94,13 +101,22 @@ export class PolymarketMarketStreamSource implements MarketStreamSource {
           try {
             // The documented default has not been reliable for large public
             // subscriptions, so request the initial order-book dump explicitly.
+            const [initialTokenIds, ...additionalTokenIdBatches] =
+              chunkTokenIds(tokenIds);
             socket.send(
               JSON.stringify({
                 type: "market",
-                assets_ids: [...tokenIds],
+                assets_ids: initialTokenIds,
                 initial_dump: true,
               }),
             );
+            for (const additionalTokenIds of additionalTokenIdBatches) {
+              sendSubscriptionOperation(
+                socket,
+                "subscribe",
+                additionalTokenIds,
+              );
+            }
             lastPongAt = Date.now();
             heartbeat = setInterval(() => {
               if (socket.readyState === WebSocket.OPEN) {
@@ -198,14 +214,56 @@ export class PolymarketMarketStreamSource implements MarketStreamSource {
       })();
       return closePromise;
     };
+    const updateSubscriptions = async (
+      update: MarketStreamSubscriptionUpdate,
+    ): Promise<void> => {
+      if (closing || socket.readyState !== WebSocket.OPEN) {
+        throw new Error("Polymarket market WebSocket is not connected");
+      }
+      if (update.unsubscribe.length > 0) {
+        for (const tokenIdBatch of chunkTokenIds(update.unsubscribe)) {
+          sendSubscriptionOperation(socket, "unsubscribe", tokenIdBatch);
+        }
+      }
+      if (update.subscribe.length > 0) {
+        for (const tokenIdBatch of chunkTokenIds(update.subscribe)) {
+          sendSubscriptionOperation(socket, "subscribe", tokenIdBatch);
+        }
+      }
+    };
 
     return {
+      updateSubscriptions,
       close,
       [Symbol.asyncIterator]() {
         return queue;
       },
     };
   }
+}
+
+function chunkTokenIds(tokenIds: readonly string[]): string[][] {
+  return Array.from(
+    { length: Math.ceil(tokenIds.length / SUBSCRIPTION_BATCH_SIZE) },
+    (_, index) =>
+      tokenIds.slice(
+        index * SUBSCRIPTION_BATCH_SIZE,
+        index * SUBSCRIPTION_BATCH_SIZE + SUBSCRIPTION_BATCH_SIZE,
+      ),
+  );
+}
+
+function sendSubscriptionOperation(
+  socket: WebSocket,
+  operation: "subscribe" | "unsubscribe",
+  tokenIds: readonly string[],
+): void {
+  socket.send(
+    JSON.stringify({
+      operation,
+      assets_ids: [...tokenIds],
+    }),
+  );
 }
 
 type RawMarketEvent = z.infer<typeof rawMarketEventSchema>;

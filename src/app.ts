@@ -112,9 +112,16 @@ function serializeSettlement(settlement: PaperSettlement) {
   };
 }
 
-function serializeCandidate(candidate: TradeCandidate) {
+function serializeCandidate(
+  candidate: TradeCandidate,
+  availability: { tradable: boolean; quoteStatus: string } = {
+    tradable: candidate.bookReady,
+    quoteStatus: candidate.bookReady ? "READY" : "NOT_READY",
+  },
+) {
   return {
     ...candidate,
+    ...availability,
     marketUrl: polymarketEventUrl(candidate.eventSlug, candidate.eventId),
     bestBid:
       candidate.bestBidMicros === null
@@ -152,7 +159,9 @@ function serializeSnapshot(
   return includeCandidates
     ? {
         ...summary,
-        candidates: candidates.map(serializeCandidate),
+        candidates: candidates.map((candidate) =>
+          serializeCandidate(candidate),
+        ),
       }
     : summary;
 }
@@ -473,9 +482,25 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const positions = dependencies.database.listCurrentPaperPositionViews();
     const preferences = dependencies.tradingPreferences.getSnapshot();
     const candidateSnapshot = dependencies.candidates.getSnapshot();
-    const orderedCandidates = dependencies.tradingPreferences.getOrderedCandidates(
+    const now = new Date();
+    const eligibleCandidates = dependencies.tradingPreferences.getOrderedCandidates(
       candidateSnapshot.candidates,
-      new Date(),
+      now,
+    );
+    const actionableCandidates =
+      dependencies.marketStream === undefined
+        ? eligibleCandidates
+        : eligibleCandidates.filter((candidate) =>
+            dependencies.marketStream?.isTokenReady(candidate.tokenId),
+          );
+    const displayCandidates = dependencies.tradingPreferences.getOrderedCandidates(
+      candidateSnapshot.candidates.map((candidate) =>
+        candidate.bookReady ? candidate : { ...candidate, bookReady: true },
+      ),
+      now,
+    );
+    const actionableCandidateIds = new Set(
+      actionableCandidates.map((candidate) => candidate.candidateId),
     );
     const { candidates: _unfilteredCandidates, ...marketScanStatus } =
       candidateSnapshot;
@@ -492,13 +517,25 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       capitalEditable: dependencies.database.canUpdateTestInitialCapital(),
       marketScan: {
         ...marketScanStatus,
-        candidateCount: orderedCandidates.length,
-        candidates: orderedCandidates
+        candidateCount: actionableCandidates.length,
+        displayCandidateCount: displayCandidates.length,
+        staleCandidateCount:
+          displayCandidates.length - actionableCandidates.length,
+        candidates: displayCandidates
           .slice(0, query.limit)
-          .map(serializeCandidate),
+          .map((candidate) => {
+            const tradable = actionableCandidateIds.has(candidate.candidateId);
+            return serializeCandidate(candidate, {
+              tradable,
+              quoteStatus:
+                dependencies.marketStream?.getQuoteStatus?.(
+                  candidate.tokenId,
+                ) ?? (tradable ? "READY" : "NOT_READY"),
+            });
+          }),
         displayedCandidateCount: Math.min(
           query.limit,
-          orderedCandidates.length,
+          displayCandidates.length,
         ),
       },
     };

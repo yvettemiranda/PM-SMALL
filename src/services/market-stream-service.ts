@@ -59,11 +59,15 @@ export class MarketStreamService implements PaperMarketRuntime {
   private connected = false;
   private desiredTokenIds: string[] = [];
   private currentTokenIds: string[] = [];
+  private currentTokenIdSet = new Set<string>();
+  private readonly pendingSnapshotTokenIds = new Set<string>();
   private handle: MarketStreamHandle | null = null;
   private candidateUnsubscribe: (() => void) | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private restartRequested = false;
   private restartLoop: Promise<void> | null = null;
+  private subscriptionUpdateRequested = false;
+  private subscriptionUpdateLoop: Promise<void> | null = null;
   private generation = 0;
   private lastError: string | null = null;
   private connectionCount = 0;
@@ -112,6 +116,8 @@ export class MarketStreamService implements PaperMarketRuntime {
     const tokenIds = this.currentTokenIds;
     this.handle = null;
     this.currentTokenIds = [];
+    this.currentTokenIdSet.clear();
+    this.pendingSnapshotTokenIds.clear();
     this.connected = false;
     this.currentConnectionStartedAtMs = null;
     this.currentConnectionDataComplete = false;
@@ -125,6 +131,12 @@ export class MarketStreamService implements PaperMarketRuntime {
       this.restartLoop === null
         ? Promise.resolve()
         : this.waitBounded(this.restartLoop, "stream restart loop"),
+      this.subscriptionUpdateLoop === null
+        ? Promise.resolve()
+        : this.waitBounded(
+            this.subscriptionUpdateLoop,
+            "stream subscription update loop",
+          ),
     ]);
   }
 
@@ -159,6 +171,10 @@ export class MarketStreamService implements PaperMarketRuntime {
       this.handle !== null &&
       sameTokenIds(this.desiredTokenIds, this.currentTokenIds)
     ) {
+      return;
+    }
+    if (this.handle !== null && this.connected) {
+      this.requestSubscriptionUpdate();
       return;
     }
     this.requestRestart();
@@ -256,6 +272,87 @@ export class MarketStreamService implements PaperMarketRuntime {
     });
   }
 
+  private requestSubscriptionUpdate(): void {
+    this.subscriptionUpdateRequested = true;
+    if (this.subscriptionUpdateLoop !== null) {
+      return;
+    }
+
+    this.subscriptionUpdateLoop = this.drainSubscriptionUpdates().finally(
+      () => {
+        this.subscriptionUpdateLoop = null;
+        if (
+          this.subscriptionUpdateRequested &&
+          this.started &&
+          this.connected &&
+          this.handle !== null
+        ) {
+          this.requestSubscriptionUpdate();
+        }
+      },
+    );
+  }
+
+  private async drainSubscriptionUpdates(): Promise<void> {
+    while (
+      this.subscriptionUpdateRequested &&
+      this.started &&
+      this.connected &&
+      this.handle !== null
+    ) {
+      this.subscriptionUpdateRequested = false;
+      const handle = this.handle;
+      const generation = this.generation;
+      const targetTokenIds = [...this.desiredTokenIds];
+      const currentTokenIdSet = new Set(this.currentTokenIds);
+      const targetTokenIdSet = new Set(targetTokenIds);
+      const subscribe = targetTokenIds.filter(
+        (tokenId) => !currentTokenIdSet.has(tokenId),
+      );
+      const unsubscribe = this.currentTokenIds.filter(
+        (tokenId) => !targetTokenIdSet.has(tokenId),
+      );
+      if (subscribe.length === 0 && unsubscribe.length === 0) {
+        continue;
+      }
+
+      // Update the local membership before awaiting the transport so an
+      // initial book arriving immediately after subscribe is not discarded.
+      this.currentTokenIds = targetTokenIds;
+      this.currentTokenIdSet = targetTokenIdSet;
+      for (const tokenId of unsubscribe) {
+        this.pendingSnapshotTokenIds.delete(tokenId);
+      }
+      for (const tokenId of subscribe) {
+        this.pendingSnapshotTokenIds.add(tokenId);
+      }
+      if (subscribe.length > 0) {
+        this.currentConnectionDataComplete = false;
+      }
+
+      try {
+        await handle.updateSubscriptions({ subscribe, unsubscribe });
+      } catch (error) {
+        if (generation === this.generation && handle === this.handle) {
+          this.lastError = errorMessage(error);
+          this.requestRestart();
+        }
+        return;
+      }
+
+      if (
+        !this.started ||
+        generation !== this.generation ||
+        handle !== this.handle
+      ) {
+        return;
+      }
+      this.processor.markDisconnected(unsubscribe);
+      this.markCandidateQuotesDisconnected(unsubscribe);
+      this.recordFullSnapshotIfReady();
+    }
+  }
+
   private async drainRestarts(): Promise<void> {
     while (this.restartRequested && this.started) {
       this.restartRequested = false;
@@ -270,6 +367,8 @@ export class MarketStreamService implements PaperMarketRuntime {
     const previousTokenIds = this.currentTokenIds;
     this.handle = null;
     this.currentTokenIds = [];
+    this.currentTokenIdSet.clear();
+    this.pendingSnapshotTokenIds.clear();
     this.connected = false;
     this.currentConnectionStartedAtMs = null;
     this.currentConnectionDataComplete = false;
@@ -293,6 +392,11 @@ export class MarketStreamService implements PaperMarketRuntime {
       }
       this.handle = handle;
       this.currentTokenIds = tokenIds;
+      this.currentTokenIdSet = new Set(tokenIds);
+      this.pendingSnapshotTokenIds.clear();
+      for (const tokenId of tokenIds) {
+        this.pendingSnapshotTokenIds.add(tokenId);
+      }
       this.connected = true;
       this.connectionCount += 1;
       this.currentConnectionStartedAtMs = Date.now();
@@ -317,13 +421,19 @@ export class MarketStreamService implements PaperMarketRuntime {
         if (!this.started || generation !== this.generation) {
           return;
         }
+        if (!this.currentTokenIdSet.has(event.tokenId)) {
+          continue;
+        }
         this.processor.handle(event);
+        if (event.type === "book") {
+          this.pendingSnapshotTokenIds.delete(event.tokenId);
+        }
         this.candidates.updateQuote(
           event.tokenId,
           this.processor.getBestBidMicros(event.tokenId),
           this.processor.getBestAskMicros(event.tokenId),
         );
-        this.recordFullSnapshotIfReady(tokenIds);
+        this.recordFullSnapshotIfReady();
       }
     } catch (error) {
       if (generation === this.generation) {
@@ -336,6 +446,8 @@ export class MarketStreamService implements PaperMarketRuntime {
         this.recoveryStartedAtMs ??= disconnectedAtMs;
         this.handle = null;
         this.currentTokenIds = [];
+        this.currentTokenIdSet.clear();
+        this.pendingSnapshotTokenIds.clear();
         this.connected = false;
         this.currentConnectionStartedAtMs = null;
         this.currentConnectionDataComplete = false;
@@ -346,11 +458,11 @@ export class MarketStreamService implements PaperMarketRuntime {
     }
   }
 
-  private recordFullSnapshotIfReady(tokenIds: readonly string[]): void {
+  private recordFullSnapshotIfReady(): void {
     if (
       this.currentConnectionDataComplete ||
-      tokenIds.length === 0 ||
-      !tokenIds.every((tokenId) => this.processor.isTokenReady(tokenId))
+      this.currentTokenIds.length === 0 ||
+      this.pendingSnapshotTokenIds.size > 0
     ) {
       return;
     }

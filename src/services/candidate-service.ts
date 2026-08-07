@@ -15,6 +15,7 @@ export type CandidateSnapshot = {
 
 export class CandidateService {
   private candidates: TradeCandidate[] = [];
+  private candidateByTokenId = new Map<string, TradeCandidate>();
   private lastScanAt: string | null = null;
   private lastError: string | null = null;
   private diagnostics: MarketScanDiagnostics | null = null;
@@ -81,17 +82,36 @@ export class CandidateService {
     );
   }
 
+  public getCandidatesByTokenIds(
+    tokenIds: Iterable<string>,
+  ): TradeCandidate[] {
+    const candidates: TradeCandidate[] = [];
+    for (const tokenId of tokenIds) {
+      const candidate = this.candidateByTokenId.get(tokenId);
+      if (candidate !== undefined) {
+        candidates.push(candidate);
+      }
+    }
+    return candidates;
+  }
+
   public updateQuote(
     tokenId: string,
     bestBidMicros: number | null,
     bestAskMicros: number | null,
     bookReady = true,
   ): void {
-    const candidate = this.candidates.find((item) => item.tokenId === tokenId);
+    const candidate = this.candidateByTokenId.get(tokenId);
     if (candidate === undefined) {
       return;
     }
     candidate.bookReady = bookReady;
+    if (!bookReady) {
+      for (const listener of this.quoteListeners) {
+        listener(tokenId);
+      }
+      return;
+    }
     candidate.bestBidMicros = bestBidMicros;
     candidate.bestAskMicros = bestAskMicros;
     if (bestAskMicros !== null) {
@@ -133,6 +153,9 @@ export class CandidateService {
       .scan(undefined, controller.signal)
       .then((candidates) => {
         this.candidates = candidates;
+        this.candidateByTokenId = new Map(
+          candidates.map((candidate) => [candidate.tokenId, candidate]),
+        );
         this.lastScanAt = new Date().toISOString();
         this.lastError = null;
         this.diagnostics = this.scanner.getLastDiagnostics?.() ?? null;

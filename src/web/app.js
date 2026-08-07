@@ -6,6 +6,8 @@ const ui = {
   strategyStatus: "STOPPED",
   candidates: [],
   candidateCount: 0,
+  displayCandidateCount: 0,
+  staleCandidateCount: 0,
   visibleCandidateCount: 20,
   positionsExpanded: false,
   configDirty: false,
@@ -32,6 +34,26 @@ const CATEGORY_LABELS_ZH = {
   Mentions: "提及",
   Elections: "选举",
   Art: "艺术",
+};
+const REJECTION_LABELS_ZH = {
+  RESULT_COUNT: "结果数",
+  CATEGORY: "类别",
+  GAME_START: "比赛已开始",
+  DURATION_MISSING: "时长未知",
+  DURATION_BELOW_MIN: "时长过短",
+  DURATION_ABOVE_MAX: "时长过长",
+  PROGRESS_MISSING: "进度未知",
+  PROGRESS_BELOW_ZERO: "尚未开始",
+  PROGRESS_ABOVE_MAX: "进度超限",
+  BOOK_NOT_READY: "盘口未就绪",
+  ASK_MISSING: "无卖盘",
+  ASK_BELOW_MIN: "买价过低",
+  ASK_ABOVE_MAX: "买价过高",
+  BID_MISSING: "无买盘",
+  BID_ASK_RATIO: "买卖盘比例不足",
+  MIN_ORDER_SIZE: "最小下单量无效",
+  TICK_SIZE: "最小价差无效",
+  ORDER_BUDGET: "单笔金额不足",
 };
 
 async function api(path, options = {}) {
@@ -280,10 +302,12 @@ function formatCurrentSellPrice(position) {
 
 function renderCandidates() {
   const visible = ui.candidates;
-  $("#candidate-count").textContent = `${formatCount(ui.candidateCount)}个`;
-  $("#display-count").textContent = `当前显示 ${formatCount(visible.length)} / ${formatCount(ui.candidateCount)}`;
+  $("#candidate-count").textContent = ui.staleCandidateCount > 0
+    ? `可交易${formatCount(ui.candidateCount)} · 重连${formatCount(ui.staleCandidateCount)}`
+    : `${formatCount(ui.candidateCount)}个`;
+  $("#display-count").textContent = `当前显示 ${formatCount(visible.length)} / ${formatCount(ui.displayCandidateCount)}`;
   const loadMore = $("#load-more");
-  const allVisible = visible.length >= ui.candidateCount;
+  const allVisible = visible.length >= ui.displayCandidateCount;
   loadMore.disabled = allVisible;
   loadMore.textContent = allVisible ? "已全部显示" : "再显示20个";
 
@@ -300,17 +324,30 @@ function renderCandidates() {
           const category = labels
             .map((label) => `<span class="meta-pill">${escapeHtml(label)}</span>`)
             .join("");
-          return `<article class="market-row">
+          const quoteStatus = candidate.tradable === false
+            ? {
+                RECONNECTING: "行情重连中",
+                DISCONNECTED: "行情已断开",
+                NOT_READY: "行情加载中",
+                NO_BID: "暂无买盘",
+              }[candidate.quoteStatus] || "暂不可交易"
+            : "";
+          const quoteStatusMarkup = quoteStatus
+            ? `<span class="quote-status">${escapeHtml(quoteStatus)}</span>`
+            : "";
+          const buyLabel = candidate.tradable === false ? "上次可买" : "当前可买";
+          const sellLabel = candidate.tradable === false ? "上次可卖" : "当前可卖";
+          return `<article class="market-row${candidate.tradable === false ? " is-stale" : ""}">
             <div class="row-heading">
               <div class="market-copy">
                 ${marketTitleMarkup(candidate)}
-                <div class="market-meta">${category}<span>${escapeHtml(candidate.resultCount)}元市场</span></div>
+                <div class="market-meta">${category}<span>${escapeHtml(candidate.resultCount)}元市场</span>${quoteStatusMarkup}</div>
               </div>
               <span class="market-outcome">${escapeHtml(candidate.direction || "—")}</span>
             </div>
             <div class="quote-grid candidate-quotes">
-              <div><span>当前可买</span><strong>${formatCents(candidate.executableBuyPrice)}</strong></div>
-              <div><span>当前可卖</span><strong>${formatCents(candidate.bestBid)}</strong></div>
+              <div><span>${buyLabel}</span><strong>${formatCents(candidate.executableBuyPrice)}</strong></div>
+              <div><span>${sellLabel}</span><strong>${formatCents(candidate.bestBid)}</strong></div>
               <div class="market-time"><span>开始</span><strong>${formatDate(candidate.openedAt)}</strong></div>
               <div class="market-time"><span>结束</span><strong>${formatDate(candidate.endsAt)}</strong></div>
             </div>
@@ -327,9 +364,20 @@ function renderScanStatus(status) {
   const diagnostics = status?.diagnostics;
   element.classList.toggle("is-refreshing", status?.scanning === true);
   element.classList.toggle("is-error", Boolean(status?.lastError));
+  const rejectionSummary = Object.entries(diagnostics?.rejectionCounts ?? {})
+    .filter(([, count]) => Number(count) > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+    .slice(0, 4)
+    .map(([reason, count]) => `${REJECTION_LABELS_ZH[reason] || reason} ${formatCount(count)}`)
+    .join("、");
+  element.title = rejectionSummary ? `主要排除原因：${rejectionSummary}` : "";
 
   if (status?.scanning) {
-    element.textContent = "扫描中";
+    if (diagnostics?.phase === "ORDER_BOOKS") {
+      element.textContent = `盘口 ${formatCount(diagnostics.orderBookCount)} / ${formatCount(diagnostics.orderBookTargetTokenCount)} · 保留 ${formatCount(status.displayCandidateCount)}`;
+    } else {
+      element.textContent = `扫描事件 ${formatCount(diagnostics?.eventCount)} · 保留 ${formatCount(status.displayCandidateCount)}`;
+    }
     return;
   }
 
@@ -339,9 +387,8 @@ function renderScanStatus(status) {
     return;
   }
 
-  element.title = "";
   if (status?.lastScanAt) {
-    element.textContent = `扫描完成 · ${formatClock(status.lastScanAt)}`;
+    element.textContent = `扫描完成 · 监控 ${formatCount(diagnostics?.monitoredTokenCount)} · 可交易 ${formatCount(status.candidateCount)}`;
     return;
   }
   element.textContent = "等待首次扫描";
@@ -420,6 +467,8 @@ function applyDashboard(dashboard) {
   ui.strategyStatus = dashboard.strategy.status;
   ui.candidates = dashboard.marketScan.candidates ?? [];
   ui.candidateCount = dashboard.marketScan.candidateCount ?? ui.candidates.length;
+  ui.displayCandidateCount = dashboard.marketScan.displayCandidateCount ?? ui.candidates.length;
+  ui.staleCandidateCount = dashboard.marketScan.staleCandidateCount ?? 0;
   renderRunControls();
   renderPortfolio(dashboard.portfolio, dashboard.positions);
   renderPositions(dashboard.positions);
@@ -707,7 +756,7 @@ $("#toggle-positions").addEventListener("click", () => {
 });
 
 $("#load-more").addEventListener("click", async () => {
-  ui.visibleCandidateCount = Math.min(ui.candidateCount, ui.visibleCandidateCount + 20);
+  ui.visibleCandidateCount = Math.min(ui.displayCandidateCount, ui.visibleCandidateCount + 20);
   await loadDashboard();
 });
 

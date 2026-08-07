@@ -364,6 +364,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .market-row { padding: 13px; }
 .position-row + .position-row,
 .market-row + .market-row { border-top: 1px solid var(--line); }
+.market-row.is-stale { background: #fbfcfc; }
 .row-heading { align-items: flex-start; }
 .market-copy { min-width: 0; }
 .market-link {
@@ -395,6 +396,14 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .market-outcome { min-width: 52px; padding: 7px 9px; font-size: 12px; font-weight: 780; }
 .market-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 9px; }
 .meta-pill { padding: 2px 6px; border-radius: 999px; background: var(--surface-strong); }
+.quote-status {
+  padding: 2px 6px;
+  border: 1px solid #d6dfdc;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+}
+.market-row.is-stale .candidate-quotes strong { color: var(--muted); }
 
 .quote-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
 .quote-grid > div { min-width: 0; padding: 8px 10px; }

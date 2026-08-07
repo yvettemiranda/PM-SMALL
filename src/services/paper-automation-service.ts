@@ -176,7 +176,10 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       let placedThisRun = 0;
 
       if (this.database.getStrategyState().status === "RUNNING") {
-        const snapshotCandidates = this.candidates.getSnapshot().candidates;
+        const snapshotCandidates =
+          tokenIds === null
+            ? this.candidates.getSnapshot().candidates
+            : this.candidates.getCandidatesByTokenIds(tokenIds);
         const orderedCandidates =
           this.candidateSelection?.getOrderedCandidates?.(
             snapshotCandidates,

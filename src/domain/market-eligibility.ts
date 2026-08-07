@@ -29,12 +29,65 @@ export type MarketEligibilityCandidate = {
   endsAt?: string | null;
 };
 
-export function isMarketEligible(
-  market: MarketEligibilityCandidate,
+export const MARKET_ELIGIBILITY_REJECTION_REASONS = [
+  "RESULT_COUNT",
+  "CATEGORY",
+  "GAME_START",
+  "DURATION_MISSING",
+  "DURATION_BELOW_MIN",
+  "DURATION_ABOVE_MAX",
+  "PROGRESS_MISSING",
+  "PROGRESS_BELOW_ZERO",
+  "PROGRESS_ABOVE_MAX",
+  "BOOK_NOT_READY",
+  "ASK_MISSING",
+  "ASK_BELOW_MIN",
+  "ASK_ABOVE_MAX",
+  "BID_MISSING",
+  "BID_ASK_RATIO",
+  "MIN_ORDER_SIZE",
+  "TICK_SIZE",
+  "ORDER_BUDGET",
+] as const;
+
+export type MarketEligibilityRejectionReason =
+  (typeof MARKET_ELIGIBILITY_REJECTION_REASONS)[number];
+
+export type MarketEligibilityRejectionCounts = Record<
+  MarketEligibilityRejectionReason,
+  number
+>;
+
+type StaticMarketEligibilityCandidate = Pick<
+  MarketEligibilityCandidate,
+  | "resultCount"
+  | "category"
+  | "categoryIds"
+  | "durationDays"
+  | "progressPercent"
+  | "gameStartsAt"
+  | "openedAt"
+  | "endsAt"
+>;
+
+export function emptyMarketEligibilityRejectionCounts(): MarketEligibilityRejectionCounts {
+  return Object.fromEntries(
+    MARKET_ELIGIBILITY_REJECTION_REASONS.map((reason) => [reason, 0]),
+  ) as MarketEligibilityRejectionCounts;
+}
+
+export function staticMarketEligibilityRejectionReason(
+  market: StaticMarketEligibilityCandidate,
   settings: MarketEligibilitySettings,
   now?: Date,
-): boolean {
-  const progressPercent = currentMarketProgressPercent(market, now);
+): MarketEligibilityRejectionReason | null {
+  if (
+    market.resultCount === null ||
+    !settings.resultCounts.includes(market.resultCount)
+  ) {
+    return "RESULT_COUNT";
+  }
+
   const categoryIds =
     market.categoryIds?.filter((categoryId) => categoryId.length > 0) ?? [];
   const legacyCategory = market.category?.trim();
@@ -47,50 +100,117 @@ export function isMarketEligible(
       legacyCategory !== undefined &&
       legacyCategory.length > 0 &&
       settings.selectedCategoryIds.includes(legacyCategory));
-  const bestBidMicros = market.bestBidMicros;
-  const bestAskMicros = market.bestAskMicros;
-  const minOrderSizeMicros = market.minOrderSizeMicros;
-  const tickSizeMicros = market.tickSizeMicros;
-  const gameStartsAtMs =
-    market.gameStartsAt === null || market.gameStartsAt === undefined
-      ? null
-      : Date.parse(market.gameStartsAt);
-  const beforeGameStart =
-    gameStartsAtMs === null ||
-    (Number.isFinite(gameStartsAtMs) &&
-      (now?.getTime() ?? Date.now()) < gameStartsAtMs);
+  if (!categoryMatches) {
+    return "CATEGORY";
+  }
 
-  return (
-    (market.bookReady ?? true) &&
-    market.resultCount !== null &&
-    settings.resultCounts.includes(market.resultCount) &&
-    categoryMatches &&
-    beforeGameStart &&
-    bestAskMicros !== null &&
-    bestAskMicros >= settings.minBuyPriceMicros &&
-    bestAskMicros <= settings.maxBuyPriceMicros &&
-    bestBidMicros !== null &&
-    bestBidMicros > 0 &&
-    meetsBidAskRatio(
+  if (market.gameStartsAt !== null && market.gameStartsAt !== undefined) {
+    const gameStartsAtMs = Date.parse(market.gameStartsAt);
+    if (
+      !Number.isFinite(gameStartsAtMs) ||
+      (now?.getTime() ?? Date.now()) >= gameStartsAtMs
+    ) {
+      return "GAME_START";
+    }
+  }
+
+  if (market.durationDays === null) {
+    return "DURATION_MISSING";
+  }
+  if (market.durationDays < settings.minMarketDurationDays) {
+    return "DURATION_BELOW_MIN";
+  }
+  if (market.durationDays > settings.maxMarketDurationDays) {
+    return "DURATION_ABOVE_MAX";
+  }
+
+  const progressPercent = currentMarketProgressPercent(market, now);
+  if (progressPercent === null) {
+    return "PROGRESS_MISSING";
+  }
+  if (progressPercent < 0) {
+    return "PROGRESS_BELOW_ZERO";
+  }
+  if (progressPercent > settings.maxMarketProgressPercent) {
+    return "PROGRESS_ABOVE_MAX";
+  }
+
+  return null;
+}
+
+export function marketEligibilityRejectionReason(
+  market: MarketEligibilityCandidate,
+  settings: MarketEligibilitySettings,
+  now?: Date,
+): MarketEligibilityRejectionReason | null {
+  const staticReason = staticMarketEligibilityRejectionReason(
+    market,
+    settings,
+    now,
+  );
+  if (staticReason !== null) {
+    return staticReason;
+  }
+  if (!(market.bookReady ?? true)) {
+    return "BOOK_NOT_READY";
+  }
+
+  const bestAskMicros = market.bestAskMicros;
+  if (bestAskMicros === null) {
+    return "ASK_MISSING";
+  }
+  if (bestAskMicros < settings.minBuyPriceMicros) {
+    return "ASK_BELOW_MIN";
+  }
+  if (bestAskMicros > settings.maxBuyPriceMicros) {
+    return "ASK_ABOVE_MAX";
+  }
+
+  const bestBidMicros = market.bestBidMicros;
+  if (bestBidMicros === null || bestBidMicros <= 0) {
+    return "BID_MISSING";
+  }
+  if (
+    !meetsBidAskRatio(
       bestBidMicros,
       bestAskMicros,
       settings.minBidAskRatioPercent,
-    ) &&
-    minOrderSizeMicros !== null &&
-    minOrderSizeMicros !== undefined &&
-    minOrderSizeMicros > 0 &&
-    tickSizeMicros !== null &&
-    tickSizeMicros !== undefined &&
-    tickSizeMicros > 0 &&
-    calculateOrderSizeMicros(settings.orderBudgetMicros, bestAskMicros) >=
-      minOrderSizeMicros &&
-    market.durationDays !== null &&
-    market.durationDays >= settings.minMarketDurationDays &&
-    market.durationDays <= settings.maxMarketDurationDays &&
-    progressPercent !== null &&
-    progressPercent >= 0 &&
-    progressPercent <= settings.maxMarketProgressPercent
-  );
+    )
+  ) {
+    return "BID_ASK_RATIO";
+  }
+
+  const minOrderSizeMicros = market.minOrderSizeMicros;
+  if (
+    minOrderSizeMicros === null ||
+    minOrderSizeMicros === undefined ||
+    minOrderSizeMicros <= 0
+  ) {
+    return "MIN_ORDER_SIZE";
+  }
+  const tickSizeMicros = market.tickSizeMicros;
+  if (
+    tickSizeMicros === null ||
+    tickSizeMicros === undefined ||
+    tickSizeMicros <= 0
+  ) {
+    return "TICK_SIZE";
+  }
+  if (
+    calculateOrderSizeMicros(settings.orderBudgetMicros, bestAskMicros) <
+    minOrderSizeMicros
+  ) {
+    return "ORDER_BUDGET";
+  }
+  return null;
+}
+
+export function isMarketEligible(
+  market: MarketEligibilityCandidate,
+  settings: MarketEligibilitySettings,
+  now?: Date,
+): boolean {
+  return marketEligibilityRejectionReason(market, settings, now) === null;
 }
 
 export function currentMarketProgressPercent(

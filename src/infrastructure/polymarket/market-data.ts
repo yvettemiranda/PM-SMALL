@@ -47,6 +47,12 @@ export interface MarketDataSource {
     reportProgress?: (progress: OpenEventScanProgress) => void,
     signal?: AbortSignal,
   ): Promise<Event[]>;
+  /** Streams pages so production scans do not retain the full nested event graph. */
+  streamOpenEventPages?(
+    request: OpenEventScanRequest,
+    reportProgress?: (progress: OpenEventScanProgress) => void,
+    signal?: AbortSignal,
+  ): AsyncIterable<Event[]>;
   fetchOrderBooks(
     tokenIds: string[],
     reportProgress?: (progress: OrderBookFetchProgress) => void,
@@ -90,7 +96,14 @@ export class PolymarketMarketDataSource
     client: PublicClient = createPublicClient(),
     private readonly retryDelaysMs: readonly number[] = [1_000, 2_000],
     private readonly fetcher: typeof fetch = globalThis.fetch,
+    private readonly orderBookConcurrency: number = 4,
   ) {
+    if (
+      !Number.isSafeInteger(orderBookConcurrency) ||
+      orderBookConcurrency <= 0
+    ) {
+      throw new Error("Order-book concurrency must be a positive integer");
+    }
     this.client = client;
   }
 
@@ -181,19 +194,35 @@ export class PolymarketMarketDataSource
     reportProgress?: (progress: OpenEventScanProgress) => void,
     signal?: AbortSignal,
   ): Promise<Event[]> {
+    const events: Event[] = [];
+    for await (const page of this.streamOpenEventPages(
+      request,
+      reportProgress,
+      signal,
+    )) {
+      events.push(...page);
+    }
+    return events;
+  }
+
+  public async *streamOpenEventPages(
+    request: OpenEventScanRequest,
+    reportProgress?: (progress: OpenEventScanProgress) => void,
+    signal?: AbortSignal,
+  ): AsyncGenerator<Event[]> {
     // Do not impose a local page, token, or event-date cap. Child-market dates
     // can differ from their event, so exact schedule checks remain downstream.
-    const events: Event[] = [];
     const paginator = this.client.listEvents({
       closed: false,
       ...request,
     });
     let pageCount = 0;
+    let eventCount = 0;
     const requests = createRequestProgress();
     const report = () =>
       reportProgress?.({
         pageCount,
-        eventCount: events.length,
+        eventCount,
         ...requests,
       });
     let page = await this.requestWithRetries(
@@ -204,9 +233,11 @@ export class PolymarketMarketDataSource
     );
 
     while (true) {
-      events.push(...page.items);
+      const pageItems = [...page.items];
+      eventCount += pageItems.length;
       pageCount += 1;
       report();
+      yield pageItems;
       if (!page.hasMore) {
         break;
       }
@@ -223,8 +254,6 @@ export class PolymarketMarketDataSource
         signal,
       );
     }
-
-    return events;
   }
 
   public async fetchOrderBooks(
@@ -232,34 +261,65 @@ export class PolymarketMarketDataSource
     reportProgress?: (progress: OrderBookFetchProgress) => void,
     signal?: AbortSignal,
   ): Promise<OrderBook[]> {
-    const books: OrderBook[] = [];
+    const workerController = new AbortController();
+    const workerSignal =
+      signal === undefined
+        ? workerController.signal
+        : AbortSignal.any([signal, workerController.signal]);
+    const batches = Array.from(
+      { length: Math.ceil(tokenIds.length / 50) },
+      (_, index) => tokenIds.slice(index * 50, index * 50 + 50),
+    );
+    const batchResults: OrderBook[][] = Array.from(
+      { length: batches.length },
+      () => [],
+    );
     let batchCount = 0;
+    let orderBookCount = 0;
+    let nextBatchIndex = 0;
     const requests = createRequestProgress();
     const report = () =>
       reportProgress?.({
         batchCount,
-        orderBookCount: books.length,
+        orderBookCount,
         ...requests,
       });
 
-    for (let offset = 0; offset < tokenIds.length; offset += 50) {
-      signal?.throwIfAborted();
-      const batch = tokenIds.slice(offset, offset + 50);
-      const result = await this.requestWithRetries(
-        () =>
-          this.client.fetchOrderBooks(
-            batch.map((tokenId) => ({ tokenId })),
-          ),
-        requests,
-        report,
-        signal,
+    const fetchNextBatch = async (): Promise<void> => {
+      while (nextBatchIndex < batches.length) {
+        workerSignal.throwIfAborted();
+        const batchIndex = nextBatchIndex;
+        nextBatchIndex += 1;
+        const batch = batches[batchIndex] ?? [];
+        const result = await this.requestWithRetries(
+          () =>
+            this.client.fetchOrderBooks(
+              batch.map((tokenId) => ({ tokenId })),
+            ),
+          requests,
+          report,
+          workerSignal,
+        );
+        batchResults[batchIndex] = result;
+        batchCount += 1;
+        orderBookCount += result.length;
+        report();
+      }
+    };
+
+    try {
+      await Promise.all(
+        Array.from(
+          { length: Math.min(this.orderBookConcurrency, batches.length) },
+          () => fetchNextBatch(),
+        ),
       );
-      books.push(...result);
-      batchCount += 1;
-      report();
+    } catch (error) {
+      workerController.abort(error);
+      throw error;
     }
 
-    return books;
+    return batchResults.flat();
   }
 
   private async requestWithRetries<T>(

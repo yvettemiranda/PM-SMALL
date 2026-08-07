@@ -1,14 +1,27 @@
-import type { OrderBook } from "@polymarket/client";
+import type { Event, OrderBook } from "@polymarket/client";
 import type { AppConfig } from "../config.js";
-import type { MarketDataSource } from "../infrastructure/polymarket/market-data.js";
-import { isMarketEligible } from "./market-eligibility.js";
+import type {
+  MarketDataSource,
+  OpenEventScanProgress,
+} from "../infrastructure/polymarket/market-data.js";
+import {
+  emptyMarketEligibilityRejectionCounts,
+  marketEligibilityRejectionReason,
+  staticMarketEligibilityRejectionReason,
+  type MarketEligibilityRejectionCounts,
+} from "./market-eligibility.js";
 import { extractEligibleTokens, filterEligibleEvent } from "./event-filter.js";
 import { buildMonitoredCandidate, decimalStringToMicros } from "./price.js";
 import {
   sortTradeCandidates,
   type CandidateSortDirection,
 } from "./trading-strategy.js";
-import type { MarketCategory, TokenOrderBook, TradeCandidate } from "./types.js";
+import type {
+  MarketCategory,
+  MarketToken,
+  TokenOrderBook,
+  TradeCandidate,
+} from "./types.js";
 
 export type MarketScanDiagnostics = {
   phase: "EVENTS" | "ORDER_BOOKS" | "COMPLETE" | "FAILED";
@@ -19,12 +32,15 @@ export type MarketScanDiagnostics = {
   eventPageRequestCount: number;
   eventCount: number;
   eligibleTokenCount: number;
+  staticEligibleTokenCount: number;
+  orderBookTargetTokenCount: number;
   orderBookBatchCount: number;
   orderBookRequestCount: number;
   orderBookCount: number;
   monitoredTokenCount: number;
   candidateCount: number;
   availableCategories: MarketCategory[];
+  rejectionCounts: MarketEligibilityRejectionCounts;
   retryCount: number;
   rateLimitCount: number;
   transientErrorCount: number;
@@ -118,6 +134,19 @@ export class MarketScanner implements CandidateScanner {
       minMarketDurationDays: 1,
       maxMarketDurationDays: 365,
     };
+    const eligibilitySettings = {
+      resultCounts: scanPreferences.resultCounts,
+      allCategories: scanPreferences.allCategories,
+      selectedCategoryIds: scanPreferences.selectedCategories,
+      minBuyPriceMicros: scanPreferences.minBuyPriceMicros,
+      maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
+      minBidAskRatioPercent: scanPreferences.minBidAskRatioPercent,
+      minMarketDurationDays: scanPreferences.minMarketDurationDays,
+      maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
+      maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
+      orderBudgetMicros: scanPreferences.orderBudgetMicros,
+    };
+    const rejectionCounts = emptyMarketEligibilityRejectionCounts();
     const startedAt = new Date();
     const startedAtMs = Date.now();
     this.activeScanStartedAtMs = startedAtMs;
@@ -130,12 +159,15 @@ export class MarketScanner implements CandidateScanner {
       eventPageRequestCount: 0,
       eventCount: 0,
       eligibleTokenCount: 0,
+      staticEligibleTokenCount: 0,
+      orderBookTargetTokenCount: 0,
       orderBookBatchCount: 0,
       orderBookRequestCount: 0,
       orderBookCount: 0,
       monitoredTokenCount: 0,
       candidateCount: 0,
       availableCategories: [],
+      rejectionCounts,
       retryCount: 0,
       rateLimitCount: 0,
       transientErrorCount: 0,
@@ -165,63 +197,100 @@ export class MarketScanner implements CandidateScanner {
       let eventRetryCount = 0;
       let eventRateLimitCount = 0;
       let eventTransientErrorCount = 0;
-      const events = await this.marketData.listOpenEvents(
-        {
-          pageSize: this.config.scanEventPageSize,
-        },
-        ({
-          pageCount,
+      const reportEventProgress = ({
+        pageCount,
+        eventCount,
+        requestCount,
+        retryCount,
+        rateLimitCount,
+        transientErrorCount,
+      }: OpenEventScanProgress) => {
+        eventRetryCount = retryCount;
+        eventRateLimitCount = rateLimitCount;
+        eventTransientErrorCount = transientErrorCount;
+        this.updateDiagnostics({
+          phase: "EVENTS",
+          eventPageCount: pageCount,
+          eventPageRequestCount: requestCount,
           eventCount,
-          requestCount,
           retryCount,
           rateLimitCount,
           transientErrorCount,
-        }) => {
-          eventRetryCount = retryCount;
-          eventRateLimitCount = rateLimitCount;
-          eventTransientErrorCount = transientErrorCount;
-          this.updateDiagnostics({
-            phase: "EVENTS",
-            eventPageCount: pageCount,
-            eventPageRequestCount: requestCount,
-            eventCount,
-            retryCount,
-            rateLimitCount,
-            transientErrorCount,
-          });
-        },
-        signal,
-      );
-      signal?.throwIfAborted();
-      const eligibleEvents = events.flatMap((event) => {
-        const eligibleEvent = filterEligibleEvent(event);
-        return eligibleEvent === null ? [] : [{ event, eligibleEvent }];
-      });
-      const eligibleTokens = eligibleEvents.flatMap(({ event, eligibleEvent }) =>
-        extractEligibleTokens(event, eligibleEvent, scanConfig, now),
-      );
-      const eventCategories = Array.from(
-        new Map(
-          eligibleTokens.flatMap((token) =>
-            token.categoryIds.map((id, index) => [
-              id,
-              { id, label: token.categoryLabels[index] ?? id },
-            ] as const),
+        });
+      };
+      const tokens: MarketToken[] = [];
+      const eventCategoryById = new Map<string, MarketCategory>();
+      let eventCount = 0;
+      let eligibleTokenCount = 0;
+      const processEventPage = (events: readonly Event[]): void => {
+        eventCount += events.length;
+        for (const event of events) {
+          const eligibleEvent = filterEligibleEvent(event);
+          if (eligibleEvent === null) {
+            continue;
+          }
+          const eventTokens = extractEligibleTokens(
+            event,
+            eligibleEvent,
+            scanConfig,
+            now,
+          );
+          eligibleTokenCount += eventTokens.length;
+          for (const token of eventTokens) {
+            for (const [index, id] of token.categoryIds.entries()) {
+              eventCategoryById.set(id, {
+                id,
+                label: token.categoryLabels[index] ?? id,
+              });
+            }
+            const reason = staticMarketEligibilityRejectionReason(
+              token,
+              eligibilitySettings,
+              now,
+            );
+            if (reason === null) {
+              tokens.push(token);
+            } else {
+              rejectionCounts[reason] += 1;
+            }
+          }
+        }
+      };
+      const scanRequest = { pageSize: this.config.scanEventPageSize };
+      if (this.marketData.streamOpenEventPages !== undefined) {
+        for await (const events of this.marketData.streamOpenEventPages(
+          scanRequest,
+          reportEventProgress,
+          signal,
+        )) {
+          signal?.throwIfAborted();
+          processEventPage(events);
+        }
+      } else {
+        processEventPage(
+          await this.marketData.listOpenEvents(
+            scanRequest,
+            reportEventProgress,
+            signal,
           ),
-        ).values(),
-      ).sort(
+        );
+      }
+      signal?.throwIfAborted();
+      const eventCategories = Array.from(eventCategoryById.values()).sort(
         (left, right) =>
           left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
       );
       const availableCategories =
         homepageCategories.length > 0 ? homepageCategories : eventCategories;
-      const tokens = eligibleTokens;
 
       this.updateDiagnostics({
         phase: "ORDER_BOOKS",
-        eventCount: events.length,
-        eligibleTokenCount: tokens.length,
+        eventCount,
+        eligibleTokenCount,
+        staticEligibleTokenCount: tokens.length,
+        orderBookTargetTokenCount: tokens.length,
         availableCategories,
+        rejectionCounts: { ...rejectionCounts },
       });
       const books =
         tokens.length === 0
@@ -272,19 +341,15 @@ export class MarketScanner implements CandidateScanner {
           scanPreferences.orderBudgetMicros,
         );
         monitoredCandidates.push(monitored);
-        if (isMarketEligible(monitored, {
-          resultCounts: scanPreferences.resultCounts,
-          allCategories: scanPreferences.allCategories,
-          selectedCategoryIds: scanPreferences.selectedCategories,
-          minBuyPriceMicros: scanPreferences.minBuyPriceMicros,
-          maxBuyPriceMicros: scanPreferences.maxBuyPriceMicros,
-          minBidAskRatioPercent: scanPreferences.minBidAskRatioPercent,
-          minMarketDurationDays: scanPreferences.minMarketDurationDays,
-          maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
-          maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
-          orderBudgetMicros: scanPreferences.orderBudgetMicros,
-        }, now)) {
+        const rejectionReason = marketEligibilityRejectionReason(
+          monitored,
+          eligibilitySettings,
+          now,
+        );
+        if (rejectionReason === null) {
           candidateCount += 1;
+        } else {
+          rejectionCounts[rejectionReason] += 1;
         }
       }
       const orderedCandidates = sortTradeCandidates(
@@ -292,11 +357,14 @@ export class MarketScanner implements CandidateScanner {
         scanPreferences.candidateSortDirection,
       );
       this.finishDiagnostics("COMPLETE", {
-        eventCount: events.length,
-        eligibleTokenCount: tokens.length,
+        eventCount,
+        eligibleTokenCount,
+        staticEligibleTokenCount: tokens.length,
+        orderBookTargetTokenCount: tokens.length,
         orderBookCount: books.length,
         monitoredTokenCount: orderedCandidates.length,
         candidateCount,
+        rejectionCounts: { ...rejectionCounts },
         availableCategories:
           homepageCategories.length > 0
             ? homepageCategories

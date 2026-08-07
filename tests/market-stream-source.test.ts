@@ -65,6 +65,62 @@ describe("PolymarketMarketStreamSource", () => {
     await handle.close();
   });
 
+  it("updates market subscriptions without replacing the connection", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const source = new PolymarketMarketStreamSource();
+
+    const handle = await source.subscribe(["token-1", "token-2"]);
+    const socket = FakeWebSocket.latest;
+    await handle.updateSubscriptions({
+      subscribe: ["token-3"],
+      unsubscribe: ["token-1"],
+    });
+
+    expect(socket?.sent.map((message) => JSON.parse(message))).toEqual([
+      {
+        type: "market",
+        assets_ids: ["token-1", "token-2"],
+        initial_dump: true,
+      },
+      {
+        operation: "unsubscribe",
+        assets_ids: ["token-1"],
+      },
+      {
+        operation: "subscribe",
+        assets_ids: ["token-3"],
+      },
+    ]);
+
+    await handle.close();
+  });
+
+  it("chunks large subscriptions without dropping any token", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const source = new PolymarketMarketStreamSource();
+    const tokenIds = Array.from(
+      { length: 1_201 },
+      (_, index) => `token-${index}`,
+    );
+
+    const handle = await source.subscribe(tokenIds);
+    const messages = FakeWebSocket.latest?.sent.map((message) =>
+      JSON.parse(message),
+    ) as Array<{ assets_ids?: string[] }>;
+
+    expect(messages).toHaveLength(3);
+    expect(messages.flatMap((message) => message.assets_ids ?? [])).toEqual(
+      tokenIds,
+    );
+    expect(messages.map((message) => message.assets_ids?.length)).toEqual([
+      500,
+      500,
+      201,
+    ]);
+
+    await handle.close();
+  });
+
   it("maps public book, price, and trade frames", async () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     const source = new PolymarketMarketStreamSource();

@@ -145,7 +145,7 @@ describe("CandidateService", () => {
     expect(notifications[3]).toEqual(recovered);
   });
 
-  it("marks quote readiness explicitly across disconnect and recovery", async () => {
+  it("retains the last quote while marking it unavailable across disconnect and recovery", async () => {
     const service = new CandidateService(
       { scan: async () => [makeCandidate()] },
       15_000,
@@ -155,8 +155,9 @@ describe("CandidateService", () => {
     service.updateQuote("yes-token", null, null, false);
     expect(service.getSnapshot().candidates[0]).toMatchObject({
       bookReady: false,
-      bestBidMicros: null,
-      bestAskMicros: null,
+      bestBidMicros: 20_000,
+      bestAskMicros: 30_000,
+      executableBuyPriceMicros: 30_000,
     });
 
     service.updateQuote("yes-token", 10_000, 20_000, true);
@@ -165,5 +166,37 @@ describe("CandidateService", () => {
       bestBidMicros: 10_000,
       bestAskMicros: 20_000,
     });
+  });
+
+  it("looks up repeated quote updates without rescanning every candidate", async () => {
+    let tokenIdReads = 0;
+    const candidates = Array.from({ length: 200 }, (_value, index) => {
+      const tokenId = `token-${index}`;
+      const candidate = makeCandidate({
+        candidateId: `${tokenId}:30000`,
+        tokenId,
+      });
+      Object.defineProperty(candidate, "tokenId", {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          tokenIdReads += 1;
+          return tokenId;
+        },
+      });
+      return candidate;
+    });
+    const service = new CandidateService(
+      { scan: async () => candidates },
+      15_000,
+    );
+    await service.refresh();
+    tokenIdReads = 0;
+
+    for (let update = 0; update < 10; update += 1) {
+      service.updateQuote("token-199", 10_000, 20_000);
+    }
+
+    expect(tokenIdReads).toBeLessThanOrEqual(10);
   });
 });

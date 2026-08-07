@@ -227,6 +227,47 @@ describe("PaperAutomationService", () => {
     });
   });
 
+  it("evaluates only changed tokens after a quote update", async () => {
+    const firstCandidate = makeCurrentCandidate();
+    const secondCandidate = makeCurrentCandidate({
+      candidateId: "second-token:30000",
+      tokenId: "second-token",
+    });
+    const candidates = new CandidateService(
+      { scan: async () => [firstCandidate, secondCandidate] },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    database.setStrategyStatus("RUNNING");
+    const evaluatedTokenIds: string[][] = [];
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      new FakeMarketRuntime(),
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+      {
+        isCandidateEnabled: () => false,
+        getOrderedCandidates: (changedCandidates) => {
+          evaluatedTokenIds.push(
+            changedCandidates.map((candidate) => candidate.tokenId),
+          );
+          return [...changedCandidates];
+        },
+      },
+    );
+    resources.push(database, automation);
+
+    automation.start();
+    await waitFor(() => evaluatedTokenIds.length > 0);
+    evaluatedTokenIds.length = 0;
+
+    candidates.updateQuote(secondCandidate.tokenId, 10_000, 20_000);
+    await waitFor(() => evaluatedTokenIds.length > 0);
+
+    expect(evaluatedTokenIds).toEqual([[secondCandidate.tokenId]]);
+  });
+
   it("does not place automatic buys while stopped", async () => {
     const candidates = new CandidateService(
       { scan: async () => [makeCurrentCandidate()] },
