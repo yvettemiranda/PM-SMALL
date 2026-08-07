@@ -41,7 +41,7 @@
 - 未锁定 Event 开启新周期前，全部静态合格兄弟 Token 都必须有新鲜完整 Book。已收到完整 Book 但没有有效 Bid/Ask 属于完整数据，只淘汰该 Token；未收到完整 Book、重连或未知状态会阻断整个 Event 开仓。Event 锁定后只要求 active Token 满足继续执行所需的数据，兄弟断线不妨碍退出。
 - Event Arbitration 只比较通过全部 Token 硬资格且 FAK Preview 有实际成交量的机会。最高买价、Bid/Ask、生命周期、时间、体育开赛、Condition 身份、tick、最小量、费用、资金和订单金额继续是硬门槛，排序不能挽救不合格 Token。
 - 无副作用 FAK Preview 与真实 TEST FAK Buy 共用同一个纯规划核心；必须带入完整 Ask/Bid Book、最新配置、可用现金、Event 冻结预算、费用、最小量、tick、book version 和该版本已持久化消费深度，返回逐 Fill 价格/数量/净份额/目标、总花费及可成交比例。Preview 不写订单、fill、position、资金或盘口消费。
-- 每个 Preview 的 `Terminal Target` 是预计实际 Fill 目标卖价中的最高值。Event 内确定性排序依次为：`Best Bid / Terminal Target` 退出就绪度；目标价及以上可用 Bid 深度对预计净持仓的覆盖；`previewSpent / cycleBudget`；`Best Bid / Best Ask`；买卖均扣费后的目标净收益率；生命周期 ASC/DESC；`marketId -> direction -> tokenId`。不使用人工加权总分，`NO_FILL` 不可成为 Winner。
+- 每个 Preview 的 `Terminal Target` 是预计实际 Fill 目标卖价中的最高值。Exit Bid Coverage 必须按真实 SELL 的 target 顺序调用同一 `planFakSell()`，让所有 target 顺序消费同一份 mutable Bid Book；不同 target 不得重复使用同一档深度，覆盖量最多为 Preview 净持仓。Event 内确定性排序依次为：`Best Bid / Terminal Target` 退出就绪度；该共享深度语义下目标价及以上可退出数量对预计净持仓的覆盖；`previewSpent / cycleBudget`；`Best Bid / Best Ask`；买卖均扣费后的目标净收益率；生命周期 ASC/DESC；`marketId -> direction -> tokenId`。不使用人工加权总分，`NO_FILL` 不可成为 Winner。
 - Winner 只是当前快照结果。执行前必须带配置版本、Event 状态、参与 Token 的盘口 revision/version 再次完整评估；状态变化时丢弃旧结果并按最新状态重仲裁，不能直接退回旧第二名。
 
 ## TEST 买入

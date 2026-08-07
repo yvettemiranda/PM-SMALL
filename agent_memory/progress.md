@@ -2,9 +2,9 @@
 
 ## 当前任务
 
-- 用户已授权按附件正式规格，把 PM-SMALL 从“二元/三元 Token 轮次”升级为“任意标准多元 Event 仲裁 + Event 轮次锁”，并在自动验证通过后同步 GitHub `main` 与 Linux 服务器。
-- 固定实现基线为 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`；运行时代码提交 `cb1472c90039ed72e9038821434cf22b45153f43` 已推送并部署。
-- 交付边界固定为 `TEST + LIVE_DISABLED + PAUSED`；只执行自动测试和 PAUSED 冒烟，不启动正式长期 TEST、不接钱包、不开发或启用 LIVE。
+- 用户要求在当前 `main` 上做最后一次最小范围精度修复：FAK Preview 的 Exit Bid Coverage 必须像真实 `executeTestFakSells()` 一样，让多个 SELL target 顺序消费同一份 mutable Bid 深度；同时修正一处买入费用 UI 文案。
+- 固定实现与审查基线为 `69ddc8b3393b576ab076e625a511a64ec843f08d`，本地与 `origin/main` 已核对为 `0/0`、工作树干净。
+- 不改 Event Arbitration 排序、Event Lock、ResultCount/Multi、Settlement、Validation、资金模型、Buy Fee 或真实 FAK Sell 执行路径；交付仍固定为 `TEST + LIVE_DISABLED + PAUSED`。
 
 ## 已完成
 
@@ -26,12 +26,14 @@
 - 已创建并校验服务器备份 `/home/ubuntu/pm-small-backup-20260807T161243Z`；Schema 15 迁移、同库重启、账本/SQLite 校验、端口、HTTPS/认证与公网 PAUSED 冒烟全部通过。
 - 服务器 PAUSED 发现层完整遍历 182 页、18,103 个 Event，3,192/3,192 本参与盘口完整且行情连接正常；0 个最终候选由结果数、生命周期、Ask 上限、总时长、缺 Ask 和 Bid/Ask 比例硬筛选造成，不是扫描中断或代码报错。
 - 部署前服务器实际为 100U 空账本，与旧交接状态不一致；本轮未重置账本、未删除任何旧备份，并将差异保留为后续审计项。
+- 已以红绿测试修复 Preview 共享 Bid 深度重复计算：按 target 顺序复用 `planFakSell()` 并扣减 mutable Bids；完全共享和三 target 场景均与真实 `executeTestFakSells()` 的实际退出量一致。
+- UI 买入费用说明已改为份额扣费口径；聚焦 31 项、全量 29 文件/279 项、typecheck、build、前端语法和差异检查全部通过。本机默认 PATH 无 `npm`，已使用工作区自带 Node 24.14.0 与本地项目二进制完成验证。
 
 ## 当前停止点
 
-- 核心实现、自动验证、PAUSED UI 验收、双轴复审、GitHub 发布和 Linux Schema 15 部署均已完成；当前严格停止在正式长期 TEST 前。
+- 实现和本地自动验证已完成；真实 SELL、Event Arbitration、Lock、ResultCount/Multi、Settlement、Validation、资金与 Buy Fee 路径均未改，准备进行固定基线双轴审查和发布。
 
 ## 后续步骤
 
-1. 与用户共同确认正式长期 TEST 的时长、扫描/成交样本、故障注入、资源与限流门槛、证据格式、通过标准和停止条件。
-2. 用户明确确认后才执行计划；在此之前不调用启动接口、不接钱包、不开发或启用 LIVE。
+1. 以 `69ddc8b3393b576ab076e625a511a64ec843f08d` 为固定点完成 Standards/Spec 双轴审查，处理所有有效发现。
+2. 审查通过后提交 GitHub，服务器备份并部署同一 SHA；只做 PAUSED 冒烟，不调用启动接口。

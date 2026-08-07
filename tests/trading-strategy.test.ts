@@ -9,7 +9,7 @@ import {
 import { makeCandidate } from "./helpers.js";
 
 describe("shared trading strategy", () => {
-  it("previews FAK fills, per-fill targets, target-bound bid coverage, and net return", () => {
+  it("consumes shared Bid depth once across ordered Preview sell targets", () => {
     const preview = previewFakBuy({
       asks: [
         { priceMicros: 10_000, sizeMicros: 40_000_000 },
@@ -33,7 +33,7 @@ describe("shared trading strategy", () => {
       bestAskMicros: 10_000,
       bestBidMicros: 30_000,
       terminalTargetPriceMicros: 30_000,
-      exitBidCoverageSizeMicros: 50_000_000,
+      exitBidCoverageSizeMicros: 40_000_000,
       exitBidCoveragePositionSizeMicros: 70_000_000,
       targetNetProceedsMicros: 1_700_000,
       targetNetProfitMicros: 700_000,
@@ -45,15 +45,40 @@ describe("shared trading strategy", () => {
         priceMicros: 10_000,
         netSizeMicros: 40_000_000,
         targetPriceMicros: 20_000,
-        exitableBidDepthMicros: 60_000_000,
+        exitableBidDepthMicros: 40_000_000,
       }),
       expect.objectContaining({
         priceMicros: 20_000,
         netSizeMicros: 30_000_000,
         targetPriceMicros: 30_000,
-        exitableBidDepthMicros: 10_000_000,
+        exitableBidDepthMicros: 0,
       }),
     ]);
+  });
+
+  it("does not reuse Bid liquidity completely shared by multiple Preview targets", () => {
+    const preview = previewFakBuy({
+      asks: [
+        { priceMicros: 10_000, sizeMicros: 40_000_000 },
+        { priceMicros: 20_000, sizeMicros: 30_000_000 },
+      ],
+      bids: [{ priceMicros: 30_000, sizeMicros: 30_000_000 }],
+      maxPriceMicros: 30_000,
+      maxSpendMicros: 1_000_000,
+      cycleBudgetMicros: 1_000_000,
+      minOrderSizeMicros: 5_000_000,
+      tickSizeMicros: 10_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(preview).toMatchObject({
+      exitBidCoverageSizeMicros: 30_000_000,
+      exitBidCoveragePositionSizeMicros: 70_000_000,
+    });
+    expect(
+      preview?.fills.map((fill) => fill.exitableBidDepthMicros),
+    ).toEqual([30_000_000, 0]);
   });
 
   it("plans a price-capped FAK buy across executable ask levels", () => {

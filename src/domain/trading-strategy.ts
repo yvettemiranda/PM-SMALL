@@ -226,16 +226,6 @@ export function previewFakBuy(input: {
       fill.priceMicros,
       input.tickSizeMicros,
     );
-    const exitableBidDepthMicros = input.bids
-      .filter(
-        (level) =>
-          Number.isSafeInteger(level.priceMicros) &&
-          level.priceMicros >= targetPriceMicros &&
-          level.priceMicros < DECIMAL_SCALE &&
-          Number.isSafeInteger(level.sizeMicros) &&
-          level.sizeMicros > 0,
-      )
-      .reduce((total, level) => total + level.sizeMicros, 0);
     const targetGrossProceedsMicros = calculateOrderCostMicros(
       targetPriceMicros,
       fill.netSizeMicros,
@@ -249,7 +239,7 @@ export function previewFakBuy(input: {
     return {
       ...fill,
       targetPriceMicros,
-      exitableBidDepthMicros,
+      exitableBidDepthMicros: 0,
       targetGrossProceedsMicros,
       targetFeeMicros,
       targetNetProceedsMicros: Math.max(
@@ -262,11 +252,41 @@ export function previewFakBuy(input: {
     fills,
     (fill) => fill.targetNetProceedsMicros,
   );
-  const exitBidCoverageSizeMicros = Math.min(
+  const mutableBids = input.bids.map((level) => ({ ...level }));
+  let exitBidCoverageSizeMicros = 0;
+  const orderedTargets = fills
+    .map((fill, index) => ({ fill, index }))
+    .sort(
+      (left, right) =>
+        left.fill.targetPriceMicros - right.fill.targetPriceMicros ||
+        left.index - right.index,
+    );
+  for (const { fill } of orderedTargets) {
+    const sellPlan = planFakSell({
+      bids: mutableBids,
+      minPriceMicros: fill.targetPriceMicros,
+      availableSizeMicros: fill.netSizeMicros,
+      minOrderSizeMicros: input.minOrderSizeMicros,
+      feeRateMicros: input.feeRateMicros,
+      feeExponent: input.feeExponent,
+    });
+    if (sellPlan === null) {
+      continue;
+    }
+    fill.exitableBidDepthMicros = sellPlan.filledSizeMicros;
+    exitBidCoverageSizeMicros += sellPlan.filledSizeMicros;
+    for (const sellFill of sellPlan.fills) {
+      const bid = mutableBids.find(
+        (level) => level.priceMicros === sellFill.priceMicros,
+      );
+      if (bid !== undefined) {
+        bid.sizeMicros = Math.max(0, bid.sizeMicros - sellFill.sizeMicros);
+      }
+    }
+  }
+  exitBidCoverageSizeMicros = Math.min(
     plan.netFillSizeMicros,
-    sum(fills, (fill) =>
-      Math.min(fill.exitableBidDepthMicros, fill.netSizeMicros),
-    ),
+    exitBidCoverageSizeMicros,
   );
 
   return {

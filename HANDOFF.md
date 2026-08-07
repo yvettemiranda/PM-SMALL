@@ -18,7 +18,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 4. 对所有通过静态资格的具体 Market 生成 YES/NO Token，并保留高于当前买价或暂时无有效价但仍需监控的 Token。Token 始终携带 Event、Market、Condition、direction 和整体 resultCount 身份。
 5. 盘口拉取后，每个 Token 先过现有硬资格：新鲜完整 Book、身份一致、Ask 1–3¢、有效 Bid、Bid/Ask 比例、时长、生命周期进度、官方栏目、最小下单量、tick 和体育开赛边界。
 6. 未锁 Event 只有全部静态合格兄弟 Token 的盘口状态都明确、新鲜、完整时才开始比较。完整 Book 但没有有效 Bid/Ask 只淘汰该 Token；未取得完整 Book、重连或未知状态会阻断整个 Event 本轮开仓。
-7. 每个合格 Token 使用与真实成交完全相同的 FAK 规划核心做无副作用 Preview，带入已持久化盘口消费、现金、冻结预算、费用、min size、tick、逐 Fill 目标与目标 Bid 深度。
+7. 每个合格 Token 使用与真实成交完全相同的 FAK 规划核心做无副作用 Preview，带入已持久化盘口消费、现金、冻结预算、费用、min size、tick 和逐 Fill 目标；Exit Bid Coverage 按 target 顺序调用 `planFakSell()` 并顺序扣减同一份 mutable Bid Book，不允许不同 target 重复使用同一深度。
 8. Event 仲裁依次比较：最难退出 Fill 的 `BestBid/TerminalTarget`、目标价 Bid 深度覆盖率、预计成交资金比例、`BestBid/BestAsk`、费后目标净收益率、生命周期顺序、稳定身份字段。`NO_FILL` 或 spent=0 不得成为 Winner。
 9. 执行前使用最新配置、兄弟盘口 revision、数据库锁、现金、仓位和盘口消费重新评估。变化后采用最新结果，不执行陈旧 Winner。
 10. 实际买入按 Best Ask 执行 FAK，可跨档部分成交；0 Fill 不创建锁。第一次实际 Fill、Event 锁、订单、fills、仓位、targets、资金和盘口消费在同一 SQLite 事务提交。
@@ -48,7 +48,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 ## 本轮已完成验证
 
 - 结果数覆盖 2、3、4、10、128 和非法/增强型负风险边界；多元默认关闭与 API 保存/恢复均有回归。
-- FAK Preview 与实际成交共用纯规划核心；覆盖多档深度、已消费盘口、费用、min size、目标、成交比例与 `NO_FILL`。
+- FAK Preview 与实际成交共用纯规划核心；覆盖多档深度、已消费盘口、费用、min size、目标、共享 Bid 深度顺序消费、成交比例与 `NO_FILL`。
 - 仲裁覆盖全部优先级、稳定 tie-break、YES/NO 竞争和“最便宜不一定获胜”。
 - 完整性覆盖兄弟 `NOT_READY` 阻断、完整无 Bid 仅淘汰自身、锁定后兄弟断线不影响 active Token 退出。
 - 锁与轮次覆盖 0 Fill 不锁、首个部分/完整 Fill 原子锁、兄弟互斥、近同时执行、预算冻结、改单不抬额、首次 Sell 后禁买、部分退出保持锁、完整退出解锁和下一轮换 Winner。

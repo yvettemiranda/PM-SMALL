@@ -55,6 +55,100 @@ describe("TEST FAK accounting", () => {
     expect(database.listPaperOrders().filter((order) => order.side === "BUY")).toHaveLength(1);
   });
 
+  it("matches Preview coverage to real FAK sells when targets share all Bid depth", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      bestAskMicros: 10_000,
+      bestBidMicros: 30_000,
+    });
+    const book = makeBook({
+      bookVersion: "FULLY-SHARED-BIDS",
+      bids: [{ priceMicros: 30_000, sizeMicros: 30_000_000 }],
+      asks: [
+        { priceMicros: 10_000, sizeMicros: 40_000_000 },
+        { priceMicros: 20_000, sizeMicros: 30_000_000 },
+      ],
+    });
+    const input = {
+      candidate,
+      book,
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    };
+
+    const previewCoverage = database.previewTestFakBuy(input).preview
+      ?.exitBidCoverageSizeMicros;
+    expect(previewCoverage).toBe(30_000_000);
+    expect(database.executeTestFakBuy(input).spentMicros).toBe(1_000_000);
+
+    const sell = database.executeTestFakSells({
+      tokenId: candidate.tokenId,
+      bookVersion: book.bookVersion,
+      bids: book.bids,
+      minOrderSizeMicros: book.minOrderSizeMicros,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(sell.filledSizeMicros).toBe(30_000_000);
+    expect(previewCoverage).toBe(sell.filledSizeMicros);
+  });
+
+  it("keeps Preview and real FAK sell coverage equal across three shared targets", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      bestAskMicros: 10_000,
+      bestBidMicros: 50_000,
+    });
+    const book = makeBook({
+      bookVersion: "THREE-SHARED-TARGETS",
+      bids: [
+        { priceMicros: 50_000, sizeMicros: 10_000_000 },
+        { priceMicros: 40_000, sizeMicros: 15_000_000 },
+        { priceMicros: 30_000, sizeMicros: 25_000_000 },
+        { priceMicros: 20_000, sizeMicros: 30_000_000 },
+      ],
+      asks: [
+        { priceMicros: 10_000, sizeMicros: 20_000_000 },
+        { priceMicros: 20_000, sizeMicros: 20_000_000 },
+        { priceMicros: 30_000, sizeMicros: 20_000_000 },
+      ],
+    });
+    const input = {
+      candidate,
+      book,
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_200_000,
+      eligibility: testEligibilitySettings({ orderBudgetMicros: 1_200_000 }),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    };
+
+    const previewCoverage = database.previewTestFakBuy(input).preview
+      ?.exitBidCoverageSizeMicros;
+    expect(previewCoverage).toBe(40_000_000);
+    expect(database.executeTestFakBuy(input).spentMicros).toBe(1_200_000);
+
+    const sell = database.executeTestFakSells({
+      tokenId: candidate.tokenId,
+      bookVersion: book.bookVersion,
+      bids: book.bids,
+      minOrderSizeMicros: book.minOrderSizeMicros,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(sell.filledSizeMicros).toBe(40_000_000);
+    expect(previewCoverage).toBe(sell.filledSizeMicros);
+  });
+
   it("creates the Event lock only on a real fill and freezes its cycle budget", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
