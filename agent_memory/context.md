@@ -4,9 +4,9 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 最终 UI 与扫描稳定性功能提交 `4d5c357c86db40c402693289cdab87c1dacdad48` 已推送 GitHub `main` 并部署 Linux；数据库为 Schema 14，公网入口 `https://43-159-133-129.sslip.io/`。
-- 部署前备份 `/home/ubuntu/pm-small-backup-20260807T063635Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、1000U 历史资金和原业务表数据。
-- 当前正确性加固基于已核对的 `origin/main` `8a9d1f943b67d9a9ef956aa905b9a057acebb5a6`；本地 26 文件、227 项测试、类型、生产构建、前端语法、差异检查和最终 Standards / Spec 双轴 0 findings 均已通过，尚待推送和服务器同 SHA 部署，不能视为远端现状。
+- 最终 UI、扫描稳定性和长期 TEST 前正确性加固的运行时代码提交 `ff8b5bc9010261a349f27d7640c17789896f38d0` 已推送 GitHub `main` 并部署 Linux；数据库为 Schema 14，公网入口 `https://43-159-133-129.sslip.io/`。
+- 最新部署前备份 `/home/ubuntu/pm-small-backup-20260807T093031Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、1000U 初始资金和原 TEST 账本，未重置数据。
+- 正确性加固相对固定点 `8a9d1f943b67d9a9ef956aa905b9a057acebb5a6` 的 26 文件、227 项测试、类型、生产构建、前端语法、差异检查和最终 Standards / Spec 双轴 0 findings 均已通过；容器重启、账本、HTTPS/认证和端口冒烟也已通过。
 - 现行规则以 `HANDOFF.md`、`docs/DECISIONS.md` 和 `docs/PLAN.md` 为准；历史完整方案只作背景。
 
 ## 不可越过的边界
@@ -16,6 +16,7 @@
 - 到正式长期验证阶段立即停止，由用户确定时长、故障场景、资源门槛和通过标准；短时测试与部署冒烟不计入长期验收。
 - Linux 交付必须先备份 SQLite 与部署配置，再部署 GitHub `main` 同一 SHA；应用 3000 只绑定 `127.0.0.1`，公网只通过 HTTPS、Nginx 和登录认证访问。
 - 本轮短时部署冒烟已经通过：放宽条件首轮找到 55 个候选，下一轮扫描中候选持续保留且行情流零断线；现在必须停止在正式长期验证前，等待用户制定验证计划。
+- 本轮正确性加固部署后的扫描恢复并保留 3 个候选；这只是 `PAUSED` 下的发现层冒烟，不是正式长期 TEST，也不授权任何交易执行。
 
 ## 当前业务规则
 
