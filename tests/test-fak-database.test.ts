@@ -130,6 +130,40 @@ describe("TEST FAK accounting", () => {
     });
   });
 
+  it("keeps a fully spent multi-level FAK buy within the closed-order fill invariant", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+
+    const result = database.executeTestFakBuy({
+      candidate,
+      book: makeBook({
+        asks: [
+          { priceMicros: 20_000, sizeMicros: 10_000_000 },
+          { priceMicros: 25_000, sizeMicros: 32_000_000 },
+        ],
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(result).toMatchObject({ outcome: "FILLED", spentMicros: 1_000_000 });
+    expect(result.order).toMatchObject({
+      status: "FILLED",
+      originalSizeMicros: 42_000_000,
+      filledSizeMicros: 42_000_000,
+    });
+    expect(database.validatePaperState()).toMatchObject({ passed: true });
+  });
+
   it("enforces the per-token cycle cash cap across repeated partial FAK buys", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
