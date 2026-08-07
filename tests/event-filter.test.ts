@@ -33,6 +33,19 @@ describe("event filtering", () => {
     expect(normalizeEventResultCount(augmented)).toBeNull();
   });
 
+  it("requires explicit open-state booleans on an event", () => {
+    expect(
+      filterEligibleEvent(
+        makeEvent({ state: { active: true, archived: false } }),
+      ),
+    ).toBeNull();
+    expect(
+      filterEligibleEvent(
+        makeEvent({ state: { active: true, closed: false } }),
+      ),
+    ).toBeNull();
+  });
+
   it("calculates duration and progress", () => {
     const event = makeEvent();
     const eligible = filterEligibleEvent(event);
@@ -151,6 +164,7 @@ describe("event filtering", () => {
           state: {
             active: true,
             closed: false,
+            archived: false,
             acceptingOrders: true,
             enableOrderBook: true,
             startDate: "2026-01-01T00:00:00.000Z",
@@ -185,6 +199,7 @@ describe("event filtering", () => {
           state: {
             active: true,
             closed: false,
+            archived: false,
             acceptingOrders: true,
             enableOrderBook: true,
             startDate: "2026-01-01T18:00:00.000Z",
@@ -215,12 +230,14 @@ describe("event filtering", () => {
       {
         active: false,
         closed: false,
+        archived: false,
         acceptingOrders: true,
         enableOrderBook: true,
       },
       {
         active: true,
         closed: true,
+        archived: false,
         acceptingOrders: true,
         enableOrderBook: true,
       },
@@ -234,12 +251,14 @@ describe("event filtering", () => {
       {
         active: true,
         closed: false,
+        archived: false,
         acceptingOrders: false,
         enableOrderBook: true,
       },
       {
         active: true,
         closed: false,
+        archived: false,
         acceptingOrders: true,
         enableOrderBook: false,
       },
@@ -249,6 +268,29 @@ describe("event filtering", () => {
       const event = makeEvent({ markets: [makeMarket({ state })] });
       const eligible = filterEligibleEvent(event);
       expect(eligible).not.toBeNull();
+      expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
+    }
+  });
+
+  it("requires explicit closed and archived state on a market", () => {
+    const unknownStates = [
+      {
+        active: true,
+        archived: false,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+      {
+        active: true,
+        closed: false,
+        acceptingOrders: true,
+        enableOrderBook: true,
+      },
+    ];
+
+    for (const state of unknownStates) {
+      const event = makeEvent({ markets: [makeMarket({ state })] });
+      const eligible = filterEligibleEvent(event);
       expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
     }
   });
@@ -302,6 +344,8 @@ describe("event filtering", () => {
       { feesEnabled: true },
       { feesEnabled: true, feeSchedule: { rate: "invalid", exponent: 1 } },
       { feesEnabled: true, feeSchedule: { rate: "0.04", exponent: -1 } },
+      { feesEnabled: true, feeSchedule: { rate: "0.04", exponent: 11 } },
+      { feesEnabled: true, feeSchedule: { rate: "1.01", exponent: 1 } },
     ];
 
     for (const trading of invalidSchedules) {
@@ -309,5 +353,14 @@ describe("event filtering", () => {
       const eligible = filterEligibleEvent(event);
       expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
     }
+  });
+
+  it("fails closed when the market fee-enabled state is missing", () => {
+    const event = makeEvent({
+      markets: [makeMarket({ trading: {} })],
+    });
+    const eligible = filterEligibleEvent(event);
+
+    expect(extractEligibleTokens(event, eligible!, testConfig, now)).toEqual([]);
   });
 });

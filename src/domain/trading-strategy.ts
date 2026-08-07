@@ -5,6 +5,8 @@ import {
 } from "./price.js";
 import type { BookLevel, TradeCandidate } from "./types.js";
 
+export const MAX_TAKER_FEE_EXPONENT = 10;
+
 export type CandidateSortDirection = "ASC" | "DESC";
 
 export type TakerFeeInput = {
@@ -53,6 +55,11 @@ export function calculateTakerFeeMicros(input: TakerFeeInput): number {
   assertNonNegativeInteger(input.priceMicros, "trade price");
   assertNonNegativeInteger(input.feeRateMicros, "fee rate");
   assertNonNegativeInteger(input.feeExponent, "fee exponent");
+  if (input.feeExponent > MAX_TAKER_FEE_EXPONENT) {
+    throw new Error(
+      `fee exponent must not exceed ${MAX_TAKER_FEE_EXPONENT}`,
+    );
+  }
   if (
     input.sizeMicros === 0 ||
     input.feeRateMicros === 0 ||
@@ -186,7 +193,11 @@ export function planFakSell(input: {
   const bids = input.bids
     .filter(
       (level) =>
-        level.priceMicros >= input.minPriceMicros && level.sizeMicros > 0,
+        Number.isSafeInteger(level.priceMicros) &&
+        level.priceMicros >= input.minPriceMicros &&
+        level.priceMicros < DECIMAL_SCALE &&
+        Number.isSafeInteger(level.sizeMicros) &&
+        level.sizeMicros > 0,
     )
     .sort((left, right) => right.priceMicros - left.priceMicros);
   const fills: FakSellFill[] = [];

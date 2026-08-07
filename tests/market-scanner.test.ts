@@ -95,6 +95,7 @@ describe("MarketScanner", () => {
     ];
     let requestedTokenIds: readonly string[] = [];
     const source: MarketDataSource = {
+      listHomepageCategories: async () => [{ id: "2", label: "Politics" }],
       listOpenEvents: async () => events,
       fetchOrderBooks: async (tokenIds) => {
         requestedTokenIds = tokenIds;
@@ -225,6 +226,43 @@ describe("MarketScanner", () => {
     ]);
   });
 
+  it("does not execute a saved category after it leaves homepage navigation", async () => {
+    let requestedTokenIds: readonly string[] = [];
+    const source: MarketDataSource = {
+      listHomepageCategories: async () => [{ id: "2", label: "Politics" }],
+      listOpenEvents: async () => [
+        makeEvent({
+          tags: [{ id: "stale", label: "Old category", slug: "old" }],
+        }),
+      ],
+      fetchOrderBooks: async (tokenIds) => {
+        requestedTokenIds = tokenIds;
+        return [];
+      },
+    };
+    const scanner = new MarketScanner(source, testConfig, {
+      getMarketScanPreferences: () => ({
+        resultCounts: [2],
+        minBuyPriceMicros: 10_000,
+        maxBuyPriceMicros: 30_000,
+        minBidAskRatioPercent: 50,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 20,
+        allCategories: false,
+        selectedCategories: ["stale"],
+        candidateSortDirection: "ASC",
+        orderBudgetMicros: 1_000_000,
+      }),
+    });
+
+    await expect(
+      scanner.scan(new Date("2026-01-02T00:00:00.000Z")),
+    ).resolves.toEqual([]);
+    expect(requestedTokenIds).toEqual([]);
+    expect(scanner.getLastDiagnostics()?.rejectionCounts.CATEGORY).toBe(2);
+  });
+
   it("publishes homepage categories while the event traversal is still running", async () => {
     let finishEvents!: () => void;
     const eventsPending = new Promise<never[]>((resolve) => {
@@ -274,6 +312,42 @@ describe("MarketScanner", () => {
     ]);
 
     expect(outcome).toBe("COMPLETE");
+  });
+
+  it("fails closed for selected categories while homepage sync is pending", async () => {
+    let requestedTokenIds: readonly string[] = [];
+    const source: MarketDataSource = {
+      listHomepageCategories: async () => new Promise(() => {}),
+      listOpenEvents: async () => [
+        makeEvent({
+          tags: [{ id: "2", label: "Politics", slug: "politics" }],
+        }),
+      ],
+      fetchOrderBooks: async (tokenIds) => {
+        requestedTokenIds = tokenIds;
+        return [];
+      },
+    };
+    const scanner = new MarketScanner(source, testConfig, {
+      getMarketScanPreferences: () => ({
+        resultCounts: [2],
+        minBuyPriceMicros: 10_000,
+        maxBuyPriceMicros: 30_000,
+        minBidAskRatioPercent: 50,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 20,
+        allCategories: false,
+        selectedCategories: ["2"],
+        candidateSortDirection: "ASC",
+        orderBudgetMicros: 1_000_000,
+      }),
+    });
+
+    await expect(
+      scanner.scan(new Date("2026-01-02T00:00:00.000Z")),
+    ).resolves.toEqual([]);
+    expect(requestedTokenIds).toEqual([]);
   });
 
   it("passes the cancellation signal through both scan stages", async () => {
@@ -446,6 +520,70 @@ describe("MarketScanner", () => {
       bestBidMicros: 20_000,
     });
     expect(candidates.find((candidate) => candidate.tokenId === "no-token")).toMatchObject({
+      bookReady: false,
+      bestBidMicros: null,
+      bestAskMicros: null,
+    });
+  });
+
+  it("does not attach an order book from a different condition", async () => {
+    const source: MarketDataSource = {
+      listOpenEvents: async () => [makeEvent()],
+      fetchOrderBooks: async () => [
+        {
+          tokenId: "yes-token",
+          conditionId: "different-condition",
+          bids: [{ price: "0.02", size: "30" }],
+          asks: [{ price: "0.03", size: "30" }],
+          minOrderSize: "5",
+          tickSize: "0.01",
+          negRisk: false,
+          hash: "hash",
+        } as unknown as OrderBook,
+      ],
+    };
+
+    const candidates = await new MarketScanner(source, testConfig).scan(
+      new Date("2026-01-02T00:00:00.000Z"),
+    );
+
+    expect(
+      candidates.find((candidate) => candidate.tokenId === "yes-token"),
+    ).toMatchObject({
+      conditionId: "0xcondition",
+      bookReady: false,
+      bestBidMicros: null,
+      bestAskMicros: null,
+    });
+  });
+
+  it("marks the whole REST order book not ready when any price is invalid", async () => {
+    const source: MarketDataSource = {
+      listOpenEvents: async () => [makeEvent()],
+      fetchOrderBooks: async () => [
+        {
+          tokenId: "yes-token",
+          conditionId: "0xcondition",
+          bids: [
+            { price: "2", size: "10" },
+            { price: "0.02", size: "30" },
+          ],
+          asks: [{ price: "0.03", size: "30" }],
+          minOrderSize: "5",
+          tickSize: "0.01",
+          negRisk: false,
+          hash: "hash",
+        } as unknown as OrderBook,
+      ],
+    };
+
+    const candidates = await new MarketScanner(source, testConfig).scan(
+      new Date("2026-01-02T00:00:00.000Z"),
+    );
+
+    expect(
+      candidates.find((candidate) => candidate.tokenId === "yes-token"),
+    ).toMatchObject({
       bookReady: false,
       bestBidMicros: null,
       bestAskMicros: null,

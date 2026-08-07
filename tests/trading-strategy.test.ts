@@ -77,6 +77,17 @@ describe("shared trading strategy", () => {
     });
   });
 
+  it("rejects a fee exponent outside the supported bounded range", () => {
+    expect(() =>
+      calculateTakerFeeMicros({
+        sizeMicros: 100_000_000,
+        priceMicros: 500_000,
+        feeRateMicros: 40_000,
+        feeExponent: 11,
+      }),
+    ).toThrow("fee exponent");
+  });
+
   it("plans a target-protected FAK sell and subtracts fees from proceeds", () => {
     const plan = planFakSell({
       bids: [
@@ -101,6 +112,19 @@ describe("shared trading strategy", () => {
       40_000,
       35_000,
     ]);
+  });
+
+  it("does not sell into a bid at or above one dollar", () => {
+    const plan = planFakSell({
+      bids: [{ priceMicros: 2_000_000, sizeMicros: 10_000_000 }],
+      minPriceMicros: 30_000,
+      availableSizeMicros: 10_000_000,
+      minOrderSizeMicros: 5_000_000,
+      feeRateMicros: 40_000,
+      feeExponent: 1,
+    });
+
+    expect(plan).toBeNull();
   });
 
   it("uses one deterministic order for both UI and execution", () => {

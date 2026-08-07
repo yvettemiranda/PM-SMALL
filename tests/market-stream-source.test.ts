@@ -10,6 +10,7 @@ class FakeWebSocket extends EventTarget {
 
   public readonly sent: string[] = [];
   public readyState = FakeWebSocket.CONNECTING;
+  public deferCloseEvent = false;
 
   public constructor(public readonly url: string) {
     super();
@@ -25,6 +26,14 @@ class FakeWebSocket extends EventTarget {
   }
 
   public close(): void {
+    this.readyState = FakeWebSocket.CLOSING;
+    if (this.deferCloseEvent) {
+      return;
+    }
+    this.finishClose();
+  }
+
+  public finishClose(): void {
     this.readyState = FakeWebSocket.CLOSED;
     const event = new Event("close");
     Object.assign(event, { code: 1000, reason: "" });
@@ -195,6 +204,79 @@ describe("PolymarketMarketStreamSource", () => {
       },
     });
 
+    await handle.close();
+  });
+
+  it("closes the stream on an order-book frame with an out-of-range price", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const source = new PolymarketMarketStreamSource();
+    const handle = await source.subscribe(["token-1"]);
+    const socket = FakeWebSocket.latest;
+    const iterator = handle[Symbol.asyncIterator]();
+    if (socket !== null) {
+      socket.deferCloseEvent = true;
+    }
+
+    socket?.emitMessage(
+      JSON.stringify({
+        event_type: "book",
+        asset_id: "token-1",
+        bids: [{ price: "2", size: "10" }],
+        asks: [{ price: "0.03", size: "8" }],
+        timestamp: "100",
+      }),
+    );
+    expect(socket?.readyState).toBe(FakeWebSocket.CLOSING);
+    const iteratorOutcome = await Promise.race([
+      iterator.next().then(
+        () => "VALUE",
+        () => "REJECTED",
+      ),
+      new Promise<string>((resolve) => {
+        setTimeout(() => resolve("PENDING"), 10);
+      }),
+    ]);
+    expect(iteratorOutcome).toBe("REJECTED");
+
+    socket?.finishClose();
+    await handle.close();
+  });
+
+  it("drops queued events when a recognized market frame fails schema validation", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const source = new PolymarketMarketStreamSource();
+    const handle = await source.subscribe(["token-1"]);
+    const socket = FakeWebSocket.latest;
+    const iterator = handle[Symbol.asyncIterator]();
+    if (socket !== null) {
+      socket.deferCloseEvent = true;
+    }
+
+    socket?.emitMessage(
+      JSON.stringify({
+        event_type: "book",
+        asset_id: "token-1",
+        bids: [{ price: "0.02", size: "10" }],
+        asks: [{ price: "0.03", size: "8" }],
+        timestamp: "100",
+      }),
+    );
+    socket?.emitMessage(
+      JSON.stringify({
+        event_type: "book",
+        asset_id: "token-1",
+        bids: [{ price: 0.02, size: "10" }],
+        asks: [{ price: "0.03", size: "8" }],
+        timestamp: "101",
+      }),
+    );
+
+    expect(socket?.readyState).toBe(FakeWebSocket.CLOSING);
+    await expect(iterator.next()).rejects.toThrow(
+      "Polymarket market WebSocket received invalid frame",
+    );
+
+    socket?.finishClose();
     await handle.close();
   });
 

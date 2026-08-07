@@ -108,7 +108,10 @@ describe("paper soak CLI", () => {
       type: "summary",
       result: "FAILED",
       sampleCount: 0,
-      criticalErrors: ["No valid TEST soak sample was recorded"],
+      criticalErrors: [
+        "Status endpoint response is invalid",
+        "Validation endpoint response is invalid",
+      ],
     });
   });
 

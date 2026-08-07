@@ -225,6 +225,19 @@ describe("evaluatePaperSoakSample", () => {
       ]),
     );
   });
+
+  it("fails closed on malformed successful safety responses", () => {
+    expect(
+      evaluateAvailablePaperSoakSafety({
+        status: { httpStatus: 200, payload: { executionMode: "TEST" } },
+        validation: { httpStatus: 200, payload: { validation: null } },
+        requireRunning: true,
+      }),
+    ).toEqual([
+      "Status endpoint response is invalid",
+      "Validation endpoint response is invalid",
+    ]);
+  });
 });
 
 function makeStatus() {

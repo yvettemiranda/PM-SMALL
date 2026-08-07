@@ -7,7 +7,11 @@ export function decimalStringToMicros(value: string): number {
   if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`Invalid decimal value: ${value}`);
   }
-  return Math.round(parsed * DECIMAL_SCALE);
+  const micros = Math.round(parsed * DECIMAL_SCALE);
+  if (!Number.isSafeInteger(micros)) {
+    throw new Error(`Decimal value exceeds the supported range: ${value}`);
+  }
+  return micros;
 }
 
 export function microsToDecimalString(value: number): string {

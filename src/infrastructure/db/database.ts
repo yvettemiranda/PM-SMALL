@@ -268,6 +268,21 @@ function normalizeFinalResolutionStatus(value: string): string {
   return normalized;
 }
 
+function samePaperSettlementPayouts(
+  recorded: readonly PaperSettlementPayout[] | null,
+  received: readonly PaperSettlementPayout[],
+): boolean {
+  return (
+    recorded !== null &&
+    recorded.length === received.length &&
+    recorded.every(
+      (payout, index) =>
+        payout.tokenId === received[index]?.tokenId &&
+        payout.priceMicros === received[index]?.priceMicros,
+    )
+  );
+}
+
 function rowToPaperOrder(row: PaperOrderRow): PaperOrder {
   return {
     id: row.id,
@@ -1087,48 +1102,111 @@ export class PaperDatabase {
     now?: Date;
   }): AppliedPaperSettlement {
     this.assertPaperAccountingMutationAllowed();
-    if (!input.closed) {
-      throw new PaperResolutionValidationError(
-        "Paper settlement requires a closed market",
+    const normalizedResolutionStatus = input.resolutionStatus
+      .trim()
+      .toLowerCase();
+    const hasFinalResolutionStatus = FINAL_RESOLUTION_STATUSES.has(
+      normalizedResolutionStatus,
+    );
+    let receivedPayouts: PaperSettlementPayout[] | null = null;
+    if (
+      input.payouts === undefined &&
+      input.winningTokenId !== null &&
+      input.winningTokenId.length > 0 &&
+      input.winningTokenId === input.winningTokenId.trim() &&
+      input.winningOutcome.length > 0 &&
+      input.winningOutcome === input.winningOutcome.trim() &&
+      input.winningOutcome !== "50/50"
+    ) {
+      receivedPayouts = [
+        { tokenId: input.winningTokenId, priceMicros: 1_000_000 },
+      ];
+    } else if (
+      input.payouts !== undefined &&
+      input.winningTokenId === null &&
+      input.winningOutcome === "50/50" &&
+      input.payouts.length === 2 &&
+      input.payouts.every(
+        (payout) =>
+          payout.tokenId.length > 0 &&
+          payout.tokenId === payout.tokenId.trim() &&
+          payout.priceMicros === 500_000,
+      ) &&
+      input.payouts[0]?.tokenId !== input.payouts[1]?.tokenId
+    ) {
+      receivedPayouts = [...input.payouts].sort((left, right) =>
+        left.tokenId.localeCompare(right.tokenId),
       );
     }
-    const resolutionStatus = normalizeFinalResolutionStatus(
-      input.resolutionStatus,
-    );
     let conflictError: Error | null = null;
     const result = this.transaction<AppliedPaperSettlement | null>(() => {
       const target = input.target;
       let existing = this.getPaperSettlementRow(target.conditionId);
-      if (existing === undefined) {
-        this.ensurePaperSettlementWithoutTransaction(target, input.now ?? new Date());
-        existing = this.getPaperSettlementRow(target.conditionId);
+      let recordedPayouts: PaperSettlementPayout[] | null = null;
+      let conflictReason: string | null = null;
+      if (existing !== undefined) {
+        const targetMatches =
+          existing.market_id === target.marketId &&
+          existing.event_id === target.eventId;
+        if (!targetMatches) {
+          conflictReason = "TARGET_METADATA_CHANGED";
+        } else if (existing.status === "SETTLED") {
+          recordedPayouts = this.getRecordedPaperSettlementPayouts(
+            target.conditionId,
+          );
+          if (!input.closed) {
+            conflictReason = "MARKET_NOT_CLOSED";
+          } else if (!hasFinalResolutionStatus) {
+            conflictReason = "RESOLUTION_STATUS_NOT_FINAL";
+          } else if (receivedPayouts === null) {
+            conflictReason = "RESULT_VECTOR_INVALID";
+          } else if (existing.winning_token_id !== input.winningTokenId) {
+            conflictReason = "WINNING_TOKEN_CHANGED";
+          } else if (existing.winning_outcome !== input.winningOutcome) {
+            conflictReason = "WINNING_OUTCOME_CHANGED";
+          } else if (
+            !samePaperSettlementPayouts(recordedPayouts, receivedPayouts)
+          ) {
+            conflictReason = "PAYOUT_VECTOR_CHANGED";
+          }
+        }
       }
-      if (existing === undefined) {
-        throw new Error(`Paper settlement not found: ${target.conditionId}`);
-      }
-      this.assertSettlementTargetMatches(existing, target);
 
-      if (existing.status === "SETTLED") {
-        if (
-          existing.winning_token_id !== input.winningTokenId ||
-          existing.winning_outcome !== input.winningOutcome
-        ) {
-          this.database
-            .prepare(
-              "UPDATE strategy_state SET status = 'PAUSED', updated_at = ? WHERE id = 1",
-            )
-            .run((input.now ?? new Date()).toISOString());
-          this.writeAudit("PAPER_SETTLEMENT_CONFLICT", "paper_settlement", target.conditionId, {
+      if (existing !== undefined && conflictReason !== null) {
+        const nowIso = (input.now ?? new Date()).toISOString();
+        this.database
+          .prepare(
+            "UPDATE strategy_state SET status = 'PAUSED', updated_at = ? WHERE id = 1",
+          )
+          .run(nowIso);
+        this.writeAudit(
+          "PAPER_SETTLEMENT_CONFLICT",
+          "paper_settlement",
+          target.conditionId,
+          {
+            conflictReason,
+            recordedMarketId: existing.market_id,
+            receivedMarketId: target.marketId,
+            recordedEventId: existing.event_id,
+            receivedEventId: target.eventId,
+            recordedResolutionStatus: existing.resolution_status,
+            receivedClosed: input.closed,
+            receivedResolutionStatus: input.resolutionStatus,
             recordedWinningTokenId: existing.winning_token_id,
             receivedWinningTokenId: input.winningTokenId,
             recordedWinningOutcome: existing.winning_outcome,
             receivedWinningOutcome: input.winningOutcome,
-          });
-          conflictError = new Error(
-            `Conflicting paper settlement result for condition: ${target.conditionId}`,
-          );
-          return null;
-        }
+            recordedPayouts,
+            receivedPayouts: receivedPayouts ?? input.payouts ?? null,
+          },
+        );
+        conflictError = new Error(
+          `Conflicting paper settlement result for condition: ${target.conditionId}`,
+        );
+        return null;
+      }
+
+      if (existing?.status === "SETTLED") {
         return {
           settlement: rowToPaperSettlement(existing),
           duplicate: true,
@@ -1137,6 +1215,32 @@ export class PaperDatabase {
           cancelledSellCount: 0,
         };
       }
+
+      if (!input.closed) {
+        throw new PaperResolutionValidationError(
+          "Paper settlement requires a closed market",
+        );
+      }
+      const resolutionStatus = normalizeFinalResolutionStatus(
+        input.resolutionStatus,
+      );
+      if (receivedPayouts === null) {
+        throw new Error(
+          "Paper settlement result must be an official 1/0 or 50/50 result",
+        );
+      }
+
+      if (existing === undefined) {
+        this.ensurePaperSettlementWithoutTransaction(
+          target,
+          input.now ?? new Date(),
+        );
+        existing = this.getPaperSettlementRow(target.conditionId);
+      }
+      if (existing === undefined) {
+        throw new Error(`Paper settlement not found: ${target.conditionId}`);
+      }
+      this.assertSettlementTargetMatches(existing, target);
 
       const now = input.now ?? new Date();
       const nowIso = now.toISOString();
@@ -1161,35 +1265,10 @@ export class PaperDatabase {
       }
       const positions = allPositions.filter((position) => position.quantity_micros > 0);
 
-      const payoutByToken = new Map<string, number>();
-      if (input.payouts === undefined) {
-        if (input.winningTokenId === null) {
-          throw new Error("Paper settlement is missing a winning token or payout vector");
-        }
-        payoutByToken.set(input.winningTokenId, 1_000_000);
-      } else {
-        for (const payout of input.payouts) {
-          if (
-            payout.tokenId.trim().length === 0 ||
-            !Number.isInteger(payout.priceMicros) ||
-            payout.priceMicros < 0 ||
-            payout.priceMicros > 1_000_000 ||
-            payoutByToken.has(payout.tokenId)
-          ) {
-            throw new Error("Paper settlement contains an invalid payout vector");
-          }
-          payoutByToken.set(payout.tokenId, payout.priceMicros);
-        }
-        if (payoutByToken.size !== 2) {
-          throw new Error("Paper settlement payout vector must contain two outcomes");
-        }
-        const payoutTotal = Array.from(payoutByToken.values()).reduce(
-          (sum, value) => sum + value,
-          0,
-        );
-        if (payoutTotal !== 1_000_000) {
-          throw new Error("Paper settlement payout vector must sum to one token");
-        }
+      const payoutByToken = new Map(
+        receivedPayouts.map((payout) => [payout.tokenId, payout.priceMicros]),
+      );
+      if (receivedPayouts.length === 2) {
         for (const position of positions) {
           if (!payoutByToken.has(position.token_id)) {
             throw new Error(
@@ -1564,6 +1643,49 @@ export class PaperDatabase {
       errors.push(`Paper order has an invalid fill range: ${order.id}`);
     }
 
+    const invalidFillRows = this.database
+      .prepare(
+        `SELECT pf.id FROM paper_fills pf
+        JOIN paper_orders po ON po.id = pf.order_id
+        WHERE length(trim(pf.source_trade_id)) = 0
+          OR pf.price_micros <= 0
+          OR pf.price_micros >= 1000000
+          OR pf.size_micros <= 0
+          OR pf.net_size_micros <= 0
+          OR pf.net_size_micros > pf.size_micros
+          OR pf.fee_micros < 0
+          OR (po.side = 'SELL' AND pf.net_size_micros != pf.size_micros)`,
+      )
+      .all() as unknown as Array<{ id: string }>;
+    for (const fill of invalidFillRows) {
+      errors.push(`Paper fill contains invalid accounting values: ${fill.id}`);
+    }
+
+    const orderFillRows = this.database
+      .prepare(
+        `SELECT po.id, po.filled_size_micros, po.fee_micros,
+          COALESCE(SUM(pf.size_micros), 0) AS fill_size_micros,
+          COALESCE(SUM(pf.fee_micros), 0) AS fill_fee_micros
+        FROM paper_orders po
+        LEFT JOIN paper_fills pf ON pf.order_id = po.id
+        GROUP BY po.id, po.filled_size_micros, po.fee_micros`,
+      )
+      .all() as unknown as Array<{
+      id: string;
+      filled_size_micros: number;
+      fee_micros: number;
+      fill_size_micros: number;
+      fill_fee_micros: number;
+    }>;
+    for (const order of orderFillRows) {
+      if (
+        order.filled_size_micros !== order.fill_size_micros ||
+        order.fee_micros !== order.fill_fee_micros
+      ) {
+        errors.push(`Paper order fill totals do not match: ${order.id}`);
+      }
+    }
+
     const expectedReservedCash = activeOrders
       .filter((order) => order.side === "BUY")
       .reduce(
@@ -1596,15 +1718,42 @@ export class PaperDatabase {
 
     const positionRows = this.database
       .prepare(
-        `SELECT token_id, quantity_micros, cost_micros
+        `SELECT token_id, condition_id, quantity_micros, cost_micros
         FROM paper_positions
         WHERE quantity_micros != 0 OR cost_micros != 0`,
       )
       .all() as unknown as Array<{
       token_id: string;
+      condition_id: string;
       quantity_micros: number;
       cost_micros: number;
     }>;
+    const fillPositionRows = this.database
+      .prepare(
+        `SELECT po.token_id, po.condition_id,
+          SUM(
+            CASE WHEN po.side = 'BUY'
+              THEN pf.net_size_micros
+              ELSE -pf.size_micros
+            END
+          ) AS quantity_micros
+        FROM paper_orders po
+        JOIN paper_fills pf ON pf.order_id = po.id
+        LEFT JOIN paper_settlements ps ON ps.condition_id = po.condition_id
+        WHERE ps.status IS NULL OR ps.status != 'SETTLED'
+        GROUP BY po.token_id, po.condition_id`,
+      )
+      .all() as unknown as Array<{
+      token_id: string;
+      condition_id: string;
+      quantity_micros: number;
+    }>;
+    const fillPositionByMarket = new Map(
+      fillPositionRows.map((position) => [
+        `${position.condition_id}\u0000${position.token_id}`,
+        position.quantity_micros,
+      ]),
+    );
     const activeSellByToken = new Map<string, number>();
     for (const order of activeOrders.filter((order) => order.side === "SELL")) {
       activeSellByToken.set(
@@ -1615,6 +1764,16 @@ export class PaperDatabase {
       );
     }
     for (const position of positionRows) {
+      const fillPositionKey = `${position.condition_id}\u0000${position.token_id}`;
+      if (
+        (fillPositionByMarket.get(fillPositionKey) ?? 0) !==
+        position.quantity_micros
+      ) {
+        errors.push(
+          `Paper fill position total does not match: ${position.token_id}`,
+        );
+      }
+      fillPositionByMarket.delete(fillPositionKey);
       if (position.quantity_micros <= 0 || position.cost_micros <= 0) {
         errors.push(
           `Paper position has invalid quantity or cost: ${position.token_id}`,
@@ -1635,6 +1794,13 @@ export class PaperDatabase {
     }
     if (activeSellByToken.size > 0) {
       errors.push("Active paper sells exist without matching positions");
+    }
+    for (const [key, quantityMicros] of fillPositionByMarket) {
+      if (quantityMicros !== 0) {
+        errors.push(
+          `Paper fill position total does not match: ${key.split("\u0000")[1]}`,
+        );
+      }
     }
 
     const settledConditions = this.database
@@ -2463,14 +2629,16 @@ export class PaperDatabase {
         this.database
           .prepare(
             `INSERT INTO paper_fills(
-              id, order_id, source_trade_id, price_micros, size_micros, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)`,
+              id, order_id, source_trade_id, price_micros, size_micros,
+              net_size_micros, fee_micros, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
           )
           .run(
             fillId,
             order.id,
             input.sourceTradeId,
             order.priceMicros,
+            fill.incrementalFillSizeMicros,
             fill.incrementalFillSizeMicros,
             now,
           );
@@ -2986,6 +3154,57 @@ export class PaperDatabase {
       throw new Error(
         `Paper settlement target metadata changed: ${target.conditionId}`,
       );
+    }
+  }
+
+  private getRecordedPaperSettlementPayouts(
+    conditionId: string,
+  ): PaperSettlementPayout[] | null {
+    const row = this.database
+      .prepare(
+        `SELECT payload_json FROM audit_log
+        WHERE event_type = 'PAPER_MARKET_SETTLED'
+          AND entity_type = 'paper_settlement' AND entity_id = ?
+        ORDER BY id DESC LIMIT 1`,
+      )
+      .get(conditionId) as { payload_json: string } | undefined;
+    if (row === undefined) {
+      return null;
+    }
+    try {
+      const payload = JSON.parse(row.payload_json) as { payouts?: unknown };
+      if (!Array.isArray(payload.payouts)) {
+        return null;
+      }
+      const payouts: PaperSettlementPayout[] = [];
+      const tokenIds = new Set<string>();
+      for (const value of payload.payouts) {
+        if (typeof value !== "object" || value === null) {
+          return null;
+        }
+        const payout = value as Record<string, unknown>;
+        const tokenId =
+          typeof payout.tokenId === "string" ? payout.tokenId.trim() : "";
+        if (
+          tokenId.length === 0 ||
+          tokenIds.has(tokenId) ||
+          !Number.isSafeInteger(payout.priceMicros) ||
+          (payout.priceMicros as number) < 0 ||
+          (payout.priceMicros as number) > 1_000_000
+        ) {
+          return null;
+        }
+        tokenIds.add(tokenId);
+        payouts.push({
+          tokenId,
+          priceMicros: payout.priceMicros as number,
+        });
+      }
+      return payouts.sort((left, right) =>
+        left.tokenId.localeCompare(right.tokenId),
+      );
+    } catch {
+      return null;
     }
   }
 

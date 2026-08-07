@@ -22,6 +22,14 @@ describe("loadConfig", () => {
     );
   });
 
+  it("accepts only the supported whole-cent maximum buy prices", () => {
+    expect(loadConfig({ MAX_BUY_PRICE: "0.01" }).maxBuyPriceMicros).toBe(10_000);
+    expect(loadConfig({ MAX_BUY_PRICE: "0.02" }).maxBuyPriceMicros).toBe(20_000);
+    expect(loadConfig({ MAX_BUY_PRICE: "0.03" }).maxBuyPriceMicros).toBe(30_000);
+    expect(() => loadConfig({ MAX_BUY_PRICE: "0.015" })).toThrow();
+    expect(() => loadConfig({ MAX_BUY_PRICE: "0.04" })).toThrow();
+  });
+
   it("rejects a per-token budget above the total budget", () => {
     expect(() =>
       loadConfig({ ORDER_BUDGET_USD: "101", TOTAL_BUDGET_USD: "100" }),

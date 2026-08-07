@@ -11,7 +11,11 @@ import {
   type MarketEligibilityRejectionCounts,
 } from "./market-eligibility.js";
 import { extractEligibleTokens, filterEligibleEvent } from "./event-filter.js";
-import { buildMonitoredCandidate, decimalStringToMicros } from "./price.js";
+import {
+  DECIMAL_SCALE,
+  buildMonitoredCandidate,
+  decimalStringToMicros,
+} from "./price.js";
 import {
   sortTradeCandidates,
   type CandidateSortDirection,
@@ -64,23 +68,37 @@ export interface MarketScanPreferencesProvider {
   getMarketScanPreferences(): MarketScanPreferences;
 }
 
-function normalizeOrderBook(book: OrderBook): TokenOrderBook {
-  return {
-    tokenId: String(book.tokenId),
-    conditionId: String(book.conditionId),
-    bookVersion: `REST:${String(book.tokenId)}`,
-    bids: book.bids.map((level) => ({
+function normalizeOrderBook(book: OrderBook): TokenOrderBook | null {
+  try {
+    const bids = book.bids.map((level) => ({
       priceMicros: decimalStringToMicros(level.price),
       sizeMicros: decimalStringToMicros(level.size),
-    })),
-    asks: book.asks.map((level) => ({
+    }));
+    const asks = book.asks.map((level) => ({
       priceMicros: decimalStringToMicros(level.price),
       sizeMicros: decimalStringToMicros(level.size),
-    })),
-    minOrderSizeMicros: decimalStringToMicros(book.minOrderSize),
-    tickSizeMicros: decimalStringToMicros(book.tickSize),
-    isNegativeRisk: book.negRisk,
-  };
+    }));
+    if (
+      [...bids, ...asks].some(
+        (level) =>
+          level.priceMicros <= 0 || level.priceMicros >= DECIMAL_SCALE,
+      )
+    ) {
+      return null;
+    }
+    return {
+      tokenId: String(book.tokenId),
+      conditionId: String(book.conditionId),
+      bookVersion: `REST:${String(book.tokenId)}`,
+      bids,
+      asks,
+      minOrderSizeMicros: decimalStringToMicros(book.minOrderSize),
+      tickSizeMicros: decimalStringToMicros(book.tickSize),
+      isNegativeRisk: book.negRisk,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface CandidateScanner {
@@ -145,6 +163,11 @@ export class MarketScanner implements CandidateScanner {
       maxMarketDurationDays: scanPreferences.maxMarketDurationDays,
       maxMarketProgressPercent: scanPreferences.maxMarketProgressPercent,
       orderBudgetMicros: scanPreferences.orderBudgetMicros,
+    };
+    const categoryNeutralEligibilitySettings = {
+      ...eligibilitySettings,
+      allCategories: true,
+      selectedCategoryIds: [],
     };
     const rejectionCounts = emptyMarketEligibilityRejectionCounts();
     const startedAt = new Date();
@@ -218,7 +241,7 @@ export class MarketScanner implements CandidateScanner {
           transientErrorCount,
         });
       };
-      const tokens: MarketToken[] = [];
+      const staticTokens: MarketToken[] = [];
       const eventCategoryById = new Map<string, MarketCategory>();
       let eventCount = 0;
       let eligibleTokenCount = 0;
@@ -245,11 +268,11 @@ export class MarketScanner implements CandidateScanner {
             }
             const reason = staticMarketEligibilityRejectionReason(
               token,
-              eligibilitySettings,
+              categoryNeutralEligibilitySettings,
               now,
             );
             if (reason === null) {
-              tokens.push(token);
+              staticTokens.push(token);
             } else {
               rejectionCounts[reason] += 1;
             }
@@ -276,12 +299,42 @@ export class MarketScanner implements CandidateScanner {
         );
       }
       signal?.throwIfAborted();
+      await Promise.race([
+        homepageCategoriesPromise.then(() => undefined),
+        new Promise<void>((resolve) => setImmediate(resolve)),
+      ]);
+      signal?.throwIfAborted();
       const eventCategories = Array.from(eventCategoryById.values()).sort(
         (left, right) =>
           left.label.localeCompare(right.label) || left.id.localeCompare(right.id),
       );
       const availableCategories =
         homepageCategories.length > 0 ? homepageCategories : eventCategories;
+      const homepageCategoryIds = new Set(
+        homepageCategories.map((category) => category.id),
+      );
+      const effectiveEligibilitySettings =
+        !eligibilitySettings.allCategories
+          ? {
+              ...eligibilitySettings,
+              selectedCategoryIds: eligibilitySettings.selectedCategoryIds.filter(
+                (categoryId) => homepageCategoryIds.has(categoryId),
+              ),
+            }
+          : eligibilitySettings;
+      const tokens: MarketToken[] = [];
+      for (const token of staticTokens) {
+        const reason = staticMarketEligibilityRejectionReason(
+          token,
+          effectiveEligibilitySettings,
+          now,
+        );
+        if (reason === null) {
+          tokens.push(token);
+        } else {
+          rejectionCounts[reason] += 1;
+        }
+      }
 
       this.updateDiagnostics({
         phase: "ORDER_BOOKS",
@@ -319,12 +372,13 @@ export class MarketScanner implements CandidateScanner {
               signal,
             );
       signal?.throwIfAborted();
-      const bookByToken = new Map(
-        books.map((book) => {
-          const normalized = normalizeOrderBook(book);
-          return [normalized.tokenId, normalized] as const;
-        }),
-      );
+      const bookByToken = new Map<string, TokenOrderBook>();
+      for (const rawBook of books) {
+        const normalized = normalizeOrderBook(rawBook);
+        if (normalized !== null) {
+          bookByToken.set(normalized.tokenId, normalized);
+        }
+      }
 
       const monitoredCandidates: TradeCandidate[] = [];
       let candidateCount = 0;
@@ -332,6 +386,7 @@ export class MarketScanner implements CandidateScanner {
         const fetchedBook = bookByToken.get(token.tokenId);
         const book =
           fetchedBook !== undefined &&
+          fetchedBook.conditionId === token.conditionId &&
           fetchedBook.isNegativeRisk === token.isNegativeRisk
             ? fetchedBook
             : null;

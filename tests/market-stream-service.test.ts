@@ -97,6 +97,90 @@ class BurstSnapshotSource implements MarketStreamSource {
   }
 }
 
+class IncrementalDisconnectSource implements MarketStreamSource {
+  public calls: string[][] = [];
+  public updates: MarketStreamSubscriptionUpdate[] = [];
+  private currentQueue: AsyncEventQueue<ReturnType<typeof makeBookEvent>> | null =
+    null;
+
+  public async subscribe(tokenIds: readonly string[]): Promise<MarketStreamHandle> {
+    this.calls.push([...tokenIds]);
+    const queue = new AsyncEventQueue<ReturnType<typeof makeBookEvent>>();
+    this.currentQueue = queue;
+    queue.push(
+      makeBookEvent(
+        tokenIds.includes("yes-token") ? "yes-token" : tokenIds[0],
+      ),
+    );
+    const source = this;
+    return {
+      updateSubscriptions: async (update) => {
+        source.updates.push({
+          subscribe: [...update.subscribe],
+          unsubscribe: [...update.unsubscribe],
+        });
+      },
+      close: async () => queue.end(),
+      [Symbol.asyncIterator]() {
+        return queue[Symbol.asyncIterator]();
+      },
+    };
+  }
+
+  public emitBook(tokenId: string): void {
+    this.currentQueue?.push(makeBookEvent(tokenId));
+  }
+
+  public disconnectCurrent(): void {
+    if (this.currentQueue === null) {
+      throw new Error("Expected an active market stream");
+    }
+    this.currentQueue.end();
+    this.currentQueue = null;
+  }
+}
+
+class AsyncEventQueue<T> implements AsyncIterable<T> {
+  private readonly values: T[] = [];
+  private readonly waiters: Array<(value: IteratorResult<T>) => void> = [];
+  private ended = false;
+
+  public push(value: T): void {
+    if (this.ended) return;
+    const waiter = this.waiters.shift();
+    if (waiter === undefined) {
+      this.values.push(value);
+    } else {
+      waiter({ value, done: false });
+    }
+  }
+
+  public end(): void {
+    if (this.ended) return;
+    this.ended = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  public [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: async () => {
+        const value = this.values.shift();
+        if (value !== undefined) {
+          return { value, done: false };
+        }
+        if (this.ended) {
+          return { value: undefined, done: true };
+        }
+        return new Promise<IteratorResult<T>>((resolve) => {
+          this.waiters.push(resolve);
+        });
+      },
+    };
+  }
+}
+
 describe("MarketStreamService", () => {
   const resources: Array<{ close?: () => void; stop?: () => Promise<void> }> = [];
 
@@ -234,6 +318,54 @@ describe("MarketStreamService", () => {
         .getSnapshot()
         .candidates.find((candidate) => candidate.tokenId === "yes-token"),
     ).toMatchObject({ bookReady: true });
+  });
+
+  it("keeps an incrementally subscribed token not ready until its reconnect book arrives", async () => {
+    const retainedCandidate = makeCandidate();
+    const addedCandidate = makeCandidate({
+      candidateId: "added-token:20000",
+      tokenId: "added-token",
+    });
+    let scannedCandidates = [retainedCandidate];
+    const candidates = new CandidateService(
+      { scan: async () => scannedCandidates },
+      15_000,
+    );
+    await candidates.refresh();
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const source = new IncrementalDisconnectSource();
+    const service = new MarketStreamService(
+      source,
+      candidates,
+      database,
+      new PaperMarketProcessor(database),
+      5,
+    );
+    resources.push(database, service);
+
+    service.start();
+    await waitFor(() => service.getStatus().fullSnapshotCount === 1);
+    scannedCandidates = [retainedCandidate, addedCandidate];
+    await candidates.refresh();
+    await waitFor(() => source.updates.length === 1);
+    source.emitBook("added-token");
+    await waitFor(() => service.isTokenReady("added-token"));
+
+    source.disconnectCurrent();
+    await waitFor(() => service.getStatus().unexpectedDisconnectCount === 1);
+    await waitFor(() => service.getStatus().connectionCount === 2);
+
+    expect(service.isTokenReady("added-token")).toBe(false);
+    expect(service.getQuoteStatus("added-token")).toBe("NOT_READY");
+    expect(
+      candidates
+        .getSnapshot()
+        .candidates.find((candidate) => candidate.tokenId === "added-token"),
+    ).toMatchObject({ bookReady: false });
+
+    source.emitBook("added-token");
+    await waitFor(() => service.isTokenReady("added-token"));
+    expect(service.getStatus().recoveryCount).toBe(1);
   });
 
   it("restores a full snapshot after each repeated disconnect", async () => {

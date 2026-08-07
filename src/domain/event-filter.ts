@@ -1,6 +1,8 @@
 import type { Event, Market } from "@polymarket/client";
 import type { AppConfig } from "../config.js";
 import type { EligibleEvent, MarketCategory, MarketToken } from "./types.js";
+import { DECIMAL_SCALE } from "./price.js";
+import { MAX_TAKER_FEE_EXPONENT } from "./trading-strategy.js";
 
 const DAY_MS = 86_400_000;
 
@@ -48,8 +50,8 @@ export function filterEligibleEvent(
 ): EligibleEvent | null {
   if (
     event.state.active !== true ||
-    event.state.closed === true ||
-    event.state.archived === true
+    event.state.closed !== false ||
+    event.state.archived !== false
   ) {
     return null;
   }
@@ -107,8 +109,8 @@ function optionalPositiveMicros(value: unknown): number {
 function marketIsOpen(market: Market): boolean {
   return (
     market.state.active === true &&
-    market.state.closed !== true &&
-    market.state.archived !== true &&
+    market.state.closed === false &&
+    market.state.archived === false &&
     market.state.acceptingOrders === true &&
     market.state.enableOrderBook === true
   );
@@ -117,22 +119,29 @@ function marketIsOpen(market: Market): boolean {
 function marketFeeParameters(
   market: Market,
 ): { feesEnabled: boolean; feeRateMicros: number; feeExponent: number } | null {
-  if (market.trading.feesEnabled !== true) {
+  if (market.trading.feesEnabled === false) {
     return { feesEnabled: false, feeRateMicros: 0, feeExponent: 1 };
+  }
+  if (market.trading.feesEnabled !== true) {
+    return null;
   }
   const rate = Number(market.trading.feeSchedule?.rate);
   const exponent = Number(market.trading.feeSchedule?.exponent);
+  const feeRateMicros = Math.round(rate * DECIMAL_SCALE);
   if (
     !Number.isFinite(rate) ||
     rate < 0 ||
+    rate > 1 ||
+    !Number.isSafeInteger(feeRateMicros) ||
     !Number.isSafeInteger(exponent) ||
-    exponent < 0
+    exponent < 0 ||
+    exponent > MAX_TAKER_FEE_EXPONENT
   ) {
     return null;
   }
   return {
     feesEnabled: true,
-    feeRateMicros: Math.round(rate * 1_000_000),
+    feeRateMicros,
     feeExponent: exponent,
   };
 }

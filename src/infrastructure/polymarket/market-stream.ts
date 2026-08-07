@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { decimalStringToMicros } from "../../domain/price.js";
+import {
+  DECIMAL_SCALE,
+  decimalStringToMicros,
+} from "../../domain/price.js";
 import type {
   MarketStreamEvent,
   PaperOrderSide,
@@ -147,6 +150,12 @@ export class PolymarketMarketStreamSource implements MarketStreamSource {
         { once: true },
       );
     });
+    const failInvalidFrame = (): void => {
+      queue.end(
+        new Error("Polymarket market WebSocket received invalid frame"),
+      );
+      closeSocket(socket);
+    };
 
     socket.addEventListener("message", (message) => {
       if (message.data === "PONG") {
@@ -156,21 +165,35 @@ export class PolymarketMarketStreamSource implements MarketStreamSource {
       if (typeof message.data !== "string") {
         return;
       }
+      let payload: unknown;
       try {
-        const payload: unknown = JSON.parse(message.data);
-        const rawEvents = Array.isArray(payload) ? payload : [payload];
-        for (const rawEvent of rawEvents) {
-          const parsed = rawMarketEventSchema.safeParse(rawEvent);
-          if (!parsed.success) {
-            continue;
-          }
-          for (const event of toMarketStreamEvents(parsed.data)) {
-            queue.push(event);
-          }
-        }
+        payload = JSON.parse(message.data);
       } catch {
-        // Ignore malformed and unsupported public frames. A missing initial
-        // snapshot remains visible through dataCompleteTokenCount upstream.
+        return;
+      }
+      const rawEvents = Array.isArray(payload) ? payload : [payload];
+      const events: MarketStreamEvent[] = [];
+      for (const rawEvent of rawEvents) {
+        const parsed = rawMarketEventSchema.safeParse(rawEvent);
+        if (!parsed.success) {
+          if (hasRecognizedMarketEventType(rawEvent)) {
+            failInvalidFrame();
+            return;
+          }
+          continue;
+        }
+        try {
+          events.push(...toMarketStreamEvents(parsed.data));
+        } catch {
+          // A recognized frame with invalid numeric or timestamp data can
+          // make the cached book stale. Reconnect so every token loses ready
+          // state until a fresh complete snapshot arrives.
+          failInvalidFrame();
+          return;
+        }
+      }
+      for (const event of events) {
+        queue.push(event);
       }
     });
     socket.addEventListener("close", (event) => {
@@ -268,6 +291,18 @@ function sendSubscriptionOperation(
 
 type RawMarketEvent = z.infer<typeof rawMarketEventSchema>;
 
+function hasRecognizedMarketEventType(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const eventType = (value as { event_type?: unknown }).event_type;
+  return (
+    eventType === "book" ||
+    eventType === "price_change" ||
+    eventType === "last_trade_price"
+  );
+}
+
 function toMarketStreamEvents(event: RawMarketEvent): MarketStreamEvent[] {
   if (event.event_type === "book") {
     return [
@@ -275,12 +310,12 @@ function toMarketStreamEvents(event: RawMarketEvent): MarketStreamEvent[] {
         type: "book",
         tokenId: event.asset_id,
         bids: event.bids.map((level) => ({
-          priceMicros: decimalStringToMicros(level.price),
-          sizeMicros: decimalStringToMicros(level.size),
+          priceMicros: marketPriceStringToMicros(level.price),
+          sizeMicros: marketSizeStringToMicros(level.size),
         })),
         asks: event.asks.map((level) => ({
-          priceMicros: decimalStringToMicros(level.price),
-          sizeMicros: decimalStringToMicros(level.size),
+          priceMicros: marketPriceStringToMicros(level.price),
+          sizeMicros: marketSizeStringToMicros(level.size),
         })),
         timestampMs: toTimestamp(event.timestamp),
       },
@@ -293,8 +328,8 @@ function toMarketStreamEvents(event: RawMarketEvent): MarketStreamEvent[] {
       type: "price_change",
       tokenId: change.asset_id,
       side: toPaperSide(change.side),
-      priceMicros: decimalStringToMicros(change.price),
-      sizeMicros: decimalStringToMicros(change.size),
+      priceMicros: marketPriceStringToMicros(change.price),
+      sizeMicros: marketSizeStringToMicros(change.size),
       timestampMs,
     }));
   }
@@ -302,12 +337,12 @@ function toMarketStreamEvents(event: RawMarketEvent): MarketStreamEvent[] {
   if (event.size === undefined || event.size === null) {
     return [];
   }
-  const sizeMicros = decimalStringToMicros(event.size);
+  const sizeMicros = marketSizeStringToMicros(event.size);
   if (sizeMicros <= 0) {
     return [];
   }
   const takerSide = toPaperSide(event.side);
-  const priceMicros = decimalStringToMicros(event.price);
+  const priceMicros = marketPriceStringToMicros(event.price);
   const timestampMs = toTimestamp(event.timestamp);
   return [
     {
@@ -327,6 +362,22 @@ function toMarketStreamEvents(event: RawMarketEvent): MarketStreamEvent[] {
       timestampMs,
     },
   ];
+}
+
+function marketPriceStringToMicros(value: string): number {
+  const micros = decimalStringToMicros(value);
+  if (micros <= 0 || micros >= DECIMAL_SCALE) {
+    throw new Error(`Market price must be between zero and one: ${value}`);
+  }
+  return micros;
+}
+
+function marketSizeStringToMicros(value: string): number {
+  const micros = decimalStringToMicros(value);
+  if (!Number.isSafeInteger(micros)) {
+    throw new Error(`Market size exceeds the supported range: ${value}`);
+  }
+  return micros;
 }
 
 class AsyncEventQueue<T> implements AsyncIterableIterator<T> {
@@ -356,6 +407,9 @@ class AsyncEventQueue<T> implements AsyncIterableIterator<T> {
     }
     this.ended = true;
     this.error = error;
+    if (error !== null) {
+      this.values.length = 0;
+    }
     for (const waiter of this.waiters.splice(0)) {
       if (error === null) {
         waiter.resolve({ done: true, value: undefined });

@@ -323,10 +323,13 @@ export function evaluateAvailablePaperSoakSafety(
           input.requireRunning,
         ),
       );
-    } else if (input.status.httpStatus !== 200) {
-      criticalErrors.push(
-        `Status endpoint returned HTTP ${input.status.httpStatus}`,
-      );
+    } else {
+      if (input.status.httpStatus !== 200) {
+        criticalErrors.push(
+          `Status endpoint returned HTTP ${input.status.httpStatus}`,
+        );
+      }
+      criticalErrors.push("Status endpoint response is invalid");
     }
   }
   if (input.validation !== undefined) {
@@ -338,10 +341,13 @@ export function evaluateAvailablePaperSoakSafety(
           input.validation.httpStatus,
         ),
       );
-    } else if (input.validation.httpStatus !== 200) {
-      criticalErrors.push(
-        `Validation endpoint returned HTTP ${input.validation.httpStatus}`,
-      );
+    } else {
+      if (input.validation.httpStatus !== 200) {
+        criticalErrors.push(
+          `Validation endpoint returned HTTP ${input.validation.httpStatus}`,
+        );
+      }
+      criticalErrors.push("Validation endpoint response is invalid");
     }
   }
   return criticalErrors;

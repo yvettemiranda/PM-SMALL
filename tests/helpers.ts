@@ -50,6 +50,7 @@ export function makeMarket(overrides: Record<string, unknown> = {}): Market {
     state: {
       active: true,
       closed: false,
+      archived: false,
       acceptingOrders: true,
       enableOrderBook: true,
     },
@@ -59,7 +60,7 @@ export function makeMarket(overrides: Record<string, unknown> = {}): Market {
     },
     metrics: {},
     prices: {},
-    trading: {},
+    trading: { feesEnabled: false },
     resolution: {
       questionId: null,
       negRiskRequestId: null,

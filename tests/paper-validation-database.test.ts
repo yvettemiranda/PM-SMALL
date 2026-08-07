@@ -186,6 +186,93 @@ describe("paper ledger validation", () => {
     }
   });
 
+  it("detects when fill evidence no longer matches an order aggregate", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
+    const databasePath = join(directory, "paper.db");
+    const database = new PaperDatabase(databasePath, 100_000_000);
+
+    try {
+      database.setStrategyStatus("RUNNING");
+      const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+      database.applyPaperTrade({
+        orderId: buy.id,
+        sourceTradeId: "missing-fill-evidence",
+        tradePriceMicros: buy.priceMicros,
+        tradeSizeMicros: 12_000_000,
+        dataComplete: true,
+      });
+      deletePaperFills(databasePath, buy.id);
+
+      const result = database.validatePaperState();
+
+      expect(result.passed).toBe(false);
+      expect(result.errors).toContain(
+        `Paper order fill totals do not match: ${buy.id}`,
+      );
+    } finally {
+      database.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a position and exit target that drift together from fill evidence", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
+    const databasePath = join(directory, "paper.db");
+    const database = new PaperDatabase(databasePath, 100_000_000);
+
+    try {
+      database.setStrategyStatus("RUNNING");
+      const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+      database.applyPaperTrade({
+        orderId: buy.id,
+        sourceTradeId: "drifted-position",
+        tradePriceMicros: buy.priceMicros,
+        tradeSizeMicros: 12_000_000,
+        dataComplete: true,
+      });
+      driftPositionAndExitTarget(databasePath, buy.tokenId);
+
+      const result = database.validatePaperState();
+
+      expect(result.passed).toBe(false);
+      expect(result.errors).toContain(
+        `Paper fill position total does not match: ${buy.tokenId}`,
+      );
+    } finally {
+      database.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects when recorded order fees drift from fill fees", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
+    const databasePath = join(directory, "paper.db");
+    const database = new PaperDatabase(databasePath, 100_000_000);
+
+    try {
+      database.setStrategyStatus("RUNNING");
+      const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
+      database.applyPaperTrade({
+        orderId: buy.id,
+        sourceTradeId: "fee-drift",
+        tradePriceMicros: buy.priceMicros,
+        tradeSizeMicros: 12_000_000,
+        dataComplete: true,
+      });
+      updatePaperOrderFee(databasePath, buy.id, 1);
+
+      const result = database.validatePaperState();
+
+      expect(result.passed).toBe(false);
+      expect(result.errors).toContain(
+        `Paper order fill totals do not match: ${buy.id}`,
+      );
+    } finally {
+      database.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("freezes automatic accounting mutations after validation fails", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     const candidate = makeCandidate();
@@ -341,6 +428,50 @@ function corruptClosedOrderFillRange(
         WHERE id = 1`,
       )
       .run();
+  } finally {
+    database.close();
+  }
+}
+
+function deletePaperFills(databasePath: string, orderId: string): void {
+  const database = new Database(databasePath);
+  try {
+    database.prepare("DELETE FROM paper_fills WHERE order_id = ?").run(orderId);
+  } finally {
+    database.close();
+  }
+}
+
+function driftPositionAndExitTarget(databasePath: string, tokenId: string): void {
+  const database = new Database(databasePath);
+  try {
+    database
+      .prepare(
+        "UPDATE paper_positions SET quantity_micros = quantity_micros + 1 WHERE token_id = ?",
+      )
+      .run(tokenId);
+    database
+      .prepare(
+        `UPDATE paper_orders
+        SET original_size_micros = original_size_micros + 1
+        WHERE token_id = ? AND side = 'SELL' AND status = 'OPEN'`,
+      )
+      .run(tokenId);
+  } finally {
+    database.close();
+  }
+}
+
+function updatePaperOrderFee(
+  databasePath: string,
+  orderId: string,
+  feeMicros: number,
+): void {
+  const database = new Database(databasePath);
+  try {
+    database
+      .prepare("UPDATE paper_orders SET fee_micros = ? WHERE id = ?")
+      .run(feeMicros, orderId);
   } finally {
     database.close();
   }

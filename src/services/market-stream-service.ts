@@ -197,15 +197,23 @@ export class MarketStreamService implements PaperMarketRuntime {
   }
 
   public isTokenReady(tokenId: string): boolean {
-    return this.connected && this.processor.isTokenReady(tokenId);
+    return (
+      this.connected &&
+      !this.pendingSnapshotTokenIds.has(tokenId) &&
+      this.processor.isTokenReady(tokenId)
+    );
   }
 
   public getBestBidMicros(tokenId: string): number | null {
-    return this.connected ? this.processor.getBestBidMicros(tokenId) : null;
+    return this.isTokenReady(tokenId)
+      ? this.processor.getBestBidMicros(tokenId)
+      : null;
   }
 
   public getBestAskMicros(tokenId: string): number | null {
-    return this.connected ? this.processor.getBestAskMicros(tokenId) : null;
+    return this.isTokenReady(tokenId)
+      ? this.processor.getBestAskMicros(tokenId)
+      : null;
   }
 
   public getQuoteStatus(tokenId: string): MarketQuoteStatus {
@@ -215,7 +223,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     if (!this.connected) {
       return "RECONNECTING";
     }
-    if (!this.processor.isTokenReady(tokenId)) {
+    if (!this.isTokenReady(tokenId)) {
       return "NOT_READY";
     }
     return this.processor.getBestBidMicros(tokenId) === null
@@ -224,11 +232,15 @@ export class MarketStreamService implements PaperMarketRuntime {
   }
 
   public getOrderBookRevision(tokenId: string): number | null {
-    return this.connected ? this.processor.getOrderBookRevision(tokenId) : null;
+    return this.isTokenReady(tokenId)
+      ? this.processor.getOrderBookRevision(tokenId)
+      : null;
   }
 
   public getOrderBook(candidate: TradeCandidate): TokenOrderBook | null {
-    return this.connected ? this.processor.getOrderBook(candidate) : null;
+    return this.isTokenReady(candidate.tokenId)
+      ? this.processor.getOrderBook(candidate)
+      : null;
   }
 
   public consumeTestBuyLiquidity(
@@ -247,7 +259,7 @@ export class MarketStreamService implements PaperMarketRuntime {
   }
 
   public executeTargetSells(tokenId: string): void {
-    if (!this.connected) {
+    if (!this.isTokenReady(tokenId)) {
       return;
     }
     this.processor.executeTargetSells(tokenId);
@@ -402,7 +414,7 @@ export class MarketStreamService implements PaperMarketRuntime {
       this.currentConnectionStartedAtMs = Date.now();
       this.currentConnectionDataComplete = false;
       this.lastError = null;
-      void this.consume(handle, tokenIds, generation);
+      void this.consume(handle, generation);
     } catch (error) {
       this.currentConnectionStartedAtMs = null;
       this.currentConnectionDataComplete = false;
@@ -413,7 +425,6 @@ export class MarketStreamService implements PaperMarketRuntime {
 
   private async consume(
     handle: MarketStreamHandle,
-    tokenIds: string[],
     generation: number,
   ): Promise<void> {
     try {
@@ -442,6 +453,7 @@ export class MarketStreamService implements PaperMarketRuntime {
     } finally {
       if (this.started && generation === this.generation) {
         const disconnectedAtMs = Date.now();
+        const disconnectedTokenIds = [...this.currentTokenIds];
         this.unexpectedDisconnectCount += 1;
         this.recoveryStartedAtMs ??= disconnectedAtMs;
         this.handle = null;
@@ -451,8 +463,8 @@ export class MarketStreamService implements PaperMarketRuntime {
         this.connected = false;
         this.currentConnectionStartedAtMs = null;
         this.currentConnectionDataComplete = false;
-        this.processor.markDisconnected(tokenIds);
-        this.markCandidateQuotesDisconnected(tokenIds);
+        this.processor.markDisconnected(disconnectedTokenIds);
+        this.markCandidateQuotesDisconnected(disconnectedTokenIds);
         this.scheduleReconnect();
       }
     }

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
 import { makeCandidate } from "./helpers.js";
@@ -77,6 +78,160 @@ describe("PaperDatabase paper settlement", () => {
         winningOutcome: "Yes",
       }),
     ).toThrow(/final resolved or settled/);
+    expect(database.getPaperSettlement(target.conditionId)).toBeNull();
+  });
+
+  it("rejects a fractional payout other than an official 50/50 result", () => {
+    const candidate = makeCandidate();
+    const target = {
+      conditionId: candidate.conditionId,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+    };
+
+    expect(() =>
+      database.applyPaperSettlement({
+        target,
+        closed: true,
+        resolutionStatus: "resolved",
+        winningTokenId: null,
+        winningOutcome: "50/50",
+        payouts: [
+          { tokenId: candidate.tokenId, priceMicros: 750_000 },
+          { tokenId: "no-token", priceMicros: 250_000 },
+        ],
+      }),
+    ).toThrow(/1\/0 or 50\/50/);
+    expect(database.getPaperSettlement(target.conditionId)).toBeNull();
+  });
+
+  it("pauses and audits a fractional replay after an official settlement", () => {
+    const candidate = makeCandidate();
+    const target = {
+      conditionId: candidate.conditionId,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+    };
+    database.applyPaperSettlement({
+      target,
+      closed: true,
+      resolutionStatus: "resolved",
+      winningTokenId: candidate.tokenId,
+      winningOutcome: "Yes",
+    });
+
+    expect(() =>
+      database.applyPaperSettlement({
+        target,
+        closed: true,
+        resolutionStatus: "settled",
+        winningTokenId: null,
+        winningOutcome: "50/50",
+        payouts: [
+          { tokenId: candidate.tokenId, priceMicros: 750_000 },
+          { tokenId: "no-token", priceMicros: 250_000 },
+        ],
+      }),
+    ).toThrow(/Conflicting paper settlement/);
+    expect(database.getStrategyState().status).toBe("PAUSED");
+  });
+
+  it.each([
+    "OPEN_MARKET",
+    "NON_FINAL_STATUS",
+    "TARGET_IDENTITY",
+  ] as const)(
+    "pauses and audits an invalid settled replay: %s",
+    (conflictKind) => {
+      const directory = mkdtempSync(join(tmpdir(), "pm-small-conflict-"));
+      const databasePath = join(directory, "paper.db");
+      const persistedDatabase = new PaperDatabase(databasePath, 100_000_000);
+      try {
+        persistedDatabase.setStrategyStatus("RUNNING");
+        const candidate = makeCandidate();
+        const target = {
+          conditionId: candidate.conditionId,
+          marketId: candidate.marketId,
+          eventId: candidate.eventId,
+        };
+        persistedDatabase.applyPaperSettlement({
+          target,
+          closed: true,
+          resolutionStatus: "resolved",
+          winningTokenId: candidate.tokenId,
+          winningOutcome: "Yes",
+        });
+        const replay = {
+          target,
+          closed: true,
+          resolutionStatus: "settled",
+          winningTokenId: candidate.tokenId,
+          winningOutcome: "Yes",
+        };
+        if (conflictKind === "OPEN_MARKET") {
+          replay.closed = false;
+        } else if (conflictKind === "NON_FINAL_STATUS") {
+          replay.resolutionStatus = "proposed";
+        } else {
+          replay.target = {
+            ...target,
+            marketId: `${target.marketId}-changed`,
+          };
+        }
+
+        expect(
+          () => persistedDatabase.applyPaperSettlement(replay),
+          conflictKind,
+        ).toThrow(/Conflicting paper settlement/);
+        expect(
+          persistedDatabase.getStrategyState().status,
+          conflictKind,
+        ).toBe("PAUSED");
+
+        const auditDatabase = new Database(databasePath, {
+          readonly: true,
+          fileMustExist: true,
+        });
+        try {
+          const row = auditDatabase
+            .prepare(
+              `SELECT COUNT(*) AS count FROM audit_log
+              WHERE event_type = 'PAPER_SETTLEMENT_CONFLICT'
+                AND entity_id = ?`,
+            )
+            .get(target.conditionId) as { count: number };
+          expect(row.count, conflictKind).toBe(1);
+        } finally {
+          auditDatabase.close();
+        }
+      } finally {
+        persistedDatabase.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("rejects padded payout token identity before writing a settlement", () => {
+    const candidate = makeCandidate();
+    const target = {
+      conditionId: candidate.conditionId,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+    };
+
+    expect(() =>
+      database.applyPaperSettlement({
+        target,
+        closed: true,
+        resolutionStatus: "resolved",
+        winningTokenId: null,
+        winningOutcome: "50/50",
+        payouts: [
+          { tokenId: ` ${candidate.tokenId}`, priceMicros: 500_000 },
+          { tokenId: "no-token", priceMicros: 500_000 },
+        ],
+      }),
+    ).toThrow(/1\/0 or 50\/50/);
     expect(database.getPaperSettlement(target.conditionId)).toBeNull();
   });
 
@@ -332,6 +487,41 @@ describe("PaperDatabase paper settlement", () => {
       realizedPnlMicros: 1_920_000,
     });
     expect(database.recoverPaperState()).toMatchObject({ passed: true });
+  });
+
+  it("pauses when a repeated 50/50 result changes its payout token identity", () => {
+    const candidate = makeCandidate();
+    const target = {
+      conditionId: candidate.conditionId,
+      marketId: candidate.marketId,
+      eventId: candidate.eventId,
+    };
+    database.applyPaperSettlement({
+      target,
+      closed: true,
+      resolutionStatus: "resolved",
+      winningTokenId: null,
+      winningOutcome: "50/50",
+      payouts: [
+        { tokenId: candidate.tokenId, priceMicros: 500_000 },
+        { tokenId: "no-token", priceMicros: 500_000 },
+      ],
+    });
+
+    expect(() =>
+      database.applyPaperSettlement({
+        target,
+        closed: true,
+        resolutionStatus: "settled",
+        winningTokenId: null,
+        winningOutcome: "50/50",
+        payouts: [
+          { tokenId: candidate.tokenId, priceMicros: 500_000 },
+          { tokenId: "different-no-token", priceMicros: 500_000 },
+        ],
+      }),
+    ).toThrow(/Conflicting paper settlement/);
+    expect(database.getStrategyState().status).toBe("PAUSED");
   });
 
   it("pauses and refuses a conflicting result after settlement", () => {
