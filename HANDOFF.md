@@ -68,6 +68,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 停止 `bot` 后创建 `/home/ubuntu/pm-small-backup-20260807T161243Z`，包含 `data/`、`.env` 和 `docker-compose.yml`；`SHA256SUMS` 全部通过，在隔离可写副本上确认 `integrity_check=ok`、Schema 14 与上述六类计数均为 0。更早的备份全部保留。
 - 服务器以 `git pull --ff-only` 更新到运行时代码 `cb1472c90039ed72e9038821434cf22b45153f43`，重建并启动 `bot`。迁移后及同库重启后均为 Schema 15、Event 锁 0、订单/Fill/持仓/结算/盘口消费 0、资金 100U、验证 `ok`；迁移和恢复审计已写入。
 - Docker 容器最终为 `healthy`，3000 仅绑定 `127.0.0.1`；Nginx 只在 80/443 对外。公网脚本确认 HTTP 跳转 HTTPS、未认证 401、认证后首页 200、页面为 `TEST + LIVE_DISABLED + PAUSED`，TEST 验证和 SQLite 完整性均通过。
+- PAUSED 发现层的一次完整轮次遍历 182 页、18,103 个 Event；780 个 Event 通过静态结构筛选，3,192 个参与 Token 的 3,192 本盘口全部取得，行情流保持连接且扫描/行情错误均为 `null`。最终 0 个可交易 Event；逐规则淘汰主要为 `RESULT_COUNT=48,604`、`PROGRESS_ABOVE_MAX=30,782`、`ASK_ABOVE_MAX=3,035`、`DURATION_ABOVE_MAX=1,102`、`ASK_MISSING=156`、`BID_ASK_RATIO=11`。这证明扫描链路正常，当前无候选由默认二元/三元、生命周期 `<=20%`、Ask `<=3¢`、总时长 `<=30天` 等硬条件与实时盘口共同造成。
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
 
 ## 尚未完成
