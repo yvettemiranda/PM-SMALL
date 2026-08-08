@@ -6,9 +6,11 @@
 
 PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“任意标准多元、Event 仲裁与 Event 周期锁”的 Schema 15 架构升级。标准 Event 统一支持安全整数 `resultCount >= 2`；增强型负风险 Event 继续排除。交易、订单、Fill、Position 和 Condition 结算仍以 Token/Market 为底层单位，候选择优、单轮资金上限和同 Event 互斥提升到 Event 级。
 
-本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、279 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
+本轮代码、迁移、API/UI 和自动化验证已完成；32 个测试文件、292 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动服务器正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
 
 运行时代码提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main` 并部署到 Linux；它在既有 Schema 15 上修复共享 Bid 深度的 Preview 精度并更新买入费用文案，没有新增迁移。容器重启恢复、账本验证、SQLite 完整性、端口、HTTP→HTTPS、未认证 401、认证后 200 与公网页面文案均通过；最终保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；服务器仓库在本交接记录提交后也必须以 `git pull --ff-only` 同步到最新 `main`，但无需因纯文档提交重建运行镜像。
+
+用户已确认正式长期 TEST 采用累计 72 小时：每 4 小时及配置变化自动切段，每段先报告再由用户明确决定计入或排除，硬失败与有效采样率不足片段自动拒绝。仓库提供独立监控、状态、决策、停止和服务器包装工具；工具部署与正式开始是两件事，未收到新的开始指令前仍不得调用启动接口。
 
 ## 当前扫描与执行规则
 
@@ -53,7 +55,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 完整性覆盖兄弟 `NOT_READY` 阻断、完整无 Bid 仅淘汰自身、锁定后兄弟断线不影响 active Token 退出。
 - 锁与轮次覆盖 0 Fill 不锁、首个部分/完整 Fill 原子锁、兄弟互斥、近同时执行、预算冻结、改单不抬额、首次 Sell 后禁买、部分退出保持锁、完整退出解锁和下一轮换 Winner。
 - 结算与迁移覆盖 Condition 结算解锁、兄弟下一轮、单 Token legacy lock、多 Token conflict、原子回滚和重启恢复。
-- 最终本地验证：29 个测试文件、279 项通过；typecheck、build、`node --check src/web/app.js`、`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
+- 最终本地验证：32 个测试文件、292 项通过；typecheck、build、`node --check src/web/app.js`、正式 TEST 包装脚本语法和`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
 
 ## 服务器交付边界
 
@@ -75,8 +77,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 
 ## 尚未完成
 
-- 与用户共同制定并由用户确认的正式长期 TEST 验证计划及执行。
-- 服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核；旧账本历史已由用户明确放弃，不再作为正式 TEST 基线。
+- 已确认的累计 72 小时正式长期 TEST 执行、逐段用户决定和最终审计。
 - 长期接口限流、全量扫描耗时、WebSocket 容量/断线、服务器资源和公开行情成交样本验收。
 - 钱包、签名、LIVE 下单/撤单/对账和链上赎回；这些仍明确禁止。
 

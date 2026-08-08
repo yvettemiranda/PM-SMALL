@@ -81,7 +81,7 @@ npm run build
 npm run paper:soak -- --duration-seconds 300 --interval-seconds 10
 ```
 
-操作与停止条件见 [`docs/PAPER_SOAK.md`](docs/PAPER_SOAK.md)。正式长期验证计划由用户制定，未经确认不得自行开始。
+兼容留证工具的操作与停止条件见 [`docs/PAPER_SOAK.md`](docs/PAPER_SOAK.md)。正式验证采用累计 72 小时、每 4 小时与配置变化分段、逐段由用户决定是否计入的管理流程，详见 [`docs/FORMAL_TEST_CAMPAIGN.md`](docs/FORMAL_TEST_CAMPAIGN.md)；未经用户新的开始指令不得执行。
 
 ## 安全边界
 

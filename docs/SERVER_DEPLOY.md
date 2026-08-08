@@ -130,3 +130,5 @@ docker compose up -d --build
 ```
 
 更新后必须复核运行提交、网页、`/api/status?compact=true`、`/api/test/validation`、SQLite迁移/持久化和同库重启恢复；状态保持`TEST + LIVE_DISABLED + PAUSED`。失败时保留数据库、备份及日志现场，不得通过删除数据库或关闭验证绕过安全门槛。
+
+正式长期验证不直接手工调用启动接口。累计 72 小时、4 小时节点、配置变化分段、用户计入决定和故障暂停流程统一按 [`FORMAL_TEST_CAMPAIGN.md`](FORMAL_TEST_CAMPAIGN.md) 执行。
