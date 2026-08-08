@@ -6,13 +6,13 @@
 
 PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“任意标准多元、Event 仲裁与 Event 周期锁”的 Schema 15 架构升级。标准 Event 统一支持安全整数 `resultCount >= 2`；增强型负风险 Event 继续排除。交易、订单、Fill、Position 和 Condition 结算仍以 Token/Market 为底层单位，候选择优、单轮资金上限和同 Event 互斥提升到 Event 级。
 
-本轮代码、迁移、API/UI 和自动化验证已完成；32 个测试文件、292 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动服务器正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
+本轮代码、迁移、API/UI 和自动化验证已完成；32 个测试文件、293 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。用户已明确授权正式 TEST，活动 `formal-test-20260808T081226Z` 于 2026-08-08 16:12:27（Asia/Shanghai）启动；当前仍严格为 `TEST + LIVE_DISABLED`，没有接钱包、签名、提交真实订单或执行链上操作。
 
-运行时代码提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main` 并部署到 Linux；它在既有 Schema 15 上修复共享 Bid 深度的 Preview 精度并更新买入费用文案，没有新增迁移。容器重启恢复、账本验证、SQLite 完整性、端口、HTTP→HTTPS、未认证 401、认证后 200 与公网页面文案均通过；最终保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；服务器仓库在本交接记录提交后也必须以 `git pull --ff-only` 同步到最新 `main`，但无需因纯文档提交重建运行镜像。
+当前正式 TEST 运行代码提交为 `df01ecf626734e54123383357b11af22f1fe2cda`，已推送 GitHub `main` 并部署到 Linux；它修复了 `sudo` 创建证据目录与非 root 监控镜像之间的权限交接，没有新增迁移或改变交易逻辑。完整测试、类型检查、构建、Bash/前端语法和差异检查均通过。
 
-用户已确认正式长期 TEST 采用累计 72 小时：每 4 小时及配置变化自动切段，每段先报告再由用户明确决定计入或排除，硬失败与有效采样率不足片段自动拒绝。仓库提供独立监控、状态、决策、停止和服务器包装工具；工具部署与正式开始是两件事，未收到新的开始指令前仍不得调用启动接口。
+用户已确认正式长期 TEST 采用累计 72 小时：每 4 小时及配置变化自动切段，每段先报告再由用户明确决定计入或排除，硬失败与有效采样率不足片段自动拒绝。服务器独立监控按 60 秒采样，Codex 是否打开不影响运行；用户明确不设置 Codex 自动提醒，后续回到当前任务询问时再即时读取证据。
 
-正式 TEST 管理工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab` 已推送 GitHub 并同步服务器；独立镜像 `pm-small-formal-test:a2b404e69f0b` 已构建完成。业务机器人没有重建或重启，未创建正式活动或监控容器，状态继续保持 `TEST + LIVE_DISABLED + PAUSED`。
+当前监控镜像为 `pm-small-formal-test:df01ecf62673`，运行目录为 `/home/ubuntu/pm-small/data/validation/formal-test-20260808T081226Z`，启动基线为 `/home/ubuntu/pm-small-formal-test-baseline-20260808T081222Z`。最近复核为 `TEST / LIVE=False / RUNNING`、监控重启 0、账本验证通过、SQLite `ok`，首个 4 小时节点为 2026-08-08 20:12:27。
 
 ## 当前扫描与执行规则
 
@@ -64,7 +64,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 公网入口：`https://43-159-133-129.sslip.io/`；应用 3000 只允许绑定 `127.0.0.1`，公网只经 Nginx 80/443、HTTPS 与登录认证。
 - 部署前必须再次确认 PAUSED，停止容器后备份 `data/`、`.env` 和 `docker-compose.yml`，保存 SHA-256；在可写临时副本上执行 SQLite `integrity_check`。同一次部署不得顺手删除旧备份；后续清理必须获得用户明确授权，并至少保留一份重新验证过的当前回滚备份。
 - 迁移前后必须核对 schema、策略状态、资金、订单、fills、仓位、结算和盘口消费计数；部署后复核容器、端口、HTTPS/认证、状态与 `/api/test/validation`，并做同库重启恢复。
-- 本轮只允许部署 GitHub `main` 的同一 SHA 和 Schema 15，最终状态必须为 `TEST + LIVE_DISABLED + PAUSED`。不得调用 `/api/test/start`，不得把 PAUSED 下的发现层冒烟记为正式长期 TEST。
+- 正式活动运行期间必须保持 Schema 15、`TEST + LIVE_DISABLED` 和当前证据链；未经用户明确授权不得停止、重置、改配置、重启正式活动或触碰 LIVE。任何片段只有在工具健康门槛通过且用户明确确认后才可计入。
 
 ## 本轮服务器交付证据
 
@@ -78,10 +78,12 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
 - 正式 TEST 工具准备时，服务器仓库从 `9cfe103ea76921b1a0589a8fab5e2fcdf52ed656` 快进到工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab`，工作树干净；`prepare` 构建并校验独立镜像 `pm-small-formal-test:a2b404e69f0b`（镜像 ID `sha256:a2bd4013377b66e998d390d226877552f8f47490c81d4f8aa42cfd691bd532bb`）。原业务容器继续使用 `sha256:bceed0db82de8bfb0e2521bc36f2e2b60554ef705de2b51e1dc42604b22dfb95` 且 `running healthy`；复核仍为 `TEST / LIVE=false / PAUSED`、100U 初始/可用资金、验证 `True / ok / 0 / 0 / 0`。监控容器为空，`formal-test-current` 不存在，确认没有开始 72 小时活动。
 - 扫描排序修复运行提交 `375ec17952a02ccab89c757185fc17119431c0ea` 已推送并部署；停机一致性备份 `/home/ubuntu/pm-small-backup-20260808T040744Z` 的 SHA-256 与隔离 SQLite 副本均通过，Schema 15、PAUSED、100U 和 0 订单/Fill/正仓/结算/Event 锁保持不变。新业务镜像 `sha256:e86a4b054cfd9b7930ee8ef9332e76654e9130d2c36d4d7345b03f42096515a4` 健康运行；实际 197 个扫描 Event 为 9 个 `READY` 全部置顶、188 个待定在后，两组进度 ASC 均通过。公网脚本全部通过，监控容器与 `formal-test-current` 仍不存在，未启动 TEST。
+- 正式启动第一次尝试在调用 TEST 启动接口前因证据目录权限 `EACCES` 安全退出，策略仍为 PAUSED、账本验证通过；失败监控已停止，失败运行目录与基线保留。修复提交 `df01ecf626734e54123383357b11af22f1fe2cda` 部署后重新准备镜像并成功启动 `formal-test-20260808T081226Z`。
+- 成功启动基线 `/home/ubuntu/pm-small-formal-test-baseline-20260808T081222Z` 的全部 SHA-256 项已独立复核通过。监控容器 `running`、重启 0、日志无错误；行情连接并订阅 6,236 个 Token，扫描无限流、瞬态错误或断线，随后产生 TEST 模拟持仓，账本验证继续为 `passed=true`、SQLite `ok`。
 
 ## 尚未完成
 
-- 已确认的累计 72 小时正式长期 TEST 执行、逐段用户决定和最终审计。
+- 累计 72 小时正式长期 TEST 正在执行；尚未完成首个 4 小时片段的用户决定、后续累计与最终审计。
 - 长期接口限流、全量扫描耗时、WebSocket 容量/断线、服务器资源和公开行情成交样本验收。
 - 钱包、签名、LIVE 下单/撤单/对账和链上赎回；这些仍明确禁止。
 
