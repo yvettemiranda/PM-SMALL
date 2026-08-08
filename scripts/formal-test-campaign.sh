@@ -149,6 +149,19 @@ read_image() {
   printf '%s\n' "$image"
 }
 
+read_image_runtime_identity() {
+  local image="$1" identity
+  identity="$(
+    docker run --rm --entrypoint sh "$image" -c \
+      'printf "%s:%s\n" "$(id -u)" "$(id -g)"'
+  )"
+  if [[ ! "$identity" =~ ^[0-9]+:[0-9]+$ ]]; then
+    echo "Invalid formal TEST image runtime identity: $identity" >&2
+    exit 1
+  fi
+  printf '%s\n' "$identity"
+}
+
 read_current_run() {
   if [[ ! -f "$current_run_file" ]]; then
     echo "No formal TEST campaign has been created" >&2
@@ -269,10 +282,12 @@ start_campaign() {
     exit 2
   fi
   require_safe_paused
-  local image existing_running backup_directory stamp run_id run_directory temporary
+  local image monitor_identity existing_running backup_directory stamp run_id
+  local run_directory temporary
   local repository_commit bot_container_id bot_image_id
   local previous_run previous_status
   image="$(read_image)"
+  monitor_identity="$(read_image_runtime_identity "$image")"
   if [[ -f "$current_run_file" ]]; then
     previous_run="$(read_current_run)"
     if [[ -f "${previous_run}/campaign.json" ]]; then
@@ -330,6 +345,7 @@ with open(sys.argv[6], "w", encoding="utf-8") as output:
     "$bot_image_id" \
     "$backup_directory" \
     "${run_directory}/server-context.json"
+  chown -R "$monitor_identity" "$run_directory"
   temporary="${current_run_file}.tmp-$$"
   printf '%s\n' "$run_directory" > "$temporary"
   mv "$temporary" "$current_run_file"

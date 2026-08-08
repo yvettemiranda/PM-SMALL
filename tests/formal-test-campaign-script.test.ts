@@ -15,5 +15,15 @@ describe("formal TEST campaign server wrapper", () => {
     expect(script).toContain('if [[ $# -ne 2 || "$1" != "--confirm"');
     expect(script).toContain("--checkpoint-seconds 14400");
     expect(script).toContain("--target-seconds 259200");
+    expect(script).toContain("read_image_runtime_identity()");
+    expect(script).toContain(
+      'monitor_identity="$(read_image_runtime_identity "$image")"',
+    );
+    expect(script).toContain(
+      'chown -R "$monitor_identity" "$run_directory"',
+    );
+    expect(
+      script.indexOf('chown -R "$monitor_identity" "$run_directory"'),
+    ).toBeLessThan(script.indexOf("docker run -d"));
   });
 });
