@@ -11,6 +11,7 @@
 
 - 已实现正式 TEST 累计管理核心与 CLI：72 小时目标、4 小时节点、配置更新时间切段、用户计入/排除、硬失败拒绝、采样有效率/覆盖率门槛、状态报告、停止和信号暂停。
 - 已实现独立服务器包装工具：准备监控镜像、启动前安全检查与停机基线备份、SQLite/哈希复核、单监控容器、重启强制 PAUSED、状态/决定/停止命令；当前未执行 start。
+- 正式 TEST 工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab` 已推送 GitHub `main` 并同步服务器；服务器已构建独立镜像 `pm-small-formal-test:a2b404e69f0b`，没有创建活动或运行监控容器。
 - 新增 3 个测试文件并完成全量 32 文件/292 项、typecheck、build、前端语法、Bash 语法和差异检查；正式运行手册、README、计划、决定和交接已同步。
 - 已完整阅读附件规格和当前项目上下文，核对市场结构、扫描、候选、FAK、自动化、数据库、迁移、结算、验证、API/UI 与测试接缝。
 - 已将 `resultCount` 统一为安全整数 `>=2`，新增 `BINARY / TERNARY / MULTI` 类型模型；旧 binary/ternary 选择保留，multi 默认关闭，增强型负风险 Event 继续排除。
@@ -38,13 +39,12 @@
 
 ## 当前停止点
 
-- 实现、本地自动验证及 Standards/Spec 双轴审查均已完成，两个审查均为 0 项发现；真实 SELL、Event Arbitration、Lock、ResultCount/Multi、Settlement、Validation、资金与 Buy Fee 路径均未改。
-- 精度修复提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main`，本地与 `origin/main` 已回读为 `0/0`。
-- 服务器已部署同一运行提交并完成备份、同库重启、账本/SQLite、容器、端口、HTTPS/认证和 UI 文案验证；最终仍为 `TEST + LIVE_DISABLED + PAUSED`，没有调用启动接口。
-- 部署证据已提交 GitHub；服务器仓库仅快进最终纯文档提交，运行镜像继续保持已验证的 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c`，无需再次重建或重启。
-- 服务器清理后仅保留最新验证备份；当前数据库、运行镜像、活动日志、公网 HTTPS 与验证状态均复核通过。
+- 正式 TEST 工具实现、本地自动验证及 Standards/Spec 双轴审查均已完成，两个审查均为 0 项发现；正式工具提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab` 已推送并在服务器完成独立镜像准备。
+- 准备前后业务容器均为同一镜像 `sha256:bceed0db82de8bfb0e2521bc36f2e2b60554ef705de2b51e1dc42604b22dfb95`，容器保持 `running healthy`，没有重建或重启业务机器人。
+- 服务器最终复核为 `TEST + LIVE_DISABLED + PAUSED`、100U 初始/可用资金、空订单/持仓/待结算、SQLite `ok`；监控容器为空且不存在 `formal-test-current`，确认没有启动正式 TEST。
+- 服务器清理后仍只保留最新验证备份 `/home/ubuntu/pm-small-backup-20260808T012255Z`；本轮准备没有生成新的基线备份，因为正式活动尚未开始。
 
 ## 后续步骤
 
-1. 完成本地最终差异审查，提交并推送 GitHub `main`；服务器只快进仓库并构建独立监控镜像，核对业务容器镜像不变且仍为 PAUSED。
-2. 用户另行发出开始指令后才创建 4 小时 Codex 提醒并启动正式 TEST；钱包和 LIVE 仍不在当前授权范围内。
+1. 用户另行发出开始指令后，先再次执行安全前检、创建经校验的正式基线备份，再启动累计 72 小时 TEST 与独立监控。
+2. 实际开始时创建 4 小时 Codex 提醒；每个 4 小时或配置变化片段均先向用户报告，由用户明确决定计入或排除。钱包和 LIVE 仍不在当前授权范围内。

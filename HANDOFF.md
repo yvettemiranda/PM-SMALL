@@ -12,6 +12,8 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 
 用户已确认正式长期 TEST 采用累计 72 小时：每 4 小时及配置变化自动切段，每段先报告再由用户明确决定计入或排除，硬失败与有效采样率不足片段自动拒绝。仓库提供独立监控、状态、决策、停止和服务器包装工具；工具部署与正式开始是两件事，未收到新的开始指令前仍不得调用启动接口。
 
+正式 TEST 管理工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab` 已推送 GitHub 并同步服务器；独立镜像 `pm-small-formal-test:a2b404e69f0b` 已构建完成。业务机器人没有重建或重启，未创建正式活动或监控容器，状态继续保持 `TEST + LIVE_DISABLED + PAUSED`。
+
 ## 当前扫描与执行规则
 
 1. 扫描器流式遍历全部开放 Event 分页，不使用事件日期窗口、隐藏 Event/Market/Token 数量上限，也不在新一轮开始时清空上一轮结果。
@@ -74,6 +76,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 用户确认尚未正式验证且此前数据不再需要后，已重新验证上述最新 Schema 15 备份的哈希、隔离 SQLite、100U 空账本和 0 交易计数；随后删除其余 6 个旧部署备份及旧迁移备份目录，释放 `71,165,976` 字节，并清理 `1.352GB` 未使用 Docker 构建缓存。服务器只保留 `/home/ubuntu/pm-small-backup-20260808T012255Z`；磁盘占用从 8.1GB 降至 6.9GB，运行镜像、当前数据库、活动日志及 `TEST + LIVE_DISABLED + PAUSED` 状态不变。
 - PAUSED 发现层的一次完整轮次遍历 182 页、18,103 个 Event；780 个 Event 通过静态结构筛选，3,192 个参与 Token 的 3,192 本盘口全部取得，行情流保持连接且扫描/行情错误均为 `null`。最终 0 个可交易 Event；逐规则淘汰主要为 `RESULT_COUNT=48,604`、`PROGRESS_ABOVE_MAX=30,782`、`ASK_ABOVE_MAX=3,035`、`DURATION_ABOVE_MAX=1,102`、`ASK_MISSING=156`、`BID_ASK_RATIO=11`。这证明扫描链路正常，当前无候选由默认二元/三元、生命周期 `<=20%`、Ask `<=3¢`、总时长 `<=30天` 等硬条件与实时盘口共同造成。
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
+- 正式 TEST 工具准备时，服务器仓库从 `9cfe103ea76921b1a0589a8fab5e2fcdf52ed656` 快进到工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab`，工作树干净；`prepare` 构建并校验独立镜像 `pm-small-formal-test:a2b404e69f0b`（镜像 ID `sha256:a2bd4013377b66e998d390d226877552f8f47490c81d4f8aa42cfd691bd532bb`）。原业务容器继续使用 `sha256:bceed0db82de8bfb0e2521bc36f2e2b60554ef705de2b51e1dc42604b22dfb95` 且 `running healthy`；复核仍为 `TEST / LIVE=false / PAUSED`、100U 初始/可用资金、验证 `True / ok / 0 / 0 / 0`。监控容器为空，`formal-test-current` 不存在，确认没有开始 72 小时活动。
 
 ## 尚未完成
 
