@@ -4,10 +4,10 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 任意标准多元运行时代码提交 `cb1472c90039ed72e9038821434cf22b45153f43` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
-- 本轮部署前备份 `/home/ubuntu/pm-small-backup-20260807T161243Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、100U 初始/可用资金、空交易账本和 0 个 Event 锁。更早备份未删除。
+- 当前运行时代码提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
+- 最新部署前备份 `/home/ubuntu/pm-small-backup-20260808T012255Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、100U 初始/可用资金、空交易账本和 0 个 Event 锁。更早备份未删除。
 - 部署前实际服务器已是 Schema 14、100U 空账本，与旧交接所记 1000U/历史账本不一致；这不是本轮操作造成，状态变化来源仍待正式审计。
-- 29 个测试文件、276 项测试、类型、生产构建、前端语法、差异检查和最终 Standards / Spec 双轴 0 findings 均通过；Schema 15 迁移、同库重启、账本、SQLite、HTTPS/认证和端口冒烟也已通过。
+- 29 个测试文件、279 项测试、类型、生产构建、前端语法、差异检查和最终 Standards / Spec 双轴 0 findings 均通过；Schema 15、同库重启、账本、SQLite、HTTPS/认证、端口与公网页面文案冒烟也已通过。
 - 任意标准多元架构正式规格为附件 `pasted-text.txt`；现行规则已同步至 `HANDOFF.md`、`docs/DECISIONS.md`、`docs/PLAN.md` 和 README。
 
 ## 不可越过的边界

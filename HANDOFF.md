@@ -6,9 +6,9 @@
 
 PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“任意标准多元、Event 仲裁与 Event 周期锁”的 Schema 15 架构升级。标准 Event 统一支持安全整数 `resultCount >= 2`；增强型负风险 Event 继续排除。交易、订单、Fill、Position 和 Condition 结算仍以 Token/Market 为底层单位，候选择优、单轮资金上限和同 Event 互斥提升到 Event 级。
 
-本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、276 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
+本轮代码、迁移、API/UI 和自动化验证已完成；29 个测试文件、279 项测试、TypeScript 类型检查、生产构建、前端语法和差异检查均通过。临时空数据库在 `TEST + LIVE_DISABLED + PAUSED` 下完成 462px/320px UI 冒烟，没有横向溢出或控制台错误。整个过程没有启动正式 TEST、接钱包、签名、提交真实订单或执行链上操作。
 
-运行时代码提交 `cb1472c90039ed72e9038821434cf22b45153f43` 已推送 GitHub `main` 并部署到 Linux，服务器数据库已原子升级到 Schema 15。容器重启恢复、账本验证、SQLite 完整性、端口、HTTP→HTTPS、未认证 401、认证后 200 均通过；最终保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；服务器仓库在本交接记录提交后也必须以 `git pull --ff-only` 同步到最新 `main`，但无需因纯文档提交重建运行镜像。
+运行时代码提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main` 并部署到 Linux；它在既有 Schema 15 上修复共享 Bid 深度的 Preview 精度并更新买入费用文案，没有新增迁移。容器重启恢复、账本验证、SQLite 完整性、端口、HTTP→HTTPS、未认证 401、认证后 200 与公网页面文案均通过；最终保持 `TEST + LIVE_DISABLED + PAUSED`。GitHub `main` 是唯一交付进度依据；服务器仓库在本交接记录提交后也必须以 `git pull --ff-only` 同步到最新 `main`，但无需因纯文档提交重建运行镜像。
 
 ## 当前扫描与执行规则
 
@@ -53,7 +53,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 完整性覆盖兄弟 `NOT_READY` 阻断、完整无 Bid 仅淘汰自身、锁定后兄弟断线不影响 active Token 退出。
 - 锁与轮次覆盖 0 Fill 不锁、首个部分/完整 Fill 原子锁、兄弟互斥、近同时执行、预算冻结、改单不抬额、首次 Sell 后禁买、部分退出保持锁、完整退出解锁和下一轮换 Winner。
 - 结算与迁移覆盖 Condition 结算解锁、兄弟下一轮、单 Token legacy lock、多 Token conflict、原子回滚和重启恢复。
-- 最终本地验证：29 个测试文件、276 项通过；typecheck、build、`node --check src/web/app.js`、`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
+- 最终本地验证：29 个测试文件、279 项通过；typecheck、build、`node --check src/web/app.js`、`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
 
 ## 服务器交付边界
 
@@ -68,6 +68,8 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 停止 `bot` 后创建 `/home/ubuntu/pm-small-backup-20260807T161243Z`，包含 `data/`、`.env` 和 `docker-compose.yml`；`SHA256SUMS` 全部通过，在隔离可写副本上确认 `integrity_check=ok`、Schema 14 与上述六类计数均为 0。更早的备份全部保留。
 - 服务器以 `git pull --ff-only` 更新到运行时代码 `cb1472c90039ed72e9038821434cf22b45153f43`，重建并启动 `bot`。迁移后及同库重启后均为 Schema 15、Event 锁 0、订单/Fill/持仓/结算/盘口消费 0、资金 100U、验证 `ok`；迁移和恢复审计已写入。
 - Docker 容器最终为 `healthy`，3000 仅绑定 `127.0.0.1`；Nginx 只在 80/443 对外。公网脚本确认 HTTP 跳转 HTTPS、未认证 401、认证后首页 200、页面为 `TEST + LIVE_DISABLED + PAUSED`，TEST 验证和 SQLite 完整性均通过。
+- 共享 Bid 深度精度修复发布前，服务器仓库为 `69ddc8b3393b576ab076e625a511a64ec843f08d`、工作树干净，运行状态仍为 `TEST + LIVE_DISABLED + PAUSED`、100U 空账本、Schema 15、验证通过。停止 `bot` 后新建 `/home/ubuntu/pm-small-backup-20260808T012255Z`；SHA-256 与隔离可写副本检查均通过，`integrity_check=ok`，订单/Fill/正仓/结算/Event 锁/盘口消费均为 0，旧备份全部保留。
+- 服务器随后快进到运行提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 并重建镜像。同库重启后容器健康、Schema 15、100U 可用资金、空账本、Event 锁 0、验证 `ok` 均保持不变；3000 仅监听 `127.0.0.1`，Nginx 配置通过，公网 401/跳转/认证 200 与精确 UI 文案检查通过。
 - PAUSED 发现层的一次完整轮次遍历 182 页、18,103 个 Event；780 个 Event 通过静态结构筛选，3,192 个参与 Token 的 3,192 本盘口全部取得，行情流保持连接且扫描/行情错误均为 `null`。最终 0 个可交易 Event；逐规则淘汰主要为 `RESULT_COUNT=48,604`、`PROGRESS_ABOVE_MAX=30,782`、`ASK_ABOVE_MAX=3,035`、`DURATION_ABOVE_MAX=1,102`、`ASK_MISSING=156`、`BID_ASK_RATIO=11`。这证明扫描链路正常，当前无候选由默认二元/三元、生命周期 `<=20%`、Ask `<=3¢`、总时长 `<=30天` 等硬条件与实时盘口共同造成。
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
 

@@ -28,12 +28,16 @@
 - 部署前服务器实际为 100U 空账本，与旧交接状态不一致；本轮未重置账本、未删除任何旧备份，并将差异保留为后续审计项。
 - 已以红绿测试修复 Preview 共享 Bid 深度重复计算：按 target 顺序复用 `planFakSell()` 并扣减 mutable Bids；完全共享和三 target 场景均与真实 `executeTestFakSells()` 的实际退出量一致。
 - UI 买入费用说明已改为份额扣费口径；聚焦 31 项、全量 29 文件/279 项、typecheck、build、前端语法和差异检查全部通过。本机默认 PATH 无 `npm`，已使用工作区自带 Node 24.14.0 与本地项目二进制完成验证。
+- 运行提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已部署服务器；新备份 `/home/ubuntu/pm-small-backup-20260808T012255Z` 通过 SHA-256、隔离 SQLite、Schema 15 和空账本计数校验，同库重启、公网 HTTPS/认证、Nginx、监听边界及新 UI 文案均通过。
+- 首次备份命名守卫因时间戳位数表达式过严而在停服务前安全退出；首次镜像 ID 记录误读已移除的旧镜像后，失败恢复钩子自动启动旧容器。两次均未改数据库，修正检查命令后完整发布通过。
 
 ## 当前停止点
 
-- 实现和本地自动验证已完成；真实 SELL、Event Arbitration、Lock、ResultCount/Multi、Settlement、Validation、资金与 Buy Fee 路径均未改，准备进行固定基线双轴审查和发布。
+- 实现、本地自动验证及 Standards/Spec 双轴审查均已完成，两个审查均为 0 项发现；真实 SELL、Event Arbitration、Lock、ResultCount/Multi、Settlement、Validation、资金与 Buy Fee 路径均未改。
+- 精度修复提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main`，本地与 `origin/main` 已回读为 `0/0`。
+- 服务器已部署同一运行提交并完成备份、同库重启、账本/SQLite、容器、端口、HTTPS/认证和 UI 文案验证；最终仍为 `TEST + LIVE_DISABLED + PAUSED`，没有调用启动接口。
 
 ## 后续步骤
 
-1. 以 `69ddc8b3393b576ab076e625a511a64ec843f08d` 为固定点完成 Standards/Spec 双轴审查，处理所有有效发现。
-2. 审查通过后提交 GitHub，服务器备份并部署同一 SHA；只做 PAUSED 冒烟，不调用启动接口。
+1. 提交并推送本次部署证据文档，再让服务器仓库只快进该纯文档提交，无需重建运行镜像。
+2. 复核本地、GitHub、服务器仓库一致；保持 PAUSED，等待用户共同制定正式长期 TEST 验证计划。
