@@ -322,11 +322,14 @@ function buildEventMarketScan(
     };
   });
   events.sort((left, right) => {
+    const tradability =
+      (left.status === "READY" ? 0 : 1) -
+      (right.status === "READY" ? 0 : 1);
     const progress =
       direction === "ASC"
         ? left.progressPercent - right.progressPercent
         : right.progressPercent - left.progressPercent;
-    return progress || left.eventId.localeCompare(right.eventId);
+    return tradability || progress || left.eventId.localeCompare(right.eventId);
   });
   const readyEventCount = events.filter((event) => event.status === "READY").length;
   const incompleteEventCount = events.filter(

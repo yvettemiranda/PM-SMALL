@@ -137,6 +137,112 @@ describe("HTTP app", () => {
     });
   });
 
+  it("lists tradable Events first while preserving progress order within each group", async () => {
+    const now = Date.now();
+    const candidateAtProgress = (
+      tokenId: string,
+      eventId: string,
+      progressPercent: number,
+    ) => {
+      const elapsedDays = (10 * progressPercent) / 100;
+      return makeCurrentCandidate({
+        candidateId: `${tokenId}:20000`,
+        tokenId,
+        eventId,
+        eventTitle: eventId,
+        conditionId: `${tokenId}-condition`,
+        marketId: `${tokenId}-market`,
+        openedAt: new Date(
+          now - elapsedDays * 86_400_000,
+        ).toISOString(),
+        endsAt: new Date(
+          now + (10 - elapsedDays) * 86_400_000,
+        ).toISOString(),
+        durationDays: 10,
+        progressPercent,
+      });
+    };
+    const candidatesInScanOrder = [
+      candidateAtProgress("pending-low", "pending-low-event", 1),
+      candidateAtProgress("ready-high", "ready-high-event", 8),
+      candidateAtProgress("ready-low", "ready-low-event", 3),
+      candidateAtProgress("pending-high", "pending-high-event", 9),
+    ];
+    const runtime = marketRuntime();
+    const baseGetOrderBook = runtime.getOrderBook;
+    const { app, candidates } = makeTestApp(candidatesInScanOrder, {
+      marketStream: {
+        ...runtime,
+        getOrderBook: (candidate) => {
+          const book = baseGetOrderBook?.(candidate);
+          if (book === null || book === undefined) return null;
+          return {
+            ...book,
+            asks: [
+              {
+                priceMicros: candidate.tokenId.startsWith("ready-")
+                  ? 20_000
+                  : 40_000,
+                sizeMicros: 100_000_000,
+              },
+            ],
+          };
+        },
+      },
+    });
+    await candidates.refresh();
+
+    const dashboard = await app.inject({
+      method: "GET",
+      url: "/api/dashboard?limit=20",
+    });
+
+    expect(
+      dashboard
+        .json()
+        .marketScan.events.map((event: { eventId: string }) => event.eventId),
+    ).toEqual([
+      "ready-low-event",
+      "ready-high-event",
+      "pending-low-event",
+      "pending-high-event",
+    ]);
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: "/api/test/preferences",
+      payload: {
+        marketTypes: ["BINARY", "TERNARY"],
+        allCategories: true,
+        selectedCategoryIds: [],
+        maxBuyPriceCents: 3,
+        minBidAskRatioPercent: 50,
+        maxMarketProgressPercent: 20,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        candidateSortDirection: "DESC",
+        initialCapital: 100,
+        orderAmount: 1,
+      },
+    });
+    expect(saved.statusCode).toBe(200);
+
+    const descendingDashboard = await app.inject({
+      method: "GET",
+      url: "/api/dashboard?limit=20",
+    });
+    expect(
+      descendingDashboard
+        .json()
+        .marketScan.events.map((event: { eventId: string }) => event.eventId),
+    ).toEqual([
+      "ready-high-event",
+      "ready-low-event",
+      "pending-high-event",
+      "pending-low-event",
+    ]);
+  });
+
   it("keeps a last-known eligible market visible but not tradable while quotes reconnect", async () => {
     const candidate = makeCurrentCandidate();
     const connectedRuntime = marketRuntime();

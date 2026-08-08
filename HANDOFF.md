@@ -46,7 +46,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 配置页显示 Polymarket 首页栏目并默认全选；栏目变更由公开接口同步。市场类型为二元、三元、多元（4+）；多元默认关闭。市场总时长的最短/最长值都可在 1–365 天内自由输入。
 - 扫描主列表按 Event 聚合，显示 N 元结果数、当前参与/合格 Token 数、Winner 的 Market/YES-NO、锁/退出/冲突状态和可展开的兄弟 Token，不把多元 Event 铺成大量独立机会。
 - 手动 TEST 买入只能提交最新完整仲裁的 Winner，并在执行前再次评估；未锁 Event 盘口不完整、Winner 改变或 0 Fill 都失败关闭。
-- 持仓继续按 Token 展示实际执行细节，同时增加 Event 锁状态、active Token、周期状态、冻结预算和本轮已用金额。资金摘要单行显示总资金、持仓实时价值和持仓数；持仓与 Event 列表默认前 20 项；排序使用单按钮切换。
+- 持仓继续按 Token 展示实际执行细节，同时增加 Event 锁状态、active Token、周期状态、冻结预算和本轮已用金额。资金摘要单行显示总资金、持仓实时价值和持仓数；持仓与 Event 列表默认前 20 项。扫描 Event 先显示可交易项、后显示待定项，两组内部继续使用单按钮切换生命周期进度正序/倒序。
 - 状态与 soak 诊断增加 monitored Event/Token、完整/不完整 Event、eligible Token、仲裁/重算/stale 拒绝、锁定/退出/conflict 和最大 resultCount 指标。
 
 ## 本轮已完成验证
