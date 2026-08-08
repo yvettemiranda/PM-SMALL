@@ -36,8 +36,9 @@
 - 实现、本地自动验证及 Standards/Spec 双轴审查均已完成，两个审查均为 0 项发现；真实 SELL、Event Arbitration、Lock、ResultCount/Multi、Settlement、Validation、资金与 Buy Fee 路径均未改。
 - 精度修复提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main`，本地与 `origin/main` 已回读为 `0/0`。
 - 服务器已部署同一运行提交并完成备份、同库重启、账本/SQLite、容器、端口、HTTPS/认证和 UI 文案验证；最终仍为 `TEST + LIVE_DISABLED + PAUSED`，没有调用启动接口。
+- 部署证据已提交 GitHub；服务器仓库仅快进最终纯文档提交，运行镜像继续保持已验证的 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c`，无需再次重建或重启。
 
 ## 后续步骤
 
-1. 提交并推送本次部署证据文档，再让服务器仓库只快进该纯文档提交，无需重建运行镜像。
-2. 复核本地、GitHub、服务器仓库一致；保持 PAUSED，等待用户共同制定正式长期 TEST 验证计划。
+1. 保持 PAUSED，等待用户共同制定并确认正式长期 TEST 验证计划；未经确认不执行。
+2. 正式长期 TEST 前审计历史账本变化与此前异常 RUNNING 的来源；钱包和 LIVE 仍不在当前授权范围内。
