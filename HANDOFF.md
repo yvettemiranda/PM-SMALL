@@ -58,25 +58,25 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 ## 服务器交付边界
 
 - 公网入口：`https://43-159-133-129.sslip.io/`；应用 3000 只允许绑定 `127.0.0.1`，公网只经 Nginx 80/443、HTTPS 与登录认证。
-- 部署前必须再次确认 PAUSED，停止容器后备份 `data/`、`.env` 和 `docker-compose.yml`，保存 SHA-256；在可写临时副本上执行 SQLite `integrity_check`。旧备份不得删除。
+- 部署前必须再次确认 PAUSED，停止容器后备份 `data/`、`.env` 和 `docker-compose.yml`，保存 SHA-256；在可写临时副本上执行 SQLite `integrity_check`。同一次部署不得顺手删除旧备份；后续清理必须获得用户明确授权，并至少保留一份重新验证过的当前回滚备份。
 - 迁移前后必须核对 schema、策略状态、资金、订单、fills、仓位、结算和盘口消费计数；部署后复核容器、端口、HTTPS/认证、状态与 `/api/test/validation`，并做同库重启恢复。
 - 本轮只允许部署 GitHub `main` 的同一 SHA 和 Schema 15，最终状态必须为 `TEST + LIVE_DISABLED + PAUSED`。不得调用 `/api/test/start`，不得把 PAUSED 下的发现层冒烟记为正式长期 TEST。
 
 ## 本轮服务器交付证据
 
-- 本轮任何写操作前的实际服务器盘点为：旧代码 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`、Schema 14、`TEST + LIVE_DISABLED + PAUSED`、初始/可用资金均为 100U，订单、Fill、持仓、结算和盘口消费均为 0。该状态与旧交接所记 1000U 和历史账本不一致，但不是本轮重置造成；本轮没有删除或改写旧备份。
-- 停止 `bot` 后创建 `/home/ubuntu/pm-small-backup-20260807T161243Z`，包含 `data/`、`.env` 和 `docker-compose.yml`；`SHA256SUMS` 全部通过，在隔离可写副本上确认 `integrity_check=ok`、Schema 14 与上述六类计数均为 0。更早的备份全部保留。
+- 本轮任何写操作前的实际服务器盘点为：旧代码 `7a02b06f4b19b70c4057177ebd0bf9bfb9e1ff84`、Schema 14、`TEST + LIVE_DISABLED + PAUSED`、初始/可用资金均为 100U，订单、Fill、持仓、结算和盘口消费均为 0。该状态与旧交接所记 1000U 和历史账本不一致，但不是本轮重置造成；部署期间没有删除或改写旧备份。
 - 服务器以 `git pull --ff-only` 更新到运行时代码 `cb1472c90039ed72e9038821434cf22b45153f43`，重建并启动 `bot`。迁移后及同库重启后均为 Schema 15、Event 锁 0、订单/Fill/持仓/结算/盘口消费 0、资金 100U、验证 `ok`；迁移和恢复审计已写入。
 - Docker 容器最终为 `healthy`，3000 仅绑定 `127.0.0.1`；Nginx 只在 80/443 对外。公网脚本确认 HTTP 跳转 HTTPS、未认证 401、认证后首页 200、页面为 `TEST + LIVE_DISABLED + PAUSED`，TEST 验证和 SQLite 完整性均通过。
-- 共享 Bid 深度精度修复发布前，服务器仓库为 `69ddc8b3393b576ab076e625a511a64ec843f08d`、工作树干净，运行状态仍为 `TEST + LIVE_DISABLED + PAUSED`、100U 空账本、Schema 15、验证通过。停止 `bot` 后新建 `/home/ubuntu/pm-small-backup-20260808T012255Z`；SHA-256 与隔离可写副本检查均通过，`integrity_check=ok`，订单/Fill/正仓/结算/Event 锁/盘口消费均为 0，旧备份全部保留。
+- 共享 Bid 深度精度修复发布前，服务器仓库为 `69ddc8b3393b576ab076e625a511a64ec843f08d`、工作树干净，运行状态仍为 `TEST + LIVE_DISABLED + PAUSED`、100U 空账本、Schema 15、验证通过。停止 `bot` 后新建 `/home/ubuntu/pm-small-backup-20260808T012255Z`；SHA-256 与隔离可写副本检查均通过，`integrity_check=ok`，订单/Fill/正仓/结算/Event 锁/盘口消费均为 0。
 - 服务器随后快进到运行提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 并重建镜像。同库重启后容器健康、Schema 15、100U 可用资金、空账本、Event 锁 0、验证 `ok` 均保持不变；3000 仅监听 `127.0.0.1`，Nginx 配置通过，公网 401/跳转/认证 200 与精确 UI 文案检查通过。
+- 用户确认尚未正式验证且此前数据不再需要后，已重新验证上述最新 Schema 15 备份的哈希、隔离 SQLite、100U 空账本和 0 交易计数；随后删除其余 6 个旧部署备份及旧迁移备份目录，释放 `71,165,976` 字节，并清理 `1.352GB` 未使用 Docker 构建缓存。服务器只保留 `/home/ubuntu/pm-small-backup-20260808T012255Z`；磁盘占用从 8.1GB 降至 6.9GB，运行镜像、当前数据库、活动日志及 `TEST + LIVE_DISABLED + PAUSED` 状态不变。
 - PAUSED 发现层的一次完整轮次遍历 182 页、18,103 个 Event；780 个 Event 通过静态结构筛选，3,192 个参与 Token 的 3,192 本盘口全部取得，行情流保持连接且扫描/行情错误均为 `null`。最终 0 个可交易 Event；逐规则淘汰主要为 `RESULT_COUNT=48,604`、`PROGRESS_ABOVE_MAX=30,782`、`ASK_ABOVE_MAX=3,035`、`DURATION_ABOVE_MAX=1,102`、`ASK_MISSING=156`、`BID_ASK_RATIO=11`。这证明扫描链路正常，当前无候选由默认二元/三元、生命周期 `<=20%`、Ask `<=3¢`、总时长 `<=30天` 等硬条件与实时盘口共同造成。
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
 
 ## 尚未完成
 
 - 与用户共同制定并由用户确认的正式长期 TEST 验证计划及执行。
-- 旧交接所记 1000U/历史账本与本轮部署前实际空账本 100U 的状态变化来源，以及服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核。
+- 服务器此前异常进入 RUNNING 的来源、启动接口和访问审计正式复核；旧账本历史已由用户明确放弃，不再作为正式 TEST 基线。
 - 长期接口限流、全量扫描耗时、WebSocket 容量/断线、服务器资源和公开行情成交样本验收。
 - 钱包、签名、LIVE 下单/撤单/对账和链上赎回；这些仍明确禁止。
 
