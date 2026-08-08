@@ -22,6 +22,7 @@
 
 ## 已处理
 
+- Dashboard 曾把所有 Event 仅按生命周期进度混排，低进度待定项会占据默认前 20 项并遮住真实可交易项；现固定 `READY` 置顶，再在可交易组和待定组内部按 ASC/DESC 排进度。公开接口回归、293 项全量测试及服务器 9 `READY` + 188 待定实扫顺序均通过；未改变扫描、资格或交易逻辑。
 - FAK Preview 曾对每个 BUY Fill 独立读取整本 Bid depth 并累加，导致多个 target 重复计算流动性；现按真实 SELL target 顺序复用 `planFakSell()`，每次规划后扣减 mutable Bids，聚焦回归证明 Preview Coverage 与实际 `executeTestFakSells()` 一致。真实 SELL 路径和其他仲裁层级未改；运行提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已完成 GitHub/Linux 同步及 PAUSED 部署验证。
 - 任意标准多元 Schema 15 已发布：运行时代码 `cb1472c90039ed72e9038821434cf22b45153f43` 完成 GitHub/Linux 同步；迁移备份、原子升级、同库重启、账本/SQLite、容器、端口、HTTPS/认证和 PAUSED 安全状态均通过。
 

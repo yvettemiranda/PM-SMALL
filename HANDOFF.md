@@ -57,7 +57,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - 完整性覆盖兄弟 `NOT_READY` 阻断、完整无 Bid 仅淘汰自身、锁定后兄弟断线不影响 active Token 退出。
 - 锁与轮次覆盖 0 Fill 不锁、首个部分/完整 Fill 原子锁、兄弟互斥、近同时执行、预算冻结、改单不抬额、首次 Sell 后禁买、部分退出保持锁、完整退出解锁和下一轮换 Winner。
 - 结算与迁移覆盖 Condition 结算解锁、兄弟下一轮、单 Token legacy lock、多 Token conflict、原子回滚和重启恢复。
-- 最终本地验证：32 个测试文件、292 项通过；typecheck、build、`node --check src/web/app.js`、正式 TEST 包装脚本语法和`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
+- 最终本地验证：32 个测试文件、293 项通过；typecheck、build、`node --check src/web/app.js`、正式 TEST 包装脚本语法和`git diff --check`通过；462px/320px PAUSED UI 和控制台通过。
 
 ## 服务器交付边界
 
@@ -77,6 +77,7 @@ PM-SMALL 已在本地完成从“二元/三元、每 Token 独立周期”到“
 - PAUSED 发现层的一次完整轮次遍历 182 页、18,103 个 Event；780 个 Event 通过静态结构筛选，3,192 个参与 Token 的 3,192 本盘口全部取得，行情流保持连接且扫描/行情错误均为 `null`。最终 0 个可交易 Event；逐规则淘汰主要为 `RESULT_COUNT=48,604`、`PROGRESS_ABOVE_MAX=30,782`、`ASK_ABOVE_MAX=3,035`、`DURATION_ABOVE_MAX=1,102`、`ASK_MISSING=156`、`BID_ASK_RATIO=11`。这证明扫描链路正常，当前无候选由默认二元/三元、生命周期 `<=20%`、Ask `<=3¢`、总时长 `<=30天` 等硬条件与实时盘口共同造成。
 - 以上均为迁移、恢复和 PAUSED 发现层冒烟；没有调用 `/api/test/start`，不属于正式长期 TEST。
 - 正式 TEST 工具准备时，服务器仓库从 `9cfe103ea76921b1a0589a8fab5e2fcdf52ed656` 快进到工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab`，工作树干净；`prepare` 构建并校验独立镜像 `pm-small-formal-test:a2b404e69f0b`（镜像 ID `sha256:a2bd4013377b66e998d390d226877552f8f47490c81d4f8aa42cfd691bd532bb`）。原业务容器继续使用 `sha256:bceed0db82de8bfb0e2521bc36f2e2b60554ef705de2b51e1dc42604b22dfb95` 且 `running healthy`；复核仍为 `TEST / LIVE=false / PAUSED`、100U 初始/可用资金、验证 `True / ok / 0 / 0 / 0`。监控容器为空，`formal-test-current` 不存在，确认没有开始 72 小时活动。
+- 扫描排序修复运行提交 `375ec17952a02ccab89c757185fc17119431c0ea` 已推送并部署；停机一致性备份 `/home/ubuntu/pm-small-backup-20260808T040744Z` 的 SHA-256 与隔离 SQLite 副本均通过，Schema 15、PAUSED、100U 和 0 订单/Fill/正仓/结算/Event 锁保持不变。新业务镜像 `sha256:e86a4b054cfd9b7930ee8ef9332e76654e9130d2c36d4d7345b03f42096515a4` 健康运行；实际 197 个扫描 Event 为 9 个 `READY` 全部置顶、188 个待定在后，两组进度 ASC 均通过。公网脚本全部通过，监控容器与 `formal-test-current` 仍不存在，未启动 TEST。
 
 ## 尚未完成
 

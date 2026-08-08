@@ -4,12 +4,12 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 当前运行时代码提交 `4f4f12e9eb91ef2e002906e7765a0fb6d8318a6c` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
+- 当前运行时代码提交 `375ec17952a02ccab89c757185fc17119431c0ea` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
 - 正式 TEST 管理工具源码提交 `a2b404e69f0b2da22c7a8261d125db30dc223bab` 已推送并同步服务器；独立镜像 `pm-small-formal-test:a2b404e69f0b` 已构建，但未创建活动、未启动监控容器，也未重建或重启业务机器人。
-- 当前唯一保留的服务器备份 `/home/ubuntu/pm-small-backup-20260808T012255Z` 已通过 SHA-256 和隔离 SQLite 检查；服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、100U 初始/可用资金、空交易账本和 0 个 Event 锁。
+- 服务器保留已验证备份 `/home/ubuntu/pm-small-backup-20260808T012255Z` 和本轮停机一致性备份 `/home/ubuntu/pm-small-backup-20260808T040744Z`；新备份已通过 SHA-256、隔离 SQLite、Schema 15 和空账本检查。服务器现保持 `TEST + LIVE_DISABLED + PAUSED`、100U 初始/可用资金、空交易账本和 0 个 Event 锁。
 - 用户确认尚未正式验证且此前数据不重要后，已删除其余 6 个旧部署备份和旧迁移备份目录，并清理未使用 Docker 构建缓存；旧账本历史不再作为正式 TEST 基线。此前 100U→1000U 与 RUNNING 均由用户手动操作，已结案，不再作为异常审计项。
 - 当前 32 个测试文件、293 项测试、类型、生产构建、前端语法、正式 TEST 包装脚本语法和差异检查均通过；Schema 15、同库重启、账本、SQLite、HTTPS/认证、端口与公网页面文案冒烟也已通过。
-- 工具准备后已再次核对服务器：业务镜像仍为 `sha256:bceed0db82de8bfb0e2521bc36f2e2b60554ef705de2b51e1dc42604b22dfb95` 且容器健康，状态仍为 `TEST + LIVE_DISABLED + PAUSED`、100U 空账本，验证为 `True / ok / 0 / 0 / 0`。
+- 当前业务镜像为 `sha256:e86a4b054cfd9b7930ee8ef9332e76654e9130d2c36d4d7345b03f42096515a4` 且容器健康；实际扫描 197 个 Event 中 9 个 `READY` 全部排在 188 个待定项之前，两组 ASC 顺序均通过。状态仍为 `TEST + LIVE_DISABLED + PAUSED`、100U 空账本，验证为 `True / ok / 0 / 0 / 0`。
 - 任意标准多元架构正式规格为附件 `pasted-text.txt`；现行规则已同步至 `HANDOFF.md`、`docs/DECISIONS.md`、`docs/PLAN.md` 和 README。
 
 ## 不可越过的边界
