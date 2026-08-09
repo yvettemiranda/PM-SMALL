@@ -4,12 +4,12 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 当前正式 TEST 运行时代码提交 `df01ecf626734e54123383357b11af22f1fe2cda` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
-- 正式活动 `formal-test-20260808T081226Z` 已于 2026-08-08 16:12:27（Asia/Shanghai）启动，并在 `segment-0003` 因验证硬失败于 2026-08-09 03:32:27 自动暂停和停止累计；独立监控镜像为 `pm-small-formal-test:df01ecf62673`。
+- 当前正式 TEST 运行时代码提交 `52fa4cbabdf237b624264fab7a7df31d9c060f5b` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
+- 正式活动 `formal-test-20260808T081226Z` 已于 2026-08-08 16:12:27（Asia/Shanghai）启动，并在 `segment-0003` 因验证硬失败于 2026-08-09 03:32:27 自动暂停和停止累计；旧监控容器已停止，新独立监控镜像为 `pm-small-formal-test:52fa4cbabdf2`，等待用户决定是否开始新活动。
 - 本次正式启动基线 `/home/ubuntu/pm-small-formal-test-baseline-20260808T081222Z` 已通过完整 SHA-256 复核；运行证据目录为 `/home/ubuntu/pm-small/data/validation/formal-test-20260808T081226Z`。服务器当前保持 `TEST + LIVE_DISABLED + PAUSED`：用户已确认 `segment-0001` 与 `segment-0002` 各 4 小时计入，正式累计为 8.00/72.00 小时；`segment-0003` 运行 3.33 小时后硬失败并拒绝计入。
 - 用户确认尚未正式验证且此前数据不重要后，已删除其余 6 个旧部署备份和旧迁移备份目录，并清理未使用 Docker 构建缓存；旧账本历史不再作为正式 TEST 基线。此前 100U→1000U 与 RUNNING 均由用户手动操作，已结案，不再作为异常审计项。
-- 当前 32 个测试文件、293 项测试、类型、生产构建、前端语法、正式 TEST 包装脚本语法和差异检查均通过；Schema 15、同库重启、账本、SQLite、HTTPS/认证、端口与公网页面文案冒烟也已通过。
-- 当前业务镜像为 `sha256:e86a4b054cfd9b7930ee8ef9332e76654e9130d2c36d4d7345b03f42096515a4` 且容器健康；正式启动后行情已连接并完整订阅 6,236 个 Token，扫描、盘口与模拟成交链路已实际产生 TEST 持仓。账本验证保持 `passed=true`、SQLite `ok`。
+- 当前 32 个测试文件、295 项测试、类型、生产构建、前端语法、正式 TEST 包装脚本语法和差异检查均通过；Schema 15、同库重启、账本、SQLite、HTTPS/认证、端口与公网访问冒烟也已通过。
+- 当前业务镜像为 `sha256:ee682c54ad2377070c4dfc3daa3e270b4eeac91e9b0ad8313355930b9e97de72` 且容器健康；跨轮验证误报已消除，即时验证与同库重启均为 `passed=true`、SQLite `ok`，策略保持 PAUSED。
 - 任意标准多元架构正式规格为附件 `pasted-text.txt`；现行规则已同步至 `HANDOFF.md`、`docs/DECISIONS.md`、`docs/PLAN.md` 和 README。
 
 ## 不可越过的边界
