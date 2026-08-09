@@ -4,12 +4,12 @@
 
 - PM-SMALL 是基于 Polymarket 公开市场和订单簿数据的 TEST 自动交易闭环项目。
 - GitHub `origin/main` 是唯一交付进度依据；本地代码必须经过验证、提交、推送并核对远端 SHA 后才算完成同步。
-- 当前正式 TEST 运行时代码提交 `52fa4cbabdf237b624264fab7a7df31d9c060f5b` 已推送 GitHub `main` 并部署 Linux；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
-- 正式活动 `formal-test-20260808T081226Z` 已于 2026-08-08 16:12:27（Asia/Shanghai）启动，并在 `segment-0003` 因验证硬失败于 2026-08-09 03:32:27 自动暂停和停止累计；旧监控容器已停止，新独立监控镜像为 `pm-small-formal-test:52fa4cbabdf2`，等待用户决定是否开始新活动。
-- 本次正式启动基线 `/home/ubuntu/pm-small-formal-test-baseline-20260808T081222Z` 已通过完整 SHA-256 复核；运行证据目录为 `/home/ubuntu/pm-small/data/validation/formal-test-20260808T081226Z`。服务器当前保持 `TEST + LIVE_DISABLED + PAUSED`：用户已确认 `segment-0001` 与 `segment-0002` 各 4 小时计入，正式累计为 8.00/72.00 小时；`segment-0003` 运行 3.33 小时后硬失败并拒绝计入。
+- 当前 GitHub 与服务器仓库启动时提交为 `d29a6cc4d48311cbd21017d27171b7960cf2ef7e`，其中正式 TEST 运行时代码修复提交为 `52fa4cbabdf237b624264fab7a7df31d9c060f5b`；服务器数据库为 Schema 15，公网入口 `https://43-159-133-129.sslip.io/`。
+- 旧正式活动 `formal-test-20260808T081226Z` 在 `segment-0003` 因验证硬失败于 2026-08-09 03:32:27 自动暂停；用户已确认前两段共 8 小时计入并拒绝第三段 3.33 小时。修复部署后，用户于 2026-08-09 16:38（Asia/Shanghai）明确授权继续，新活动 `formal-test-20260809T083806Z` 已安全启动。
+- 旧活动证据与基线继续保留；新活动证据目录为 `/home/ubuntu/pm-small/data/validation/formal-test-20260809T083806Z`，基线 `/home/ubuntu/pm-small-formal-test-baseline-20260809T083801Z` 已通过完整 SHA-256 复核。服务器当前为 `TEST + LIVE_DISABLED + RUNNING`，跨活动正式累计仍为 8.00/72.00 小时，新活动每段继续等待用户决定。
 - 用户确认尚未正式验证且此前数据不重要后，已删除其余 6 个旧部署备份和旧迁移备份目录，并清理未使用 Docker 构建缓存；旧账本历史不再作为正式 TEST 基线。此前 100U→1000U 与 RUNNING 均由用户手动操作，已结案，不再作为异常审计项。
 - 当前 32 个测试文件、295 项测试、类型、生产构建、前端语法、正式 TEST 包装脚本语法和差异检查均通过；Schema 15、同库重启、账本、SQLite、HTTPS/认证、端口与公网访问冒烟也已通过。
-- 当前业务镜像为 `sha256:ee682c54ad2377070c4dfc3daa3e270b4eeac91e9b0ad8313355930b9e97de72` 且容器健康；跨轮验证误报已消除，即时验证与同库重启均为 `passed=true`、SQLite `ok`，策略保持 PAUSED。
+- 当前业务镜像为 `sha256:ee682c54ad2377070c4dfc3daa3e270b4eeac91e9b0ad8313355930b9e97de72` 且容器健康；独立监控镜像为 `pm-small-formal-test:d29a6cc4d483`，启动后连续采样、即时验证和 SQLite 均正常，监控 `restarts=0`。
 - 任意标准多元架构正式规格为附件 `pasted-text.txt`；现行规则已同步至 `HANDOFF.md`、`docs/DECISIONS.md`、`docs/PLAN.md` 和 README。
 
 ## 不可越过的边界
