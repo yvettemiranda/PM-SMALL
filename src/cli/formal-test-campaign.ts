@@ -830,7 +830,9 @@ function runDirectoryFromRunArguments(arguments_: string[]): string {
 
 async function waitForSupervisorStop(): Promise<void> {
   await new Promise<void>((resolveStop) => {
+    const keepAlive = setInterval(() => undefined, 60 * 60 * 1_000);
     const finish = () => {
+      clearInterval(keepAlive);
       process.off("SIGINT", finish);
       process.off("SIGTERM", finish);
       resolveStop();

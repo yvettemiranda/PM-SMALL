@@ -399,6 +399,25 @@ describe("paper ledger validation", () => {
     }
   });
 
+  it("detects a completed BUY created after first sell in the active Event cycle", () => {
+    const fixture = createFilledEventFixture();
+    try {
+      markActiveCycleBuyAfterFirstSell(
+        fixture.databasePath,
+        fixture.candidate.tokenId,
+      );
+
+      const result = fixture.database.validatePaperState();
+
+      expect(result.errors).toContain(
+        `Paper Event has a BUY created after first sell: ${fixture.candidate.eventId}`,
+      );
+    } finally {
+      fixture.database.close();
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
   it("detects a zombie Event lock without a position or active target", () => {
     const directory = mkdtempSync(join(tmpdir(), "pm-small-validation-"));
     const databasePath = join(directory, "paper.db");
@@ -504,6 +523,28 @@ function updateReservedCash(databasePath: string, reservedCashMicros: number): v
     database
       .prepare("UPDATE strategy_state SET reserved_cash_micros = ? WHERE id = 1")
       .run(reservedCashMicros);
+  } finally {
+    database.close();
+  }
+}
+
+function markActiveCycleBuyAfterFirstSell(
+  databasePath: string,
+  tokenId: string,
+): void {
+  const database = new Database(databasePath);
+  try {
+    database
+      .prepare(
+        "UPDATE paper_positions SET first_sell_at = ? WHERE token_id = ?",
+      )
+      .run("2026-01-02T00:00:00.000Z", tokenId);
+    database
+      .prepare(
+        `UPDATE paper_orders SET created_at = ?
+        WHERE token_id = ? AND side = 'BUY'`,
+      )
+      .run("2026-01-02T00:00:01.000Z", tokenId);
   } finally {
     database.close();
   }

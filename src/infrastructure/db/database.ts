@@ -2089,7 +2089,10 @@ export class PaperDatabase {
         JOIN paper_market_metadata pm ON pm.token_id = pp.token_id
         JOIN paper_event_locks pel ON pel.event_id = pm.event_id
           AND pel.state = 'ACTIVE'
-        JOIN paper_orders po ON po.event_id = pm.event_id AND po.side = 'BUY'
+          AND pel.active_token_id = pp.token_id
+        JOIN paper_orders po ON po.event_id = pm.event_id
+          AND po.token_id = pel.active_token_id
+          AND po.side = 'BUY'
         WHERE pp.first_sell_at IS NOT NULL
           AND po.created_at > pp.first_sell_at`,
       )

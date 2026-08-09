@@ -62,7 +62,7 @@ describe("formal TEST campaign CLI", () => {
     servers.push(server);
     const runDirectory = createRunDirectory();
 
-    const running = spawnCli([
+    const running = runCli([
       "run",
       "--base-url",
       baseUrl,
@@ -236,6 +236,65 @@ describe("formal TEST campaign CLI", () => {
     expect(readCampaign(runDirectory).status).toBe("FAILED");
   });
 
+  it("keeps a restarted supervisor alive after forcing an existing campaign paused", async () => {
+    let pauseCount = 0;
+    const { baseUrl, server } = await listen((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.method === "POST" && request.url === "/api/test/pause") {
+        pauseCount += 1;
+        response.end(JSON.stringify({ strategy: { status: "PAUSED" } }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: "not found" }));
+    });
+    servers.push(server);
+    const runDirectory = createRunDirectory();
+    writeFileSync(
+      join(runDirectory, "campaign.json"),
+      JSON.stringify({ status: "FAILED" }),
+    );
+    writeFileSync(
+      join(runDirectory, "manifest.json"),
+      JSON.stringify({
+        baseUrl,
+        requestTimeoutSeconds: 0.2,
+        pauseRetrySeconds: 0.2,
+      }),
+    );
+    const supervisor = spawnCliProcess([
+      "supervise",
+      "--run-dir",
+      runDirectory,
+    ]);
+
+    try {
+      await waitFor(
+        () =>
+          supervisor.stderr().includes(
+            "Formal TEST supervisor restarted with existing state",
+          ),
+        5_000,
+      );
+      await delay(100);
+
+      expect(supervisor.child.exitCode).toBeNull();
+      expect(supervisor.child.signalCode).toBeNull();
+      expect(pauseCount).toBe(1);
+
+      supervisor.child.kill("SIGTERM");
+      expect(await supervisor.result).toMatchObject({ code: 0 });
+    } finally {
+      if (
+        supervisor.child.exitCode === null &&
+        supervisor.child.signalCode === null
+      ) {
+        supervisor.child.kill("SIGKILL");
+      }
+      await supervisor.result;
+    }
+  });
+
   function createRunDirectory(): string {
     const directory = mkdtempSync(join(tmpdir(), "pm-small-formal-test-"));
     directories.push(directory);
@@ -243,37 +302,42 @@ describe("formal TEST campaign CLI", () => {
   }
 });
 
-function spawnCli(arguments_: string[]): Promise<{
-  code: number | null;
-  stdout: string;
-  stderr: string;
-}> {
-  return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [
-        "node_modules/tsx/dist/cli.mjs",
-        "src/cli/formal-test-campaign.ts",
-        ...arguments_,
-      ],
-      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
+function spawnCliProcess(arguments_: string[]) {
+  const child = spawn(
+    process.execPath,
+    [
+      "node_modules/tsx/dist/cli.mjs",
+      "src/cli/formal-test-campaign.ts",
+      ...arguments_,
+    ],
+    { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const result = new Promise<{
+    code: number | null;
+    stdout: string;
+    stderr: string;
+  }>((resolve) => {
     child.once("exit", (code) => resolve({ code, stdout, stderr }));
   });
+  return {
+    child,
+    result,
+    stderr: () => stderr,
+  };
 }
 
 function runCli(arguments_: string[]) {
-  return spawnCli(arguments_);
+  return spawnCliProcess(arguments_).result;
 }
 
 async function waitFor(check: () => boolean, timeoutMs: number): Promise<void> {

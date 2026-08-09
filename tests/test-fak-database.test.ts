@@ -265,12 +265,17 @@ describe("TEST FAK accounting", () => {
       }).filledSizeMicros,
     ).toBe(10_000_000);
     expect(database.getPaperEventLock("reusable-event")).toBeNull();
+    vi.advanceTimersByTime(1_000);
     expect(buy(second, "SECOND-BUY", 2_000_000, 100_000_000).spentMicros).toBe(
       2_000_000,
     );
     expect(database.getPaperEventLock("reusable-event")).toMatchObject({
       activeTokenId: "second-token",
       cycleBudgetMicros: 2_000_000,
+    });
+    expect(database.validatePaperState()).toMatchObject({
+      passed: true,
+      errors: [],
     });
   });
 
