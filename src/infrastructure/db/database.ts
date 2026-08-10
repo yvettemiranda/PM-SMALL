@@ -26,7 +26,7 @@ import { isMarketEligible } from "../../domain/market-eligibility.js";
 import type { MarketEligibilitySettings } from "../../domain/market-eligibility.js";
 import type { MarketType } from "../../domain/market-type.js";
 import {
-  planFakSell,
+  planFakSellTargets,
   previewFakBuy,
   type FakBuyPreview,
 } from "../../domain/trading-strategy.js";
@@ -2432,7 +2432,7 @@ export class PaperDatabase {
       if (input.bookVersion.trim().length === 0) {
         return emptyTestFakSell();
       }
-      const mutableBids = this.availableTestBookLevels(
+      const availableBids = this.availableTestBookLevels(
         input.tokenId,
         input.bookVersion,
         "BID",
@@ -2454,20 +2454,23 @@ export class PaperDatabase {
             left.createdAt.localeCompare(right.createdAt) ||
             left.id.localeCompare(right.id),
         );
-
-      for (const order of targets) {
-        const remainingSizeMicros =
-          order.originalSizeMicros - order.filledSizeMicros;
-        const plan = planFakSell({
-          bids: mutableBids,
+      const targetPlans = planFakSellTargets({
+        bids: availableBids,
+        targets: targets.map((order, targetIndex) => ({
+          targetIndex,
           minPriceMicros: order.priceMicros,
-          availableSizeMicros: remainingSizeMicros,
-          minOrderSizeMicros: input.minOrderSizeMicros,
-          feeRateMicros: input.feeRateMicros,
-          feeExponent: input.feeExponent,
-        });
-        if (plan === null) {
-          continue;
+          availableSizeMicros:
+            order.originalSizeMicros - order.filledSizeMicros,
+        })),
+        minOrderSizeMicros: input.minOrderSizeMicros,
+        feeRateMicros: input.feeRateMicros,
+        feeExponent: input.feeExponent,
+      });
+
+      for (const plan of targetPlans) {
+        const order = targets[plan.targetIndex];
+        if (order === undefined) {
+          throw new Error("FAK sell target references an unknown paper order");
         }
 
         const now = new Date().toISOString();
@@ -2493,15 +2496,6 @@ export class PaperDatabase {
               fill.feeMicros,
               now,
             );
-          const bookLevel = mutableBids.find(
-            (level) => level.priceMicros === fill.priceMicros,
-          );
-          if (bookLevel !== undefined) {
-            bookLevel.sizeMicros = Math.max(
-              0,
-              bookLevel.sizeMicros - fill.sizeMicros,
-            );
-          }
         }
         const nextFilledSizeMicros = order.filledSizeMicros + plan.filledSizeMicros;
         const nextStatus: PaperOrderStatus =

@@ -149,6 +149,58 @@ describe("TEST FAK accounting", () => {
     expect(previewCoverage).toBe(sell.filledSizeMicros);
   });
 
+  it("keeps Preview and real FAK sells aligned when sub-minimum targets form one legal batch", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      bestAskMicros: 20_000,
+      bestBidMicros: 40_000,
+    });
+    const book = makeBook({
+      bookVersion: "SUB-MINIMUM-TARGET-BATCH",
+      bids: [{ priceMicros: 40_000, sizeMicros: 6_000_000 }],
+      asks: [
+        { priceMicros: 20_000, sizeMicros: 3_000_000 },
+        { priceMicros: 21_000, sizeMicros: 3_000_000 },
+      ],
+    });
+    const orderBudgetMicros = 123_000;
+    const input = {
+      candidate,
+      book,
+      maxPriceMicros: 30_000,
+      orderBudgetMicros,
+      eligibility: testEligibilitySettings({ orderBudgetMicros }),
+      feeRateMicros: 0,
+      feeExponent: 1,
+    };
+
+    const preview = database.previewTestFakBuy(input);
+    expect(preview).toMatchObject({
+      outcome: "READY",
+      preview: {
+        exitBidCoverageSizeMicros: 6_000_000,
+        exitBidCoveragePositionSizeMicros: 6_000_000,
+      },
+    });
+    expect(database.executeTestFakBuy(input).spentMicros).toBe(orderBudgetMicros);
+
+    const sell = database.executeTestFakSells({
+      tokenId: candidate.tokenId,
+      bookVersion: book.bookVersion,
+      bids: book.bids,
+      minOrderSizeMicros: book.minOrderSizeMicros,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(sell.filledSizeMicros).toBe(6_000_000);
+    expect(sell.filledSizeMicros).toBe(
+      preview.preview?.exitBidCoverageSizeMicros,
+    );
+  });
+
   it("creates the Event lock only on a real fill and freezes its cycle budget", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
@@ -645,6 +697,163 @@ describe("TEST FAK accounting", () => {
         feeExponent: 1,
       }).outcome,
     ).toBe("BLOCKED");
+  });
+
+  it("aggregates ordered target fragments to meet the minimum sell size without crossing a target price", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const executeBuy = (
+      bookVersion: string,
+      priceMicros: number,
+    ) =>
+      database.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          bookVersion,
+          asks: [{ priceMicros, sizeMicros: 3_000_000 }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+
+    expect(executeBuy("FRAGMENT-BUY-1", 20_000).spentMicros).toBe(60_000);
+    expect(
+      database.executeTestFakSells({
+        tokenId: candidate.tokenId,
+        bookVersion: "FRAGMENT-BID-1",
+        bids: [{ priceMicros: 40_000, sizeMicros: 6_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 50_000,
+        feeExponent: 1,
+      }).filledSizeMicros,
+    ).toBe(0);
+
+    expect(executeBuy("FRAGMENT-BUY-2", 21_000).spentMicros).toBe(63_000);
+    expect(
+      database.executeTestFakSells({
+        tokenId: candidate.tokenId,
+        bookVersion: "FRAGMENT-BID-2",
+        bids: [{ priceMicros: 31_000, sizeMicros: 6_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 50_000,
+        feeExponent: 1,
+      }).filledSizeMicros,
+    ).toBe(0);
+
+    const sell = database.executeTestFakSells({
+      tokenId: candidate.tokenId,
+      bookVersion: "FRAGMENT-BID-3",
+      bids: [{ priceMicros: 40_000, sizeMicros: 6_000_000 }],
+      minOrderSizeMicros: 5_000_000,
+      feeRateMicros: 50_000,
+      feeExponent: 1,
+    });
+
+    expect(sell).toMatchObject({
+      filledSizeMicros: 6_000_000,
+      grossProceedsMicros: 240_000,
+      feeMicros: 11_520,
+      netProceedsMicros: 228_480,
+      filledOrderCount: 2,
+    });
+    expect(
+      database
+        .listPaperOrders()
+        .filter((order) => order.side === "SELL")
+        .map((order) => ({
+          priceMicros: order.priceMicros,
+          status: order.status,
+          filledSizeMicros: order.filledSizeMicros,
+          feeMicros: order.feeMicros,
+        })),
+    ).toEqual([
+      {
+        priceMicros: 30_000,
+        status: "FILLED",
+        filledSizeMicros: 3_000_000,
+        feeMicros: 5_760,
+      },
+      {
+        priceMicros: 40_000,
+        status: "FILLED",
+        filledSizeMicros: 3_000_000,
+        feeMicros: 5_760,
+      },
+    ]);
+    expect(database.listPaperPositions()[0]).toMatchObject({
+      quantityMicros: 0,
+      costMicros: 0,
+      cycleClosedAt: expect.any(String),
+    });
+    expect(database.listPaperEventLocks()).toEqual([]);
+    expect(database.validatePaperState()).toMatchObject({
+      passed: true,
+      errors: [],
+      sqliteIntegrity: "ok",
+    });
+  });
+
+  it("keeps aggregated target proceeds reconstructable from persisted fill price and size", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const executeBuy = (bookVersion: string, sizeMicros: number) =>
+      database.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          bookVersion,
+          asks: [{ priceMicros: 20_000, sizeMicros }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+
+    expect(executeBuy("ROUNDING-BUY-1", 3_333_333).spentMicros).toBe(66_666);
+    expect(executeBuy("ROUNDING-BUY-2", 1_666_668).spentMicros).toBe(33_333);
+
+    const sell = database.executeTestFakSells({
+      tokenId: candidate.tokenId,
+      bookVersion: "ROUNDING-BID",
+      bids: [{ priceMicros: 30_000, sizeMicros: 5_000_001 }],
+      minOrderSizeMicros: 5_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+    });
+
+    expect(sell).toMatchObject({
+      filledSizeMicros: 5_000_001,
+      grossProceedsMicros: 149_999,
+      feeMicros: 0,
+      netProceedsMicros: 149_999,
+      filledOrderCount: 2,
+    });
+    expect(database.getStrategyState()).toMatchObject({
+      availableCashMicros: 100_050_000,
+      positionCostMicros: 0,
+      realizedPnlMicros: 50_000,
+    });
+    expect(database.validatePaperState()).toMatchObject({
+      passed: true,
+      errors: [],
+      sqliteIntegrity: "ok",
+    });
   });
 
   it("gives the more aggressive lower sell target first access to limited bids", () => {

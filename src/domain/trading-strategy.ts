@@ -74,6 +74,16 @@ export type FakSellPlan = {
   fullyFilled: boolean;
 };
 
+export type FakSellTarget = {
+  targetIndex: number;
+  minPriceMicros: number;
+  availableSizeMicros: number;
+};
+
+export type FakSellTargetPlan = FakSellPlan & {
+  targetIndex: number;
+};
+
 export function calculateTakerFeeMicros(input: TakerFeeInput): number {
   assertNonNegativeInteger(input.sizeMicros, "trade size");
   assertNonNegativeInteger(input.priceMicros, "trade price");
@@ -252,8 +262,6 @@ export function previewFakBuy(input: {
     fills,
     (fill) => fill.targetNetProceedsMicros,
   );
-  const mutableBids = input.bids.map((level) => ({ ...level }));
-  let exitBidCoverageSizeMicros = 0;
   const orderedTargets = fills
     .map((fill, index) => ({ fill, index }))
     .sort(
@@ -261,32 +269,27 @@ export function previewFakBuy(input: {
         left.fill.targetPriceMicros - right.fill.targetPriceMicros ||
         left.index - right.index,
     );
-  for (const { fill } of orderedTargets) {
-    const sellPlan = planFakSell({
-      bids: mutableBids,
+  const targetPlans = planFakSellTargets({
+    bids: input.bids,
+    targets: orderedTargets.map(({ fill, index }) => ({
+      targetIndex: index,
       minPriceMicros: fill.targetPriceMicros,
       availableSizeMicros: fill.netSizeMicros,
-      minOrderSizeMicros: input.minOrderSizeMicros,
-      feeRateMicros: input.feeRateMicros,
-      feeExponent: input.feeExponent,
-    });
-    if (sellPlan === null) {
-      continue;
+    })),
+    minOrderSizeMicros: input.minOrderSizeMicros,
+    feeRateMicros: input.feeRateMicros,
+    feeExponent: input.feeExponent,
+  });
+  for (const targetPlan of targetPlans) {
+    const fill = fills[targetPlan.targetIndex];
+    if (fill === undefined) {
+      throw new Error("FAK sell target references an unknown Preview fill");
     }
-    fill.exitableBidDepthMicros = sellPlan.filledSizeMicros;
-    exitBidCoverageSizeMicros += sellPlan.filledSizeMicros;
-    for (const sellFill of sellPlan.fills) {
-      const bid = mutableBids.find(
-        (level) => level.priceMicros === sellFill.priceMicros,
-      );
-      if (bid !== undefined) {
-        bid.sizeMicros = Math.max(0, bid.sizeMicros - sellFill.sizeMicros);
-      }
-    }
+    fill.exitableBidDepthMicros = targetPlan.filledSizeMicros;
   }
-  exitBidCoverageSizeMicros = Math.min(
+  const exitBidCoverageSizeMicros = Math.min(
     plan.netFillSizeMicros,
-    exitBidCoverageSizeMicros,
+    sum(targetPlans, (targetPlan) => targetPlan.filledSizeMicros),
   );
 
   return {
@@ -370,6 +373,148 @@ export function planFakSell(input: {
     netProceedsMicros: sum(fills, (fill) => fill.netProceedsMicros),
     fullyFilled: remainingSizeMicros === 0,
   };
+}
+
+export function planFakSellTargets(input: {
+  bids: readonly BookLevel[];
+  targets: readonly FakSellTarget[];
+  minOrderSizeMicros: number;
+  feeRateMicros: number;
+  feeExponent: number;
+}): FakSellTargetPlan[] {
+  const mutableBids = input.bids.map((level) => ({ ...level }));
+  const targetPlans: FakSellTargetPlan[] = [];
+  let batch: FakSellTarget[] = [];
+  let batchSizeMicros = 0;
+
+  for (const target of input.targets) {
+    if (target.availableSizeMicros <= 0) {
+      continue;
+    }
+    batch.push(target);
+    batchSizeMicros += target.availableSizeMicros;
+    if (batchSizeMicros < input.minOrderSizeMicros) {
+      continue;
+    }
+
+    const batchPlan = planFakSell({
+      bids: mutableBids,
+      minPriceMicros: Math.max(...batch.map((item) => item.minPriceMicros)),
+      availableSizeMicros: batchSizeMicros,
+      minOrderSizeMicros: input.minOrderSizeMicros,
+      feeRateMicros: input.feeRateMicros,
+      feeExponent: input.feeExponent,
+    });
+    if (batchPlan !== null) {
+      targetPlans.push(
+        ...allocateFakSellBatch(
+          batch,
+          batchPlan,
+          input.feeRateMicros,
+          input.feeExponent,
+        ),
+      );
+      for (const fill of batchPlan.fills) {
+        const bid = mutableBids.find(
+          (level) => level.priceMicros === fill.priceMicros,
+        );
+        if (bid !== undefined) {
+          bid.sizeMicros = Math.max(0, bid.sizeMicros - fill.sizeMicros);
+        }
+      }
+    }
+    batch = [];
+    batchSizeMicros = 0;
+  }
+
+  return targetPlans;
+}
+
+function allocateFakSellBatch(
+  targets: readonly FakSellTarget[],
+  plan: FakSellPlan,
+  feeRateMicros: number,
+  feeExponent: number,
+): FakSellTargetPlan[] {
+  const allocations = targets.map((target) => ({
+    ...target,
+    remainingSizeMicros: target.availableSizeMicros,
+    fills: [] as FakSellFill[],
+  }));
+  let allocationIndex = 0;
+
+  for (const fill of plan.fills) {
+    const slices: Array<{
+      allocation: (typeof allocations)[number];
+      sizeMicros: number;
+    }> = [];
+    let remainingFillSizeMicros = fill.sizeMicros;
+    while (
+      remainingFillSizeMicros > 0 &&
+      allocationIndex < allocations.length
+    ) {
+      const allocation = allocations[allocationIndex];
+      if (allocation === undefined) {
+        break;
+      }
+      const sizeMicros = Math.min(
+        remainingFillSizeMicros,
+        allocation.remainingSizeMicros,
+      );
+      if (sizeMicros > 0) {
+        slices.push({ allocation, sizeMicros });
+        allocation.remainingSizeMicros -= sizeMicros;
+        remainingFillSizeMicros -= sizeMicros;
+      }
+      if (allocation.remainingSizeMicros === 0) {
+        allocationIndex += 1;
+      }
+    }
+
+    for (const slice of slices) {
+      const grossProceedsMicros = calculateOrderCostMicros(
+        fill.priceMicros,
+        slice.sizeMicros,
+      );
+      const feeMicros = calculateTakerFeeMicros({
+        sizeMicros: slice.sizeMicros,
+        priceMicros: fill.priceMicros,
+        feeRateMicros,
+        feeExponent,
+      });
+      slice.allocation.fills.push({
+        priceMicros: fill.priceMicros,
+        sizeMicros: slice.sizeMicros,
+        grossProceedsMicros,
+        feeMicros,
+        netProceedsMicros: Math.max(0, grossProceedsMicros - feeMicros),
+      });
+    }
+  }
+
+  return allocations
+    .filter((allocation) => allocation.fills.length > 0)
+    .map((allocation) => {
+      const filledSizeMicros = sum(
+        allocation.fills,
+        (fill) => fill.sizeMicros,
+      );
+      return {
+        targetIndex: allocation.targetIndex,
+        fills: allocation.fills,
+        filledSizeMicros,
+        grossProceedsMicros: sum(
+          allocation.fills,
+          (fill) => fill.grossProceedsMicros,
+        ),
+        feeMicros: sum(allocation.fills, (fill) => fill.feeMicros),
+        netProceedsMicros: sum(
+          allocation.fills,
+          (fill) => fill.netProceedsMicros,
+        ),
+        fullyFilled: filledSizeMicros === allocation.availableSizeMicros,
+      };
+    });
 }
 
 export function sortTradeCandidates(
