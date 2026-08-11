@@ -100,6 +100,7 @@ export class PaperSettlementService implements PaperSettlementRuntime {
 
   private async runOnce(): Promise<void> {
     const now = this.nowFactory();
+    const testResetGeneration = this.database.getTestResetGeneration();
     let runError: string | null = null;
     try {
       const targets = this.database.listPaperSettlementTargets(now);
@@ -120,8 +121,17 @@ export class PaperSettlementService implements PaperSettlementRuntime {
       for (const target of targets) {
         this.checkedMarketCount += 1;
         try {
-          await this.processTarget(target, now);
+          await this.processTarget(target, now, testResetGeneration);
         } catch (error) {
+          if (
+            !this.database.isPaperSettlementTargetCurrent(
+              target,
+              testResetGeneration,
+              now,
+            )
+          ) {
+            continue;
+          }
           const message = errorMessage(error);
           runError = message;
           this.recordCheckSafely(target, now, "RESOLUTION_CHECK_FAILED", message);
@@ -143,8 +153,21 @@ export class PaperSettlementService implements PaperSettlementRuntime {
     }
   }
 
-  private async processTarget(target: PaperSettlementTarget, now: Date): Promise<void> {
+  private async processTarget(
+    target: PaperSettlementTarget,
+    now: Date,
+    testResetGeneration: number,
+  ): Promise<void> {
     const snapshot = await this.source.fetchMarketResolution(target.marketId);
+    if (
+      !this.database.isPaperSettlementTargetCurrent(
+        target,
+        testResetGeneration,
+        now,
+      )
+    ) {
+      return;
+    }
     try {
       const decision = classifyPaperMarketResolution(
         snapshot,

@@ -614,6 +614,7 @@ export class PaperDatabase {
   private readonly database: Database.Database;
   private paperValidationBlocked = false;
   private paperTradeRecordCache: PaperTradeRecordCache | null = null;
+  private testResetGeneration = 0;
 
   public constructor(
     databasePath: string,
@@ -912,9 +913,14 @@ export class PaperDatabase {
       const preferences = this.ensurePaperTradingPreferences(defaultPreferences);
       return { strategy: this.getStrategyState(), preferences };
     });
+    this.testResetGeneration += 1;
     this.paperValidationBlocked = false;
     this.paperTradeRecordCache = null;
     return result;
+  }
+
+  public getTestResetGeneration(): number {
+    return this.testResetGeneration;
   }
 
   public ensurePaperTradingPreferences(
@@ -1584,6 +1590,48 @@ export class PaperDatabase {
       marketId: row.market_id,
       eventId: row.event_id,
     }));
+  }
+
+  public isPaperSettlementTargetCurrent(
+    target: PaperSettlementTarget,
+    expectedTestResetGeneration: number,
+    now: Date = new Date(),
+  ): boolean {
+    if (expectedTestResetGeneration !== this.testResetGeneration) {
+      return false;
+    }
+    const row = this.database
+      .prepare(
+        `SELECT 1 AS present
+        FROM paper_orders po
+        LEFT JOIN paper_settlements ps ON ps.condition_id = po.condition_id
+        LEFT JOIN paper_positions pp
+          ON pp.token_id = po.token_id
+          AND pp.condition_id = po.condition_id
+          AND pp.quantity_micros > 0
+        WHERE po.condition_id = ?
+          AND po.market_id = ?
+          AND po.event_id = ?
+          AND (
+              po.market_ends_at IS NOT NULL AND po.market_ends_at <= ?
+            OR pp.token_id IS NOT NULL
+            OR ps.status = 'PENDING'
+          )
+          AND (ps.status IS NULL OR ps.status = 'PENDING')
+          AND (
+            ps.status = 'PENDING' OR
+            pp.token_id IS NOT NULL OR
+            po.status IN ('OPEN', 'PARTIALLY_FILLED')
+          )
+        LIMIT 1`,
+      )
+      .get(
+        target.conditionId,
+        target.marketId,
+        target.eventId,
+        now.toISOString(),
+      );
+    return row !== undefined;
   }
 
   public ensurePaperSettlement(
