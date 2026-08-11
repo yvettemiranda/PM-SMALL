@@ -3,7 +3,10 @@ import type {
   MarketScanDiagnostics,
 } from "../domain/market-scanner.js";
 import type { TradeCandidate } from "../domain/types.js";
-import { calculateFixedSellPriceMicros } from "../domain/price.js";
+import {
+  calculateFixedSellPriceMicros,
+  type TargetSellPriceSettings,
+} from "../domain/price.js";
 
 export type CandidateSnapshot = {
   candidates: TradeCandidate[];
@@ -31,6 +34,7 @@ export class CandidateService {
   public constructor(
     private readonly scanner: CandidateScanner,
     private readonly intervalMs: number,
+    private readonly targetSellPriceSettings?: () => TargetSellPriceSettings,
   ) {}
 
   public start(): void {
@@ -144,6 +148,7 @@ export class CandidateService {
       candidate.fixedSellPriceMicros = calculateFixedSellPriceMicros(
         bestAskMicros,
         candidate.tickSizeMicros,
+        this.targetSellPriceSettings?.(),
       );
     } else {
       candidate.executableBuyPriceMicros = 0;

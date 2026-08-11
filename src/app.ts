@@ -5,8 +5,10 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import type { TradingExecutionAdapter } from "./domain/execution.js";
 import {
+  calculateFixedSellPriceMicros,
   calculateOrderCostMicros,
   microsToDecimalString,
+  type TargetSellPriceSettings,
 } from "./domain/price.js";
 import { calculateTakerFeeMicros } from "./domain/trading-strategy.js";
 import type { PaperOrder, TradeCandidate } from "./domain/types.js";
@@ -46,6 +48,17 @@ export type AppDependencies = {
   paperValidation?: PaperValidationRuntime;
 };
 
+const tenthCentPriceSchema = z
+  .number()
+  .finite()
+  .min(0.1)
+  .max(99)
+  .refine(isTenthCent, "Buy price must use 0.1-cent increments");
+
+function isTenthCent(value: number): boolean {
+  return Number.isInteger(value * 10);
+}
+
 function publicConfig(
   config: AppConfig,
   preferences: PaperTradingPreferencesSnapshot,
@@ -58,8 +71,13 @@ function publicConfig(
     marketTypes: preferences.marketTypes,
     minMarketDurationDays: preferences.minMarketDurationDays,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
-    minBuyPrice: microsToDecimalString(config.minBuyPriceMicros),
+    minBuyPrice: microsToDecimalString(preferences.minBuyPriceMicros),
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
+    targetSellPriceIncrease: microsToDecimalString(
+      preferences.targetSellPriceIncreaseMicros,
+    ),
+    targetSellPriceMultiplier:
+      preferences.targetSellPriceMultiplierMicros / 1_000_000,
     minBidAskRatioPercent: preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     scanIntervalMs: config.scanIntervalMs,
@@ -123,7 +141,17 @@ function serializeCandidate(
     tradable: candidate.bookReady,
     quoteStatus: candidate.bookReady ? "READY" : "NOT_READY",
   },
+  targetSellPriceSettings?: TargetSellPriceSettings,
 ) {
+  const fixedSellPriceMicros =
+    targetSellPriceSettings === undefined ||
+    candidate.executableBuyPriceMicros === 0
+      ? candidate.fixedSellPriceMicros
+      : calculateFixedSellPriceMicros(
+          candidate.executableBuyPriceMicros,
+          candidate.tickSizeMicros,
+          targetSellPriceSettings,
+        );
   return {
     ...candidate,
     ...availability,
@@ -139,7 +167,7 @@ function serializeCandidate(
     executableBuyPrice: microsToDecimalString(
       candidate.executableBuyPriceMicros,
     ),
-    fixedSellPrice: microsToDecimalString(candidate.fixedSellPriceMicros),
+    fixedSellPrice: microsToDecimalString(fixedSellPriceMicros),
     orderSize: microsToDecimalString(candidate.orderSizeMicros),
     queueAheadSize: microsToDecimalString(candidate.queueAheadSizeMicros),
     minOrderSize: microsToDecimalString(candidate.minOrderSizeMicros),
@@ -205,6 +233,8 @@ function buildEventMarketScan(
   );
   const direction =
     dependencies.tradingPreferences.getSnapshot().candidateSortDirection;
+  const targetSellPriceSettings =
+    dependencies.tradingPreferences.getTargetSellPriceSettings();
   const events = [...candidatesByEvent.entries()].map(([eventId, siblings]) => {
     const orderedSiblings = dependencies.tradingPreferences.getOrderedCandidates(
       siblings.map((candidate) => ({ ...candidate, bookReady: true })),
@@ -267,7 +297,7 @@ function buildEventMarketScan(
           ...serializeCandidate(candidate, {
             tradable: isWinner && status === "READY",
             quoteStatus,
-          }),
+          }, targetSellPriceSettings),
           isWinner,
           participationStatus: incompleteTokenIds.has(candidate.tokenId)
             ? "INCOMPLETE"
@@ -285,7 +315,7 @@ function buildEventMarketScan(
         (winnerTokenId === representative.tokenId && status === "READY"
           ? "READY"
           : status),
-    });
+    }, targetSellPriceSettings);
     return {
       eventId,
       eventSlug: representative.eventSlug,
@@ -316,7 +346,7 @@ function buildEventMarketScan(
           : serializeCandidate(winner, {
               tradable: status === "READY",
               quoteStatus: status === "READY" ? "READY" : status,
-            }),
+            }, targetSellPriceSettings),
       representative: serializedRepresentative,
       outcomes,
     };
@@ -390,8 +420,16 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
     minMarketDurationDays: preferences.minMarketDurationDays,
     maxMarketDurationDays: preferences.maxMarketDurationDays,
     updatedAt: preferences.updatedAt,
+    minBuyPrice: microsToDecimalString(preferences.minBuyPriceMicros),
+    minBuyPriceCents: preferences.minBuyPriceMicros / 10_000,
     maxBuyPrice: microsToDecimalString(preferences.maxBuyPriceMicros),
     maxBuyPriceCents: preferences.maxBuyPriceMicros / 10_000,
+    targetSellPriceIncrease:
+      microsToDecimalString(preferences.targetSellPriceIncreaseMicros),
+    targetSellPriceIncreaseCents:
+      preferences.targetSellPriceIncreaseMicros / 10_000,
+    targetSellPriceMultiplier:
+      preferences.targetSellPriceMultiplierMicros / 1_000_000,
     minBidAskRatioPercent: preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
@@ -826,7 +864,23 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
     const body = z
       .object({
         marketTypes: z.array(z.enum(["BINARY", "TERNARY", "MULTI"])).min(1),
-        maxBuyPriceCents: z.number().int().min(1).max(3),
+        minBuyPriceCents: tenthCentPriceSchema.optional(),
+        maxBuyPriceCents: tenthCentPriceSchema,
+        targetSellPriceIncreaseCents: z
+          .number()
+          .finite()
+          .min(0)
+          .max(99)
+          .optional(),
+        targetSellPriceMultiplier: z
+          .number()
+          .finite()
+          .nonnegative()
+          .refine(
+            (value) => Number.isSafeInteger(Math.round(value * 1_000_000)),
+            "Target multiplier is outside the supported precision",
+          )
+          .optional(),
         minMarketDurationDays: z.number().int().min(1).max(365).optional(),
         maxMarketDurationDays: z.number().int().min(1).max(365),
         allCategories: z.boolean().optional(),
@@ -840,6 +894,16 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       })
       .parse(request.body);
     const currentPreferences = dependencies.tradingPreferences.getSnapshot();
+    const requestedMinBuyPriceMicros =
+      body.minBuyPriceCents === undefined
+        ? currentPreferences.minBuyPriceMicros
+        : centsToMicros(body.minBuyPriceCents);
+    const requestedMaxBuyPriceMicros = centsToMicros(body.maxBuyPriceCents);
+    if (requestedMinBuyPriceMicros > requestedMaxBuyPriceMicros) {
+      throw new Error(
+        "Minimum TEST buy price cannot exceed maximum TEST buy price",
+      );
+    }
     const requestedMinMarketDurationDays =
       body.minMarketDurationDays ?? currentPreferences.minMarketDurationDays;
     if (requestedMinMarketDurationDays > body.maxMarketDurationDays) {
@@ -883,7 +947,23 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
           );
     const update = dependencies.tradingPreferences.updateMarketFilters({
       marketTypes: body.marketTypes,
-      maxBuyPriceMicros: body.maxBuyPriceCents * 10_000,
+      minBuyPriceMicros: requestedMinBuyPriceMicros,
+      maxBuyPriceMicros: requestedMaxBuyPriceMicros,
+      ...(body.targetSellPriceIncreaseCents === undefined
+        ? {}
+        : {
+            targetSellPriceIncreaseMicros: centsToMicros(
+              body.targetSellPriceIncreaseCents,
+              true,
+            ),
+          }),
+      ...(body.targetSellPriceMultiplier === undefined
+        ? {}
+        : {
+            targetSellPriceMultiplierMicros: multiplierToMicros(
+              body.targetSellPriceMultiplier,
+            ),
+          }),
       minMarketDurationDays: requestedMinMarketDurationDays,
       maxMarketDurationDays: body.maxMarketDurationDays,
       ...(body.allCategories === undefined
@@ -1053,6 +1133,25 @@ function unitsToMicros(value: number): number {
   const micros = Math.round(value * 1_000_000);
   if (!Number.isSafeInteger(micros) || micros <= 0) {
     throw new Error("TEST amount is outside the supported range");
+  }
+  return micros;
+}
+
+function centsToMicros(value: number, allowZero = false): number {
+  const micros = Math.round(value * 10_000);
+  if (
+    !Number.isSafeInteger(micros) ||
+    (allowZero ? micros < 0 : micros <= 0)
+  ) {
+    throw new Error("TEST price is outside the supported range");
+  }
+  return micros;
+}
+
+function multiplierToMicros(value: number): number {
+  const micros = Math.round(value * 1_000_000);
+  if (!Number.isSafeInteger(micros) || micros < 0) {
+    throw new Error("Target multiplier is outside the supported range");
   }
   return micros;
 }

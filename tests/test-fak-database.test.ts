@@ -55,6 +55,40 @@ describe("TEST FAK accounting", () => {
     expect(database.listPaperOrders().filter((order) => order.side === "BUY")).toHaveLength(1);
   });
 
+  it("uses the configured target formula for Preview and persisted sell targets", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const input = {
+      candidate: makeCandidate({
+        bestAskMicros: 24_000,
+        tickSizeMicros: 1_000,
+      }),
+      book: makeBook({
+        bookVersion: "CONFIGURED-TARGET",
+        asks: [{ priceMicros: 24_000, sizeMicros: 10_000_000 }],
+        tickSizeMicros: 1_000,
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+      targetSellPriceSettings: {
+        increaseMicros: 5_000,
+        multiplierMicros: 1_800_000,
+      },
+    };
+
+    expect(database.previewTestFakBuy(input).preview?.fills).toEqual([
+      expect.objectContaining({ targetPriceMicros: 44_000 }),
+    ]);
+    database.executeTestFakBuy(input);
+    expect(
+      database.listPaperOrders().find((order) => order.side === "SELL"),
+    ).toMatchObject({ priceMicros: 44_000 });
+  });
+
   it("matches Preview coverage to real FAK sells when targets share all Bid depth", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
@@ -1118,7 +1152,10 @@ function defaultPreferences(): Omit<PaperTradingPreferences, "updatedAt"> {
     selectedCategories: [],
     candidateSortDirection: "ASC" as const,
     orderBudgetMicros: 1_000_000,
+    minBuyPriceMicros: 10_000,
     maxBuyPriceMicros: 30_000,
+    targetSellPriceIncreaseMicros: 10_000,
+    targetSellPriceMultiplierMicros: 1_500_000,
     minBidAskRatioPercent: 50,
     minMarketDurationDays: 1,
     maxMarketDurationDays: 30,

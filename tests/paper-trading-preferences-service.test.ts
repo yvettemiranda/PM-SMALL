@@ -23,7 +23,10 @@ describe("PaperTradingPreferencesService", () => {
 
     expect(preferences.getSnapshot()).toMatchObject({
       marketTypes: ["BINARY", "TERNARY"],
+      minBuyPriceMicros: 10_000,
       maxBuyPriceMicros: 30_000,
+      targetSellPriceIncreaseMicros: 10_000,
+      targetSellPriceMultiplierMicros: 1_500_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
       minBidAskRatioPercent: 50,
@@ -33,7 +36,10 @@ describe("PaperTradingPreferencesService", () => {
 
     preferences.updateMarketFilters({
       marketTypes: ["TERNARY", "MULTI"],
+      minBuyPriceMicros: 6_000,
       maxBuyPriceMicros: 30_000,
+      targetSellPriceIncreaseMicros: 1_250,
+      targetSellPriceMultiplierMicros: 1_812_345,
       minMarketDurationDays: 7,
       maxMarketDurationDays: 45,
       minBidAskRatioPercent: 60,
@@ -42,13 +48,49 @@ describe("PaperTradingPreferencesService", () => {
     const restored = new PaperTradingPreferencesService(database, testConfig);
     expect(restored.getSnapshot()).toMatchObject({
       marketTypes: ["TERNARY", "MULTI"],
+      minBuyPriceMicros: 6_000,
       maxBuyPriceMicros: 30_000,
+      targetSellPriceIncreaseMicros: 1_250,
+      targetSellPriceMultiplierMicros: 1_812_345,
       minMarketDurationDays: 7,
       maxMarketDurationDays: 45,
       minBidAskRatioPercent: 60,
       maxMarketProgressPercent: 80,
       candidatesSelectedByDefault: true,
     });
+  });
+
+  it("uses an inclusive configurable tenth-cent buy range up to 99 cents", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+
+    preferences.updateMarketFilters({
+      marketTypes: ["BINARY", "TERNARY"],
+      minBuyPriceMicros: 6_000,
+      maxBuyPriceMicros: 990_000,
+      maxMarketDurationDays: 30,
+    });
+
+    expect(
+      preferences.isCandidateEnabled(
+        makeCandidate({ bestAskMicros: 6_000, bestBidMicros: 3_000 }),
+      ),
+    ).toBe(true);
+    expect(
+      preferences.isCandidateEnabled(
+        makeCandidate({ bestAskMicros: 5_000, bestBidMicros: 3_000 }),
+      ),
+    ).toBe(false);
+    expect(
+      preferences.isCandidateEnabled(
+        makeCandidate({
+          bestAskMicros: 990_000,
+          bestBidMicros: 500_000,
+          minOrderSizeMicros: 1_000_000,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("rejects a market whose total duration is less than one day", () => {
@@ -325,8 +367,8 @@ describe("PaperTradingPreferencesService", () => {
       () =>
         new PaperTradingPreferencesService(anotherDatabase, {
           ...testConfig,
-          maxBuyPriceMicros: 25_000,
+          maxBuyPriceMicros: 25_500,
         }),
-    ).toThrow(/whole cent between 1 and 3 cents/);
+    ).toThrow(/0.1 to 99 cents/);
   });
 });

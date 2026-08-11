@@ -14,6 +14,8 @@ export const testConfig: AppConfig = {
   maxMarketDurationDays: 30,
   minBuyPriceMicros: 10_000,
   maxBuyPriceMicros: 30_000,
+  targetSellPriceIncreaseMicros: 10_000,
+  targetSellPriceMultiplierMicros: 1_500_000,
   minBidAskRatioPercent: 50,
   maxMarketProgressPercent: 20,
   scanIntervalMs: 15_000,

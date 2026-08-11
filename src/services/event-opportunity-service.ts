@@ -5,6 +5,7 @@ import {
   bestAskLevel,
   bestBidLevel,
   calculateFixedSellPriceMicros,
+  type TargetSellPriceSettings,
 } from "../domain/price.js";
 import {
   staticMarketEligibilityRejectionReason,
@@ -24,6 +25,7 @@ export interface EventOpportunitySelection {
   candidateMatchesStaticFilters?(candidate: TradeCandidate, now?: Date): boolean;
   getMaxBuyPriceMicros?(): number;
   getOrderBudgetMicros?(): number;
+  getTargetSellPriceSettings?(): TargetSellPriceSettings;
   getEligibilitySettings?(): MarketEligibilitySettings;
   getCandidateSortDirection?(): CandidateSortDirection;
   getStateVersion?(): string;
@@ -154,6 +156,11 @@ export class EventOpportunityService {
       this.selection?.getMaxBuyPriceMicros?.() ?? this.config.maxBuyPriceMicros;
     const orderBudgetMicros =
       this.selection?.getOrderBudgetMicros?.() ?? this.config.orderBudgetMicros;
+    const targetSellPriceSettings =
+      this.selection?.getTargetSellPriceSettings?.() ?? {
+        increaseMicros: this.config.targetSellPriceIncreaseMicros,
+        multiplierMicros: this.config.targetSellPriceMultiplierMicros,
+      };
     const opportunities: EventOpportunity[] = [];
     for (const candidate of participants) {
       const book = books.get(candidate.tokenId);
@@ -172,6 +179,7 @@ export class EventOpportunityService {
             : calculateFixedSellPriceMicros(
                 currentBestAskMicros,
                 book.tickSizeMicros,
+                targetSellPriceSettings,
               ),
         minOrderSizeMicros: book.minOrderSizeMicros,
         tickSizeMicros: book.tickSizeMicros,
@@ -186,6 +194,7 @@ export class EventOpportunityService {
         orderBudgetMicros,
         feeRateMicros: candidate.feeRateMicros,
         feeExponent: candidate.feeExponent,
+        targetSellPriceSettings,
         eligibility,
       };
       const preview = this.database.previewTestFakBuy(intent);

@@ -6,6 +6,17 @@ const numberFromEnvironment = (fallback: number) =>
 const durationDaysFromEnvironment = (fallback: number) =>
   z.coerce.number().int().min(1).max(365).default(fallback);
 
+const buyPriceFromEnvironment = (fallback: number, label: string) =>
+  z.coerce
+    .number()
+    .finite()
+    .refine(
+      (value) =>
+        Number.isInteger(value * 1_000) && value >= 0.001 && value <= 0.99,
+      `${label} must be a tenth-cent price from 0.001 to 0.99`,
+    )
+    .default(fallback);
+
 const configSchema = z.object({
   HOST: z.string().min(1).default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -15,13 +26,23 @@ const configSchema = z.object({
   ORDER_BUDGET_USD: numberFromEnvironment(1),
   MIN_MARKET_DURATION_DAYS: durationDaysFromEnvironment(1),
   MAX_MARKET_DURATION_DAYS: durationDaysFromEnvironment(30),
-  MAX_BUY_PRICE: z.coerce
+  MIN_BUY_PRICE: buyPriceFromEnvironment(0.001, "MIN_BUY_PRICE"),
+  MAX_BUY_PRICE: buyPriceFromEnvironment(0.99, "MAX_BUY_PRICE"),
+  TARGET_SELL_PRICE_INCREASE: z.coerce
     .number()
+    .finite()
+    .min(0)
+    .max(0.99)
+    .default(0.01),
+  TARGET_SELL_PRICE_MULTIPLIER: z.coerce
+    .number()
+    .finite()
+    .min(0)
     .refine(
-      (value) => Number.isInteger(value * 100) && value >= 0.01 && value <= 0.03,
-      "MAX_BUY_PRICE must be 0.01, 0.02, or 0.03",
+      (value) => Number.isSafeInteger(Math.round(value * USD_SCALE)),
+      "TARGET_SELL_PRICE_MULTIPLIER exceeds the supported precision",
     )
-    .default(0.03),
+    .default(1.5),
   MIN_BID_ASK_RATIO_PERCENT: z.coerce.number().int().min(1).max(100).default(50),
   MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().int().min(1).max(100).default(20),
   SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
@@ -43,6 +64,8 @@ export type AppConfig = {
   maxMarketDurationDays: number;
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
+  targetSellPriceIncreaseMicros: number;
+  targetSellPriceMultiplierMicros: number;
   minBidAskRatioPercent: number;
   maxMarketProgressPercent: number;
   scanIntervalMs: number;
@@ -76,6 +99,10 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     );
   }
 
+  if (parsed.MIN_BUY_PRICE > parsed.MAX_BUY_PRICE) {
+    throw new Error("MIN_BUY_PRICE cannot exceed MAX_BUY_PRICE");
+  }
+
   return {
     host: parsed.HOST,
     port: parsed.PORT,
@@ -85,8 +112,14 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     orderBudgetMicros: toMicros(parsed.ORDER_BUDGET_USD),
     minMarketDurationDays: parsed.MIN_MARKET_DURATION_DAYS,
     maxMarketDurationDays: parsed.MAX_MARKET_DURATION_DAYS,
-    minBuyPriceMicros: 10_000,
+    minBuyPriceMicros: toMicros(parsed.MIN_BUY_PRICE),
     maxBuyPriceMicros: toMicros(parsed.MAX_BUY_PRICE),
+    targetSellPriceIncreaseMicros: toMicros(
+      parsed.TARGET_SELL_PRICE_INCREASE,
+    ),
+    targetSellPriceMultiplierMicros: toMicros(
+      parsed.TARGET_SELL_PRICE_MULTIPLIER,
+    ),
     minBidAskRatioPercent: parsed.MIN_BID_ASK_RATIO_PERCENT,
     maxMarketProgressPercent: parsed.MAX_MARKET_PROGRESS_PERCENT,
     scanIntervalMs: parsed.SCAN_INTERVAL_MS,

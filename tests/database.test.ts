@@ -227,7 +227,10 @@ describe("PaperDatabase", () => {
     const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
     currentDatabase.ensurePaperTradingPreferences({
       marketTypes: ["BINARY", "TERNARY"],
+      minBuyPriceMicros: 10_000,
       maxBuyPriceMicros: 30_000,
+      targetSellPriceIncreaseMicros: 10_000,
+      targetSellPriceMultiplierMicros: 1_500_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 20,
@@ -258,9 +261,12 @@ describe("PaperDatabase", () => {
     const upgradedDatabase = new PaperDatabase(databasePath, 100_000_000);
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
+        minBuyPriceMicros: 10_000,
         minMarketDurationDays: 1,
         maxMarketProgressPercent: 20,
         minBidAskRatioPercent: 50,
+        targetSellPriceIncreaseMicros: 10_000,
+        targetSellPriceMultiplierMicros: 1_500_000,
       });
       expect(upgradedDatabase.getStrategyState().status).toBe("PAUSED");
       const schemaVersion = new Database(databasePath, { readonly: true });
@@ -269,7 +275,7 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 15 });
+        ).toEqual({ version: 16 });
       } finally {
         schemaVersion.close();
       }
@@ -285,7 +291,10 @@ describe("PaperDatabase", () => {
     const currentDatabase = new PaperDatabase(databasePath, 100_000_000);
     currentDatabase.ensurePaperTradingPreferences({
       marketTypes: ["BINARY"],
+      minBuyPriceMicros: 10_000,
       maxBuyPriceMicros: 20_000,
+      targetSellPriceIncreaseMicros: 10_000,
+      targetSellPriceMultiplierMicros: 1_500_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 60,
       maxMarketProgressPercent: 37,
@@ -345,7 +354,7 @@ describe("PaperDatabase", () => {
         DROP TABLE paper_trading_preferences;
         ALTER TABLE paper_trading_preferences_v13 RENAME TO paper_trading_preferences;
         DROP TABLE paper_event_locks;
-        DELETE FROM schema_migrations WHERE version IN (14, 15);
+        DELETE FROM schema_migrations WHERE version IN (14, 15, 16);
         DELETE FROM audit_log
         WHERE event_type IN (
           'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED',
@@ -360,7 +369,10 @@ describe("PaperDatabase", () => {
     try {
       expect(upgradedDatabase.getPaperTradingPreferences()).toMatchObject({
         marketTypes: ["BINARY"],
+        minBuyPriceMicros: 1_000,
         maxBuyPriceMicros: 20_000,
+        targetSellPriceIncreaseMicros: 10_000,
+        targetSellPriceMultiplierMicros: 1_500_000,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 60,
         maxMarketProgressPercent: 37,
@@ -390,7 +402,7 @@ describe("PaperDatabase", () => {
           inspectedDatabase
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 15 });
+        ).toEqual({ version: 16 });
         expect(
           inspectedDatabase
             .prepare(
@@ -447,7 +459,10 @@ describe("PaperDatabase", () => {
       legacyDatabase.setStrategyStatus("RUNNING");
       legacyDatabase.ensurePaperTradingPreferences({
         marketTypes: ["BINARY", "TERNARY"],
+        minBuyPriceMicros: 10_000,
         maxBuyPriceMicros: 30_000,
+        targetSellPriceIncreaseMicros: 10_000,
+        targetSellPriceMultiplierMicros: 1_500_000,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 30,
         maxMarketProgressPercent: 20,
@@ -485,7 +500,7 @@ describe("PaperDatabase", () => {
           SET event_id = 'conflict-event'
           WHERE token_id = 'conflict-second';
           DROP TABLE paper_event_locks;
-          DELETE FROM schema_migrations WHERE version = 15;
+          DELETE FROM schema_migrations WHERE version IN (15, 16);
           DELETE FROM audit_log
           WHERE event_type = 'TEST_EVENT_CYCLE_MIGRATION_COMPLETED';
         `);

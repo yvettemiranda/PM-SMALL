@@ -60,6 +60,8 @@ export type MarketScanPreferences = {
   marketTypes: readonly MarketType[];
   minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
+  targetSellPriceIncreaseMicros: number;
+  targetSellPriceMultiplierMicros: number;
   minBidAskRatioPercent: number;
   minMarketDurationDays: number;
   maxMarketDurationDays: number;
@@ -143,6 +145,10 @@ export class MarketScanner implements CandidateScanner {
       marketTypes: ["BINARY", "TERNARY"],
       minBuyPriceMicros: this.config.minBuyPriceMicros,
       maxBuyPriceMicros: this.config.maxBuyPriceMicros,
+      targetSellPriceIncreaseMicros:
+        this.config.targetSellPriceIncreaseMicros,
+      targetSellPriceMultiplierMicros:
+        this.config.targetSellPriceMultiplierMicros,
       minBidAskRatioPercent: this.config.minBidAskRatioPercent,
       minMarketDurationDays: this.config.minMarketDurationDays,
       maxMarketDurationDays: this.config.maxMarketDurationDays,
@@ -424,6 +430,10 @@ export class MarketScanner implements CandidateScanner {
           token,
           book,
           scanPreferences.orderBudgetMicros,
+          {
+            increaseMicros: scanPreferences.targetSellPriceIncreaseMicros,
+            multiplierMicros: scanPreferences.targetSellPriceMultiplierMicros,
+          },
         );
         monitoredCandidates.push(monitored);
         const rejectionReason = marketEligibilityRejectionReason(

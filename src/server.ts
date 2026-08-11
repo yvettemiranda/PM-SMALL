@@ -25,7 +25,11 @@ const database = new PaperDatabase(
 const marketData = new PolymarketMarketDataSource();
 const tradingPreferences = new PaperTradingPreferencesService(database, config);
 const scanner = new MarketScanner(marketData, config, tradingPreferences);
-const candidates = new CandidateService(scanner, config.scanIntervalMs);
+const candidates = new CandidateService(
+  scanner,
+  config.scanIntervalMs,
+  () => tradingPreferences.getTargetSellPriceSettings(),
+);
 const testExecutor = new TestExecutor(database);
 const paperMarketProcessor = new PaperMarketProcessor(database, testExecutor);
 const marketStream = new MarketStreamService(

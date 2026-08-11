@@ -64,22 +64,87 @@
               </div>
             </fieldset>
 
-            <label class="field config-block">
-              <span>买入价范围</span>
-              <span class="price-input">
-                <span>1–</span>
-                <input
-                  id="max-buy-price"
-                  type="number"
-                  min="1"
-                  max="3"
-                  step="1"
-                  inputmode="numeric"
-                  aria-label="最高买入价（美分）"
-                />
-                <span>¢</span>
-              </span>
-            </label>
+            <div class="config-block">
+              <div class="config-label">买入价范围</div>
+              <div class="price-range-fields">
+                <label class="price-bound">
+                  <span>最低</span>
+                  <span class="unit-input">
+                    <input
+                      id="min-buy-price"
+                      type="number"
+                      min="0.1"
+                      max="99"
+                      step="0.1"
+                      inputmode="decimal"
+                      aria-label="最低买入价（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+                <span class="duration-separator" aria-hidden="true">至</span>
+                <label class="price-bound">
+                  <span>最高</span>
+                  <span class="unit-input">
+                    <input
+                      id="max-buy-price"
+                      type="number"
+                      min="0.1"
+                      max="99"
+                      step="0.1"
+                      inputmode="decimal"
+                      aria-label="最高买入价（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">最低和最高价格均包含在筛选范围内，可按 0.1¢ 调整。</p>
+            </div>
+
+            <div class="config-block target-formula-block">
+              <div class="subsection-heading">
+                <span>目标卖价公式</span>
+                <small>用于后续每笔新买入成交</small>
+              </div>
+              <output id="target-sell-formula" class="formula-preview">
+                目标卖价 = min（99¢，按市场 tick 向上取整［max（实际买入成交价 + 1¢，实际买入成交价 × 1.5）］）
+              </output>
+              <div class="formula-fields">
+                <label class="field">
+                  <span>加价参数</span>
+                  <span class="unit-input">
+                    <input
+                      id="target-sell-increase"
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="目标卖价加价参数（美分）"
+                    />
+                    <span>¢</span>
+                  </span>
+                </label>
+                <label class="field">
+                  <span>倍数参数</span>
+                  <span class="unit-input multiplier-input">
+                    <input
+                      id="target-sell-multiplier"
+                      type="number"
+                      min="0"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="目标卖价倍数参数"
+                    />
+                    <span>×</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">公式结果超过 99¢ 时按 99¢；已有目标卖单不会被追溯改写。</p>
+            </div>
 
             <div class="range-fields config-block">
               <div class="duration-field range-field">

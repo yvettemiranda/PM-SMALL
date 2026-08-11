@@ -15,6 +15,12 @@ import {
   sortTradeCandidates,
   type CandidateSortDirection,
 } from "../domain/trading-strategy.js";
+import {
+  MAX_BUY_PRICE_MICROS,
+  MAX_TARGET_SELL_PRICE_MICROS,
+  MIN_BUY_PRICE_MICROS,
+  type TargetSellPriceSettings,
+} from "../domain/price.js";
 import type { TradeCandidate } from "../domain/types.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 
@@ -27,7 +33,10 @@ export type PaperTradingPreferencesSnapshot = {
   selectedCategories: string[];
   candidateSortDirection: CandidateSortDirection;
   orderBudgetMicros: number;
+  minBuyPriceMicros: number;
   maxBuyPriceMicros: number;
+  targetSellPriceIncreaseMicros: number;
+  targetSellPriceMultiplierMicros: number;
   minBidAskRatioPercent: number;
   minMarketDurationDays: number;
   maxMarketDurationDays: number;
@@ -40,6 +49,9 @@ type MarketFilterUpdate = Pick<
   PaperTradingPreferencesSnapshot,
   "marketTypes" | "maxBuyPriceMicros" | "maxMarketDurationDays"
 > & {
+  minBuyPriceMicros?: number;
+  targetSellPriceIncreaseMicros?: number;
+  targetSellPriceMultiplierMicros?: number;
   minMarketDurationDays?: number;
   allCategories?: boolean;
   selectedCategories?: readonly string[];
@@ -52,7 +64,10 @@ type MarketFilterUpdate = Pick<
 type NormalizedMarketFilters = Pick<
   PaperTradingPreferencesSnapshot,
   | "marketTypes"
+  | "minBuyPriceMicros"
   | "maxBuyPriceMicros"
+  | "targetSellPriceIncreaseMicros"
+  | "targetSellPriceMultiplierMicros"
   | "minBidAskRatioPercent"
   | "minMarketDurationDays"
   | "maxMarketDurationDays"
@@ -72,21 +87,22 @@ export class PaperTradingPreferencesService {
   private snapshot: PaperTradingPreferencesSnapshot;
   private readonly defaults: Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
   private readonly defaultInitialCapitalMicros: number;
-  private readonly minBuyPriceMicros: number;
 
   public constructor(
     private readonly database: PaperDatabase,
     config: AppConfig,
   ) {
     this.defaultInitialCapitalMicros = config.initialCapitalMicros;
-    this.minBuyPriceMicros = config.minBuyPriceMicros;
     this.defaults = {
       marketTypes: ["BINARY", "TERNARY"],
       allCategories: true,
       selectedCategories: [],
       candidateSortDirection: "ASC",
       orderBudgetMicros: config.orderBudgetMicros,
+      minBuyPriceMicros: config.minBuyPriceMicros,
       maxBuyPriceMicros: config.maxBuyPriceMicros,
+      targetSellPriceIncreaseMicros: config.targetSellPriceIncreaseMicros,
+      targetSellPriceMultiplierMicros: config.targetSellPriceMultiplierMicros,
       minBidAskRatioPercent: config.minBidAskRatioPercent,
       minMarketDurationDays: config.minMarketDurationDays,
       maxMarketDurationDays: config.maxMarketDurationDays,
@@ -121,8 +137,12 @@ export class PaperTradingPreferencesService {
   public getMarketScanPreferences(): MarketScanPreferences {
     return {
       marketTypes: [...this.snapshot.marketTypes],
+      minBuyPriceMicros: this.snapshot.minBuyPriceMicros,
       maxBuyPriceMicros: this.snapshot.maxBuyPriceMicros,
-      minBuyPriceMicros: this.minBuyPriceMicros,
+      targetSellPriceIncreaseMicros:
+        this.snapshot.targetSellPriceIncreaseMicros,
+      targetSellPriceMultiplierMicros:
+        this.snapshot.targetSellPriceMultiplierMicros,
       minBidAskRatioPercent: this.snapshot.minBidAskRatioPercent,
       minMarketDurationDays: this.snapshot.minMarketDurationDays,
       maxMarketDurationDays: this.snapshot.maxMarketDurationDays,
@@ -138,12 +158,19 @@ export class PaperTradingPreferencesService {
     return this.snapshot.maxBuyPriceMicros;
   }
 
+  public getTargetSellPriceSettings(): TargetSellPriceSettings {
+    return {
+      increaseMicros: this.snapshot.targetSellPriceIncreaseMicros,
+      multiplierMicros: this.snapshot.targetSellPriceMultiplierMicros,
+    };
+  }
+
   public getOrderBudgetMicros(): number {
     return this.snapshot.orderBudgetMicros;
   }
 
   public getEligibilitySettings(): MarketEligibilitySettings {
-    return toEligibilitySettings(this.snapshot, this.minBuyPriceMicros);
+    return toEligibilitySettings(this.snapshot);
   }
 
   public getCandidateSortDirection(): CandidateSortDirection {
@@ -191,7 +218,15 @@ export class PaperTradingPreferencesService {
 
     const normalizedUpdate: NormalizedMarketFilters = {
       marketTypes,
+      minBuyPriceMicros:
+        update.minBuyPriceMicros ?? this.snapshot.minBuyPriceMicros,
       maxBuyPriceMicros: update.maxBuyPriceMicros,
+      targetSellPriceIncreaseMicros:
+        update.targetSellPriceIncreaseMicros ??
+        this.snapshot.targetSellPriceIncreaseMicros,
+      targetSellPriceMultiplierMicros:
+        update.targetSellPriceMultiplierMicros ??
+        this.snapshot.targetSellPriceMultiplierMicros,
       minBidAskRatioPercent:
         update.minBidAskRatioPercent ?? this.snapshot.minBidAskRatioPercent,
       minMarketDurationDays:
@@ -233,12 +268,7 @@ export class PaperTradingPreferencesService {
     candidate: MarketEligibilityCandidate,
     now?: Date,
   ): boolean {
-    return marketMatchesFilters(
-      candidate,
-      this.snapshot,
-      this.minBuyPriceMicros,
-      now,
-    );
+    return marketMatchesFilters(candidate, this.snapshot, now);
   }
 
   public isCandidateEnabled(candidate: TradeCandidate, now?: Date): boolean {
@@ -266,12 +296,7 @@ export class PaperTradingPreferencesService {
       .listActivePaperBuyMarkets()
       .filter(
         (market) =>
-          !marketMatchesFilters(
-            market,
-            filters,
-            this.minBuyPriceMicros,
-            now,
-          ),
+          !marketMatchesFilters(market, filters, now),
       )
       .map((market) => market.tokenId);
   }
@@ -280,25 +305,19 @@ export class PaperTradingPreferencesService {
 function marketMatchesFilters(
   market: MarketEligibilityCandidate,
   filters: NormalizedMarketFilters,
-  minBuyPriceMicros: number,
   now?: Date,
 ): boolean {
-  return isMarketEligible(
-    market,
-    toEligibilitySettings(filters, minBuyPriceMicros),
-    now,
-  );
+  return isMarketEligible(market, toEligibilitySettings(filters), now);
 }
 
 function toEligibilitySettings(
   filters: NormalizedMarketFilters,
-  minBuyPriceMicros: number,
 ): MarketEligibilitySettings {
   return {
     marketTypes: filters.marketTypes,
     allCategories: filters.allCategories,
     selectedCategoryIds: filters.selectedCategories,
-    minBuyPriceMicros,
+    minBuyPriceMicros: filters.minBuyPriceMicros,
     maxBuyPriceMicros: filters.maxBuyPriceMicros,
     minBidAskRatioPercent: filters.minBidAskRatioPercent,
     minMarketDurationDays: filters.minMarketDurationDays,
@@ -311,7 +330,10 @@ function toEligibilitySettings(
 function validateMarketFilterValues(
   values: Pick<
     PaperTradingPreferencesSnapshot,
+    | "minBuyPriceMicros"
     | "maxBuyPriceMicros"
+    | "targetSellPriceIncreaseMicros"
+    | "targetSellPriceMultiplierMicros"
     | "minBidAskRatioPercent"
     | "minMarketDurationDays"
     | "maxMarketDurationDays"
@@ -320,12 +342,34 @@ function validateMarketFilterValues(
   >,
 ): void {
   if (
-    !Number.isInteger(values.maxBuyPriceMicros) ||
-    values.maxBuyPriceMicros % 10_000 !== 0 ||
-    values.maxBuyPriceMicros < 10_000 ||
-    values.maxBuyPriceMicros > 30_000
+    !isTenthCentValue(values.minBuyPriceMicros) ||
+    values.minBuyPriceMicros < MIN_BUY_PRICE_MICROS ||
+    values.minBuyPriceMicros > MAX_BUY_PRICE_MICROS
   ) {
-    throw new Error("Maximum TEST buy price must be a whole cent between 1 and 3 cents");
+    throw new Error("Minimum TEST buy price must be from 0.1 to 99 cents");
+  }
+  if (
+    !isTenthCentValue(values.maxBuyPriceMicros) ||
+    values.maxBuyPriceMicros < MIN_BUY_PRICE_MICROS ||
+    values.maxBuyPriceMicros > MAX_BUY_PRICE_MICROS
+  ) {
+    throw new Error("Maximum TEST buy price must be from 0.1 to 99 cents");
+  }
+  if (values.minBuyPriceMicros > values.maxBuyPriceMicros) {
+    throw new Error("Minimum TEST buy price cannot exceed maximum TEST buy price");
+  }
+  if (
+    !Number.isSafeInteger(values.targetSellPriceIncreaseMicros) ||
+    values.targetSellPriceIncreaseMicros < 0 ||
+    values.targetSellPriceIncreaseMicros > MAX_TARGET_SELL_PRICE_MICROS
+  ) {
+    throw new Error("Target sell-price increase must be from 0 to 99 cents");
+  }
+  if (
+    !Number.isSafeInteger(values.targetSellPriceMultiplierMicros) ||
+    values.targetSellPriceMultiplierMicros < 0
+  ) {
+    throw new Error("Target sell-price multiplier must be non-negative");
   }
   if (
     !Number.isInteger(values.minMarketDurationDays) ||
@@ -361,6 +405,10 @@ function validateMarketFilterValues(
   if (!Number.isSafeInteger(values.orderBudgetMicros) || values.orderBudgetMicros <= 0) {
     throw new Error("Per-Event cycle TEST amount must be positive");
   }
+}
+
+function isTenthCentValue(value: number): boolean {
+  return Number.isSafeInteger(value) && value % 1_000 === 0;
 }
 
 function normalizeSelectedMarketTypes(

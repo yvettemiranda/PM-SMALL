@@ -10,7 +10,10 @@ export type FormalTestConfiguration = {
   candidateSortDirection: "ASC" | "DESC";
   minMarketDurationDays: number;
   maxMarketDurationDays: number;
+  minBuyPriceCents: number;
   maxBuyPriceCents: number;
+  targetSellPriceIncreaseCents: number;
+  targetSellPriceMultiplier: number;
   minBidAskRatioPercent: number;
   maxMarketProgressPercent: number;
   orderAmount: string;
@@ -642,7 +645,12 @@ function configurationSummary(configuration: FormalTestConfiguration): string {
   const categories = configuration.allCategories
     ? "全部栏目"
     : `${configuration.selectedCategoryIds.length} 个栏目`;
-  return `类型 ${configuration.marketTypes.join("/")}，${categories}，时长 ${configuration.minMarketDurationDays}–${configuration.maxMarketDurationDays} 天，买价 ≤${configuration.maxBuyPriceCents}¢，Bid/Ask ≥${configuration.minBidAskRatioPercent}%，进度 ≤${configuration.maxMarketProgressPercent}%，每 Event ${configuration.orderAmount}U，总资金 ${(configuration.initialCapitalMicros / 1_000_000).toFixed(2)}U，排序 ${configuration.candidateSortDirection}`;
+  const minBuyPriceCents = configuration.minBuyPriceCents ?? 1;
+  const targetSellPriceIncreaseCents =
+    configuration.targetSellPriceIncreaseCents ?? 1;
+  const targetSellPriceMultiplier =
+    configuration.targetSellPriceMultiplier ?? 1.5;
+  return `类型 ${configuration.marketTypes.join("/")}，${categories}，时长 ${configuration.minMarketDurationDays}–${configuration.maxMarketDurationDays} 天，买价 ${minBuyPriceCents}–${configuration.maxBuyPriceCents}¢，目标 max(买价+${targetSellPriceIncreaseCents}¢, 买价×${targetSellPriceMultiplier}) 且 ≤99¢，Bid/Ask ≥${configuration.minBidAskRatioPercent}%，进度 ≤${configuration.maxMarketProgressPercent}%，每 Event ${configuration.orderAmount}U，总资金 ${(configuration.initialCapitalMicros / 1_000_000).toFixed(2)}U，排序 ${configuration.candidateSortDirection}`;
 }
 
 function streamCompleteness(statistics: FormalTestSegmentStatistics): string {

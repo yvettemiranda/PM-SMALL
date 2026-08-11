@@ -1,6 +1,21 @@
 import type { BookLevel, MarketToken, TokenOrderBook, TradeCandidate } from "./types.js";
 
 export const DECIMAL_SCALE = 1_000_000;
+export const MIN_BUY_PRICE_MICROS = 1_000;
+export const MAX_BUY_PRICE_MICROS = 990_000;
+export const DEFAULT_TARGET_SELL_PRICE_INCREASE_MICROS = 10_000;
+export const DEFAULT_TARGET_SELL_PRICE_MULTIPLIER_MICROS = 1_500_000;
+export const MAX_TARGET_SELL_PRICE_MICROS = 990_000;
+
+export type TargetSellPriceSettings = {
+  increaseMicros: number;
+  multiplierMicros: number;
+};
+
+export const DEFAULT_TARGET_SELL_PRICE_SETTINGS: TargetSellPriceSettings = {
+  increaseMicros: DEFAULT_TARGET_SELL_PRICE_INCREASE_MICROS,
+  multiplierMicros: DEFAULT_TARGET_SELL_PRICE_MULTIPLIER_MICROS,
+};
 
 export function decimalStringToMicros(value: string): number {
   const parsed = Number(value);
@@ -50,10 +65,33 @@ export function roundUpToTick(valueMicros: number, tickMicros: number): number {
 export function calculateFixedSellPriceMicros(
   buyPriceMicros: number,
   tickMicros: number,
+  settings: TargetSellPriceSettings = DEFAULT_TARGET_SELL_PRICE_SETTINGS,
 ): number {
-  const plusOneCent = buyPriceMicros + 10_000;
-  const fiftyPercentProfit = Math.ceil(buyPriceMicros * 1.5);
-  return roundUpToTick(Math.max(plusOneCent, fiftyPercentProfit), tickMicros);
+  if (
+    !Number.isSafeInteger(buyPriceMicros) ||
+    buyPriceMicros <= 0 ||
+    !Number.isSafeInteger(settings.increaseMicros) ||
+    settings.increaseMicros < 0 ||
+    !Number.isSafeInteger(settings.multiplierMicros) ||
+    settings.multiplierMicros < 0
+  ) {
+    throw new Error("Target sell-price settings must be non-negative safe integers");
+  }
+  const additiveTarget = BigInt(buyPriceMicros) + BigInt(settings.increaseMicros);
+  const multipliedNumerator =
+    BigInt(buyPriceMicros) * BigInt(settings.multiplierMicros);
+  const multipliedTarget =
+    (multipliedNumerator + BigInt(DECIMAL_SCALE - 1)) /
+    BigInt(DECIMAL_SCALE);
+  const rawTarget =
+    additiveTarget >= multipliedTarget ? additiveTarget : multipliedTarget;
+  if (rawTarget >= BigInt(MAX_TARGET_SELL_PRICE_MICROS)) {
+    return MAX_TARGET_SELL_PRICE_MICROS;
+  }
+  return Math.min(
+    roundUpToTick(Number(rawTarget), tickMicros),
+    MAX_TARGET_SELL_PRICE_MICROS,
+  );
 }
 
 export function bestBidLevel(bids: readonly BookLevel[]): BookLevel | null {
@@ -86,6 +124,8 @@ export function buildMonitoredCandidate(
   token: MarketToken,
   book: TokenOrderBook | null,
   orderBudgetMicros: number,
+  targetSellPriceSettings: TargetSellPriceSettings =
+    DEFAULT_TARGET_SELL_PRICE_SETTINGS,
 ): TradeCandidate {
   const minOrderSizeMicros =
     book?.minOrderSizeMicros ?? token.minOrderSizeMicros;
@@ -116,6 +156,7 @@ export function buildMonitoredCandidate(
         : calculateFixedSellPriceMicros(
             executableBuyPriceMicros,
             tickSizeMicros,
+            targetSellPriceSettings,
           ),
     orderSizeMicros,
     queueAheadSizeMicros: 0,

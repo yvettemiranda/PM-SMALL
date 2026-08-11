@@ -5,6 +5,7 @@ import type {
   TradeCandidate,
 } from "./types.js";
 import type { MarketEligibilitySettings } from "./market-eligibility.js";
+import type { TargetSellPriceSettings } from "./price.js";
 
 export type ExecutionMode = "TEST" | "LIVE";
 export type ImmediateBuyOutcome = "FILLED" | "PARTIAL" | "NO_FILL" | "BLOCKED";
@@ -27,6 +28,7 @@ export type ImmediateBuyIntent = {
   orderBudgetMicros: number;
   feeRateMicros: number;
   feeExponent: number;
+  targetSellPriceSettings?: TargetSellPriceSettings;
   eligibility: MarketEligibilitySettings;
 };
 

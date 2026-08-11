@@ -444,12 +444,36 @@ function renderCategories(preferences) {
     : "正在同步 Polymarket 首页栏目。";
 }
 
+function isTenthCent(value) {
+  return Number.isFinite(value) && Number.isInteger(value * 10);
+}
+
+function displayConfigNumber(value, fallback) {
+  return Number.isFinite(value) ? String(value) : fallback;
+}
+
+function numberFromInput(selector) {
+  const rawValue = $(selector).value.trim();
+  return rawValue === "" ? Number.NaN : Number(rawValue);
+}
+
+function renderTargetSellFormula() {
+  const increase = numberFromInput("#target-sell-increase");
+  const multiplier = numberFromInput("#target-sell-multiplier");
+  $("#target-sell-formula").textContent =
+    `目标卖价 = min（99¢，按市场 tick 向上取整［max（实际买入成交价 + ${displayConfigNumber(increase, "—")}¢，实际买入成交价 × ${displayConfigNumber(multiplier, "—")}）］）`;
+}
+
 function renderPreferences(preferences, strategy, force = false) {
   if (ui.configDirty && !force) return;
   $("#binary-market").checked = preferences.marketTypes.includes("BINARY");
   $("#ternary-market").checked = preferences.marketTypes.includes("TERNARY");
   $("#multi-market").checked = preferences.marketTypes.includes("MULTI");
+  $("#min-buy-price").value = String(preferences.minBuyPriceCents);
   $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
+  $("#target-sell-increase").value = String(preferences.targetSellPriceIncreaseCents);
+  $("#target-sell-multiplier").value = String(preferences.targetSellPriceMultiplier);
+  renderTargetSellFormula();
   $("#bid-ask-ratio").value = String(preferences.minBidAskRatioPercent);
   $("#bid-ask-ratio-value").textContent = String(preferences.minBidAskRatioPercent);
   $("#bid-ask-ratio").setAttribute("aria-valuetext", `至少${preferences.minBidAskRatioPercent}%`);
@@ -541,15 +565,30 @@ function collectConfigPayload() {
     throw new Error("请选择至少一个市场类别，或选择全部符合条件");
   }
 
-  const maxBuyPriceCents = Number($("#max-buy-price").value);
+  const minBuyPriceCents = numberFromInput("#min-buy-price");
+  const maxBuyPriceCents = numberFromInput("#max-buy-price");
+  const targetSellPriceIncreaseCents = numberFromInput("#target-sell-increase");
+  const targetSellPriceMultiplier = numberFromInput("#target-sell-multiplier");
   const minMarketDurationDays = Number($("#min-market-duration").value);
   const maxMarketDurationDays = Number($("#max-market-duration").value);
   const initialCapital = Number($("#initial-capital").value);
   const orderAmount = Number($("#order-amount").value);
   const minBidAskRatioPercent = Number($("#bid-ask-ratio").value);
   const maxMarketProgressPercent = Number($("#market-progress-filter").value);
-  if (!Number.isInteger(maxBuyPriceCents) || maxBuyPriceCents < 1 || maxBuyPriceCents > 3) {
-    throw new Error("最高买入价必须是1至3之间的整数美分");
+  if (!isTenthCent(minBuyPriceCents) || minBuyPriceCents < 0.1 || minBuyPriceCents > 99) {
+    throw new Error("最低买入价必须是0.1至99之间、按0.1递增的美分价格");
+  }
+  if (!isTenthCent(maxBuyPriceCents) || maxBuyPriceCents < 0.1 || maxBuyPriceCents > 99) {
+    throw new Error("最高买入价必须是0.1至99之间、按0.1递增的美分价格");
+  }
+  if (minBuyPriceCents > maxBuyPriceCents) {
+    throw new Error("最低买入价不能超过最高买入价");
+  }
+  if (!Number.isFinite(targetSellPriceIncreaseCents) || targetSellPriceIncreaseCents < 0 || targetSellPriceIncreaseCents > 99) {
+    throw new Error("目标卖价加价参数必须是0至99之间的美分价格");
+  }
+  if (!Number.isFinite(targetSellPriceMultiplier) || targetSellPriceMultiplier < 0) {
+    throw new Error("目标卖价倍数参数必须是大于等于0的数字");
   }
   if (!Number.isInteger(minMarketDurationDays) || minMarketDurationDays < 1 || minMarketDurationDays > 365) {
     throw new Error("最短市场总时长必须是1至365天之间的整数");
@@ -574,7 +613,10 @@ function collectConfigPayload() {
     marketTypes,
     allCategories,
     selectedCategoryIds,
+    minBuyPriceCents,
     maxBuyPriceCents,
+    targetSellPriceIncreaseCents,
+    targetSellPriceMultiplier,
     minMarketDurationDays,
     maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
@@ -590,7 +632,10 @@ function savedPreferencePayload(overrides = {}) {
     marketTypes: ui.preferences.marketTypes,
     allCategories: ui.preferences.allCategories,
     selectedCategoryIds: ui.preferences.selectedCategoryIds ?? ui.preferences.selectedCategories,
+    minBuyPriceCents: ui.preferences.minBuyPriceCents,
     maxBuyPriceCents: ui.preferences.maxBuyPriceCents,
+    targetSellPriceIncreaseCents: ui.preferences.targetSellPriceIncreaseCents,
+    targetSellPriceMultiplier: ui.preferences.targetSellPriceMultiplier,
     minMarketDurationDays: ui.preferences.minMarketDurationDays,
     maxMarketDurationDays: ui.preferences.maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
@@ -618,6 +663,7 @@ $("#config-close").addEventListener("click", () => {
 
 $("#config-form").addEventListener("input", () => {
   ui.configDirty = true;
+  renderTargetSellFormula();
 });
 
 $("#all-categories").addEventListener("change", () => {

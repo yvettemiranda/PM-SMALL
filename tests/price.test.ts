@@ -43,6 +43,18 @@ describe("price rules", () => {
     expect(calculateFixedSellPriceMicros(25_000, 2_500)).toBe(37_500);
   });
 
+  it("uses configured target parameters and caps the rounded target at 99 cents", () => {
+    const settings = {
+      increaseMicros: 1_250,
+      multiplierMicros: 1_812_345,
+    };
+
+    expect(calculateFixedSellPriceMicros(24_000, 1_000, settings)).toBe(44_000);
+    expect(calculateFixedSellPriceMicros(600_000, 10_000, settings)).toBe(
+      990_000,
+    );
+  });
+
   it("uses the executable best ask instead of posting a maker bid", () => {
     const book: TokenOrderBook = {
       tokenId: "token-1",

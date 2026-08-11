@@ -5,6 +5,7 @@ import {
   calculateOrderCostMicros,
   calculateOrderSizeMicros,
   DECIMAL_SCALE,
+  type TargetSellPriceSettings,
 } from "./price.js";
 import type { BookLevel, TradeCandidate } from "./types.js";
 
@@ -220,6 +221,7 @@ export function previewFakBuy(input: {
   tickSizeMicros: number;
   feeRateMicros: number;
   feeExponent: number;
+  targetSellPriceSettings?: TargetSellPriceSettings;
 }): FakBuyPreview | null {
   if (!Number.isSafeInteger(input.cycleBudgetMicros) || input.cycleBudgetMicros <= 0) {
     return null;
@@ -235,6 +237,7 @@ export function previewFakBuy(input: {
     const targetPriceMicros = calculateFixedSellPriceMicros(
       fill.priceMicros,
       input.tickSizeMicros,
+      input.targetSellPriceSettings,
     );
     const targetGrossProceedsMicros = calculateOrderCostMicros(
       targetPriceMicros,

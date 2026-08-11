@@ -71,6 +71,20 @@ describe("HTTP app", () => {
     expect(expandedDashboard.statusCode).toBe(200);
   });
 
+  it("renders configurable buy bounds and the complete target sell formula", async () => {
+    const { app } = makeTestApp([]);
+    const page = await app.inject({ method: "GET", url: "/" });
+
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('id="min-buy-price"');
+    expect(page.body).toContain('id="max-buy-price"');
+    expect(page.body).toContain('id="target-sell-increase"');
+    expect(page.body).toContain('id="target-sell-multiplier"');
+    expect(page.body).toMatch(/id="target-sell-increase"[\s\S]*?required/);
+    expect(page.body).toMatch(/id="target-sell-multiplier"[\s\S]*?required/);
+    expect(page.body).toContain("目标卖价 = min（99¢");
+  });
+
   it("promotes a monitored market immediately when its live ask reaches the cap", async () => {
     const monitored = makeCurrentCandidate({
       bestAskMicros: 40_000,
@@ -307,7 +321,10 @@ describe("HTTP app", () => {
         marketTypes: ["BINARY", "TERNARY"],
         allCategories: false,
         selectedCategoryIds: ["tag-tech"],
-        maxBuyPriceCents: 3,
+        minBuyPriceCents: 0.6,
+        maxBuyPriceCents: 99,
+        targetSellPriceIncreaseCents: 0.125,
+        targetSellPriceMultiplier: 1.812345,
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
         minMarketDurationDays: 7,
@@ -326,6 +343,10 @@ describe("HTTP app", () => {
         selectedCategoryIds: ["tag-tech"],
         selectedCategories: ["tag-tech"],
         candidateSortDirection: "DESC",
+        minBuyPriceCents: 0.6,
+        maxBuyPriceCents: 99,
+        targetSellPriceIncreaseCents: 0.125,
+        targetSellPriceMultiplier: 1.812345,
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
         minMarketDurationDays: 7,
