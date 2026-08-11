@@ -316,6 +316,7 @@ type PaperPositionViewRow = PaperPositionRow & {
 type PaperTradeFillRow = {
   sequence: number;
   order_id: string;
+  source_trade_id: string;
   token_id: string;
   condition_id: string;
   event_id: string;
@@ -342,6 +343,7 @@ type PaperTradeSettlementViewRow = PaperSettlementRow & {
 
 type PaperTradeFillGroup = {
   orderId: string;
+  batchId: string;
   tokenId: string;
   conditionId: string;
   eventId: string;
@@ -404,6 +406,33 @@ type TestFakBuyPlanningResult = TestFakBuyPreviewResult & {
 
 const FINAL_RESOLUTION_STATUSES = new Set(["resolved", "settled"]);
 const MAX_PAPER_TRADE_RECORDS = 100;
+
+function paperTradeFillBatchId(
+  row: Pick<
+    PaperTradeFillRow,
+    "order_id" | "source_trade_id"
+  >,
+): string {
+  const sourceTradeId = row.source_trade_id;
+  if (sourceTradeId.trim().length === 0) {
+    throw new Error(
+      `Paper trade fill is missing a source trade ID: ${row.order_id}`,
+    );
+  }
+  const isTestFakFill =
+    sourceTradeId.startsWith(`TEST-FAK-BUY:${row.order_id}:`) ||
+    sourceTradeId.startsWith(`TEST-FAK-SELL:${row.order_id}:`);
+  const finalSeparatorIndex = sourceTradeId.lastIndexOf(":");
+  const fillIndex = sourceTradeId.slice(finalSeparatorIndex + 1);
+  if (
+    isTestFakFill &&
+    finalSeparatorIndex >= 0 &&
+    /^\d+$/.test(fillIndex)
+  ) {
+    return sourceTradeId.slice(0, finalSeparatorIndex);
+  }
+  return sourceTradeId;
+}
 
 function normalizeFinalResolutionStatus(value: string): string {
   const normalized = value.trim().toLowerCase();
@@ -1198,7 +1227,7 @@ export class PaperDatabase {
     };
     const fillRows = this.database
       .prepare(
-        `SELECT pf.rowid AS sequence, pf.order_id, po.token_id,
+        `SELECT pf.rowid AS sequence, pf.order_id, pf.source_trade_id, po.token_id,
           po.condition_id, po.event_id, po.market_id, po.side,
           pf.price_micros, pf.size_micros, pf.net_size_micros,
           pf.fee_micros, pf.created_at,
@@ -1257,9 +1286,11 @@ export class PaperDatabase {
 
     const fillGroups = new Map<string, PaperTradeFillGroup>();
     for (const row of fillRows) {
-      const key = `${row.order_id}\u0000${row.created_at}`;
+      const batchId = paperTradeFillBatchId(row);
+      const key = `${row.order_id}\u0000${batchId}`;
       const group = fillGroups.get(key) ?? {
         orderId: row.order_id,
+        batchId,
         tokenId: row.token_id,
         conditionId: row.condition_id,
         eventId: row.event_id,
@@ -1419,7 +1450,7 @@ export class PaperDatabase {
         previous.costMicros += grossAmountMicros;
         positionByToken.set(group.tokenId, previous);
         records.push({
-          id: `trade:${group.orderId}:${group.occurredAt}`,
+          id: `trade:${group.orderId}:${group.batchId}`,
           type,
           tokenId: group.tokenId,
           conditionId: group.conditionId,
@@ -1458,7 +1489,7 @@ export class PaperDatabase {
       previous.costMicros -= releasedCostMicros;
       positionByToken.set(group.tokenId, previous);
       records.push({
-        id: `trade:${group.orderId}:${group.occurredAt}`,
+        id: `trade:${group.orderId}:${group.batchId}`,
         type: previous.quantityMicros === 0 ? "CLOSE" : "PARTIAL_CLOSE",
         tokenId: group.tokenId,
         conditionId: group.conditionId,
@@ -3249,6 +3280,9 @@ export class PaperDatabase {
     dataComplete: boolean;
     sellRealQueueAheadSizeMicros?: number;
   }): AppliedPaperTrade {
+    if (input.sourceTradeId.trim().length === 0) {
+      throw new Error("Paper source trade ID must not be empty");
+    }
     return this.transaction(() => {
       const order = this.getPaperOrder(input.orderId);
       if (!input.dataComplete || !["OPEN", "PARTIALLY_FILLED"].includes(order.status)) {

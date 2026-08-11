@@ -1013,6 +1013,25 @@ describe("PaperDatabase", () => {
     ).toHaveLength(1);
   });
 
+  it("rejects a blank source trade identity before mutating the ledger", () => {
+    const order = database.placePaperBuy(makeCandidate(), 100_000_000);
+
+    expect(() =>
+      database.applyPaperTrade({
+        orderId: order.id,
+        sourceTradeId: " ",
+        tradePriceMicros: 20_000,
+        tradeSizeMicros: 12_000_000,
+        dataComplete: true,
+      }),
+    ).toThrow(/source trade ID/i);
+    expect(database.getPaperOrder(order.id)).toMatchObject({
+      status: "OPEN",
+      filledSizeMicros: 0,
+    });
+    expect(database.listPaperPositions()).toEqual([]);
+  });
+
   it("creates a sell for each buy fill and closes buys after the first sell", () => {
     const buy = database.placePaperBuy(makeCandidate(), 100_000_000);
     const buyFill = database.applyPaperTrade({

@@ -16,6 +16,8 @@ import {
   type CandidateSortDirection,
 } from "../domain/trading-strategy.js";
 import {
+  DEFAULT_TARGET_SELL_PRICE_INCREASE_MICROS,
+  DEFAULT_TARGET_SELL_PRICE_MULTIPLIER_MICROS,
   MAX_BUY_PRICE_MICROS,
   MAX_TARGET_SELL_PRICE_MICROS,
   MIN_BUY_PRICE_MICROS,
@@ -43,6 +45,29 @@ export type PaperTradingPreferencesSnapshot = {
   maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
   updatedAt: string;
+};
+
+const RESET_TEST_INITIAL_CAPITAL_MICROS = 100_000_000;
+const RESET_TEST_PREFERENCES: Omit<
+  PaperTradingPreferencesSnapshot,
+  "updatedAt"
+> = {
+  marketTypes: ["BINARY", "TERNARY"],
+  allCategories: true,
+  selectedCategories: [],
+  candidateSortDirection: "ASC",
+  orderBudgetMicros: 1_000_000,
+  minBuyPriceMicros: MIN_BUY_PRICE_MICROS,
+  maxBuyPriceMicros: MAX_BUY_PRICE_MICROS,
+  targetSellPriceIncreaseMicros:
+    DEFAULT_TARGET_SELL_PRICE_INCREASE_MICROS,
+  targetSellPriceMultiplierMicros:
+    DEFAULT_TARGET_SELL_PRICE_MULTIPLIER_MICROS,
+  minBidAskRatioPercent: 50,
+  minMarketDurationDays: 1,
+  maxMarketDurationDays: 30,
+  maxMarketProgressPercent: 20,
+  candidatesSelectedByDefault: true,
 };
 
 type MarketFilterUpdate = Pick<
@@ -86,13 +111,11 @@ export type PaperMarketFilterUpdateResult = {
 export class PaperTradingPreferencesService {
   private snapshot: PaperTradingPreferencesSnapshot;
   private readonly defaults: Omit<PaperTradingPreferencesSnapshot, "updatedAt">;
-  private readonly defaultInitialCapitalMicros: number;
 
   public constructor(
     private readonly database: PaperDatabase,
     config: AppConfig,
   ) {
-    this.defaultInitialCapitalMicros = config.initialCapitalMicros;
     this.defaults = {
       marketTypes: ["BINARY", "TERNARY"],
       allCategories: true,
@@ -124,8 +147,8 @@ export class PaperTradingPreferencesService {
 
   public resetTestState(): void {
     const result = this.database.resetTestState(
-      this.defaultInitialCapitalMicros,
-      this.defaults,
+      RESET_TEST_INITIAL_CAPITAL_MICROS,
+      RESET_TEST_PREFERENCES,
     );
     this.snapshot = result.preferences;
   }

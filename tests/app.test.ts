@@ -599,14 +599,29 @@ describe("HTTP app", () => {
     });
     const { app, candidates, database } = makeTestApp([candidate], {
       marketStream: marketRuntime(),
+      config: {
+        ...testConfig,
+        initialCapitalMicros: 120_000_000,
+        totalBudgetMicros: 120_000_000,
+        orderBudgetMicros: 2_000_000,
+        minMarketDurationDays: 7,
+        maxMarketDurationDays: 60,
+        minBuyPriceMicros: 5_000,
+        maxBuyPriceMicros: 100_000,
+        targetSellPriceIncreaseMicros: 20_000,
+        targetSellPriceMultiplierMicros: 2_000_000,
+        minBidAskRatioPercent: 40,
+        maxMarketProgressPercent: 30,
+      },
     });
     await candidates.refresh();
     await app.inject({ method: "POST", url: "/api/test/start" });
-    await app.inject({
+    const buy = await app.inject({
       method: "POST",
       url: "/api/test/orders/buy",
       payload: { candidateId: candidate.candidateId },
     });
+    expect(buy.statusCode, buy.body).toBe(201);
 
     const recordsBeforeReset = await app.inject({
       method: "GET",
@@ -638,7 +653,7 @@ describe("HTTP app", () => {
         maxBuyPriceCents: 3,
         maxMarketDurationDays: 30,
         candidateSortDirection: "ASC",
-        initialCapital: 120,
+        initialCapital: 130,
         orderAmount: 1,
       },
     });
@@ -679,7 +694,17 @@ describe("HTTP app", () => {
         realizedPnl: "0",
         positionCost: "0",
       },
-      preferences: { orderAmount: "1", maxBuyPriceCents: 3 },
+      preferences: {
+        orderAmount: "1",
+        minBuyPriceCents: 0.1,
+        maxBuyPriceCents: 99,
+        targetSellPriceIncreaseCents: 1,
+        targetSellPriceMultiplier: 1.5,
+        minBidAskRatioPercent: 50,
+        minMarketDurationDays: 1,
+        maxMarketDurationDays: 30,
+        maxMarketProgressPercent: 20,
+      },
     });
     expect(database.listPaperOrders()).toEqual([]);
     expect(database.listPaperPositions()).toEqual([]);
@@ -876,6 +901,82 @@ describe("HTTP app", () => {
           marketQuestion: candidate.marketQuestion,
           direction: "YES",
         },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps separate sell executions from the same millisecond as separate trade records", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const candidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+        fixedSellPriceMicros: 30_000,
+      });
+      database.setStrategyStatus("RUNNING");
+      vi.setSystemTime(new Date("2026-08-11T08:15:00.000Z"));
+
+      expect(
+        database.executeTestFakBuy({
+          candidate,
+          book: {
+            tokenId: candidate.tokenId,
+            conditionId: candidate.conditionId,
+            bookVersion: "TRADE-RECORD-SAME-MS-BUY",
+            bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+            asks: [{ priceMicros: 20_000, sizeMicros: 20_000_000 }],
+            minOrderSizeMicros: 5_000_000,
+            tickSizeMicros: 10_000,
+            isNegativeRisk: false,
+          },
+          maxPriceMicros: 30_000,
+          orderBudgetMicros: 1_000_000,
+          eligibility: testEligibilitySettings(),
+          feeRateMicros: 0,
+          feeExponent: 1,
+        }).spentMicros,
+      ).toBe(400_000);
+      expect(
+        database.executeTestFakSells({
+          tokenId: candidate.tokenId,
+          bookVersion: "TRADE-RECORD-SAME-MS-SELL-1",
+          bids: [{ priceMicros: 30_000, sizeMicros: 5_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+        }).filledSizeMicros,
+      ).toBe(5_000_000);
+      expect(
+        database.executeTestFakSells({
+          tokenId: candidate.tokenId,
+          bookVersion: "TRADE-RECORD-SAME-MS-SELL-2",
+          bids: [{ priceMicros: 30_000, sizeMicros: 15_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+        }).filledSizeMicros,
+      ).toBe(15_000_000);
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ totalCount: 3 });
+      expect(
+        response.json().records.map((record: Record<string, unknown>) => ({
+          type: record.type,
+          quantity: record.quantity,
+        })),
+      ).toEqual([
+        { type: "CLOSE", quantity: "15" },
+        { type: "PARTIAL_CLOSE", quantity: "5" },
+        { type: "OPEN", quantity: "20" },
       ]);
     } finally {
       vi.useRealTimers();
@@ -1268,14 +1369,18 @@ describe("HTTP app", () => {
 
   function makeTestApp(
     scannedCandidates: TradeCandidate[],
-    options: { marketStream?: PaperMarketRuntime } = {},
+    options: {
+      marketStream?: PaperMarketRuntime;
+      config?: typeof testConfig;
+    } = {},
   ) {
+    const config = options.config ?? testConfig;
     const scanner: CandidateScanner = { scan: async () => scannedCandidates };
     const candidates = new CandidateService(scanner, 15_000);
-    const database = new PaperDatabase(":memory:", 100_000_000);
+    const database = new PaperDatabase(":memory:", config.initialCapitalMicros);
     const tradingPreferences = new PaperTradingPreferencesService(
       database,
-      testConfig,
+      config,
     );
     const eventOpportunities =
       options.marketStream === undefined
@@ -1284,11 +1389,11 @@ describe("HTTP app", () => {
             candidates,
             database,
             options.marketStream,
-            testConfig,
+            config,
             tradingPreferences,
           );
     const app = buildApp({
-      config: testConfig,
+      config,
       database,
       candidates,
       tradingPreferences,
