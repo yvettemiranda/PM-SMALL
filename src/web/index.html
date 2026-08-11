@@ -12,12 +12,15 @@
       <h1 class="sr-only">PM-SMALL TEST</h1>
 
       <header class="topbar">
-        <div class="mode-switch" role="group" aria-label="交易模式">
-          <button id="test-mode" type="button" aria-pressed="true">TEST</button>
-          <button id="live-mode" type="button" aria-pressed="false">LIVE</button>
-        </div>
+        <button
+          id="mode-toggle"
+          class="mode-toggle"
+          type="button"
+          data-mode="TEST"
+          aria-label="当前 TEST 模式，点击切换到 LIVE"
+        >TEST</button>
         <div class="topbar-actions">
-          <button id="run-toggle" class="button primary" type="button">开始TEST</button>
+          <button id="run-toggle" class="button primary" type="button">START</button>
           <button
             id="config-toggle"
             class="button secondary"
@@ -238,8 +241,10 @@
 
       <section id="portfolio" class="portfolio" aria-label="资金与持仓">
         <article><span>总资金</span><strong id="total-funds">—</strong></article>
-        <article><span>持仓实时价值</span><strong id="position-value">—</strong></article>
-        <article><span>持仓数</span><strong id="portfolio-position-count">—</strong></article>
+        <article><span>已实现</span><strong id="realized-pnl">—</strong></article>
+        <article><span>未实现</span><strong id="unrealized-pnl">—</strong></article>
+        <article><span>持仓价值</span><strong id="position-value">—</strong></article>
+        <article><span>单数</span><strong id="portfolio-position-count">—</strong></article>
       </section>
 
       <section class="panel">
@@ -273,7 +278,7 @@
             type="button"
             data-sort-toggle
             aria-label="当前按市场进度正序，点击切换为倒序"
-          ><span>进度</span><strong aria-hidden="true">↑</strong></button>
+          ><strong aria-hidden="true">↑</strong></button>
         </div>
 
         <div id="candidates" class="market-list" aria-live="polite"></div>

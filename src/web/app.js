@@ -4,6 +4,7 @@ const ui = {
   dashboard: null,
   preferences: null,
   strategyStatus: "STOPPED",
+  displayMode: "TEST",
   events: [],
   candidateCount: 0,
   displayCandidateCount: 0,
@@ -206,6 +207,8 @@ function currentPositions(positions = []) {
 
 function renderPortfolio(portfolio, positions = []) {
   setMoneyValue("#total-funds", portfolio?.totalFunds);
+  setMoneyValue("#realized-pnl", portfolio?.realizedPnl, true);
+  setMoneyValue("#unrealized-pnl", portfolio?.unrealizedPnl, true);
   setMoneyValue("#position-value", portfolio?.positionValue);
   const positionCount = currentPositions(positions).length;
   const count = $("#portfolio-position-count");
@@ -213,15 +216,38 @@ function renderPortfolio(portfolio, positions = []) {
   count.dataset.tone = "neutral";
 }
 
+function renderModeControl() {
+  const modeToggle = $("#mode-toggle");
+  const liveView = ui.displayMode === "LIVE";
+  modeToggle.textContent = ui.displayMode;
+  modeToggle.dataset.mode = ui.displayMode;
+  modeToggle.setAttribute(
+    "aria-label",
+    liveView
+      ? "当前 LIVE 视图（LIVE 未开放），点击切换到 TEST"
+      : "当前 TEST 模式，点击切换到 LIVE",
+  );
+  $("#live-lock").hidden = !liveView;
+}
+
 function renderRunControls() {
   const running = ui.strategyStatus === "RUNNING";
   const paused = ui.strategyStatus === "PAUSED";
+  const liveView = ui.displayMode === "LIVE";
   const runToggle = $("#run-toggle");
   if (!runToggle.classList.contains("is-pending")) {
-    runToggle.textContent = running ? "暂停TEST" : "开始TEST";
+    runToggle.textContent = !liveView && running ? "PAUSE" : "START";
   }
-  runToggle.disabled = ui.controlPending;
-  runToggle.setAttribute("aria-label", running ? "暂停TEST自动买入" : "开始TEST自动交易");
+  runToggle.disabled = ui.controlPending || liveView;
+  runToggle.title = liveView ? "LIVE 尚未开放；请切换到 TEST" : "";
+  runToggle.setAttribute(
+    "aria-label",
+    liveView
+      ? "LIVE 尚未开放，无法启动"
+      : running
+        ? "暂停 TEST 自动买入"
+        : "开始 TEST 自动交易",
+  );
 
   const capital = $("#initial-capital");
   const capitalEditable = ui.dashboard?.capitalEditable === true;
@@ -242,7 +268,7 @@ function renderPositions(positions = []) {
   const visible = ui.positionsExpanded
     ? current
     : current.slice(0, POSITION_PREVIEW_LIMIT);
-  $("#position-count").textContent = `${formatCount(current.length)}个`;
+  $("#position-count").textContent = `${formatCount(current.length)}单`;
   const controls = $("#position-list-controls");
   const toggle = $("#toggle-positions");
   controls.hidden = current.length <= POSITION_PREVIEW_LIMIT;
@@ -732,6 +758,10 @@ $("#config-form").addEventListener("submit", async (event) => {
 });
 
 $("#run-toggle").addEventListener("click", async () => {
+  if (ui.displayMode === "LIVE") {
+    showMessage("LIVE仍然锁定，请切换到TEST", true);
+    return;
+  }
   const wasRunning = ui.strategyStatus === "RUNNING";
   const button = $("#run-toggle");
   ui.controlPending = true;
@@ -783,13 +813,15 @@ $("#reset-test").addEventListener("click", async () => {
   }
 });
 
-$("#live-mode").addEventListener("click", () => {
-  $("#live-lock").hidden = false;
-  showMessage("LIVE仍然锁定，当前继续使用TEST");
-});
-
-$("#test-mode").addEventListener("click", () => {
-  $("#live-lock").hidden = true;
+$("#mode-toggle").addEventListener("click", () => {
+  ui.displayMode = ui.displayMode === "TEST" ? "LIVE" : "TEST";
+  renderModeControl();
+  renderRunControls();
+  showMessage(
+    ui.displayMode === "LIVE"
+      ? "已切换到LIVE视图；LIVE仍然锁定，不能启动"
+      : "已切换到TEST",
+  );
 });
 
 $("#sort-toggle").addEventListener("click", async () => {
@@ -826,6 +858,8 @@ $("#load-more").addEventListener("click", async () => {
   await loadDashboard();
 });
 
+renderModeControl();
+renderRunControls();
 void loadDashboard();
 window.setInterval(() => {
   void loadDashboard({ silent: true });
