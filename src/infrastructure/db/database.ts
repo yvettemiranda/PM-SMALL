@@ -142,6 +142,38 @@ export type PaperPositionView = PaperPosition & {
   endsAt: string | null;
 };
 
+export type PaperTradeRecordType =
+  | "OPEN"
+  | "ADD"
+  | "PARTIAL_CLOSE"
+  | "CLOSE"
+  | "SETTLEMENT";
+
+export type PaperTradeRecord = {
+  id: string;
+  type: PaperTradeRecordType;
+  tokenId: string | null;
+  conditionId: string;
+  eventId: string;
+  eventSlug: string | null;
+  eventTitle: string | null;
+  marketId: string;
+  marketQuestion: string | null;
+  direction: "YES" | "NO" | null;
+  quantityMicros: number | null;
+  priceMicros: number | null;
+  amountMicros: number;
+  realizedPnlMicros: number | null;
+  settlementOutcome: PaperSettlementOutcome | null;
+  winningOutcome: string | null;
+  occurredAt: string;
+};
+
+export type PaperTradeRecordPage = {
+  records: PaperTradeRecord[];
+  totalCount: number;
+};
+
 export type PaperEventLockState = "ACTIVE" | "LEGACY_CONFLICT";
 
 export type PaperEventLock = {
@@ -281,6 +313,77 @@ type PaperPositionViewRow = PaperPositionRow & {
   ends_at: string | null;
 };
 
+type PaperTradeFillRow = {
+  sequence: number;
+  order_id: string;
+  token_id: string;
+  condition_id: string;
+  event_id: string;
+  market_id: string;
+  side: "BUY" | "SELL";
+  price_micros: number;
+  size_micros: number;
+  net_size_micros: number;
+  fee_micros: number;
+  created_at: string;
+  event_slug: string | null;
+  event_title: string | null;
+  market_question: string | null;
+  direction: "YES" | "NO" | null;
+};
+
+type PaperTradeSettlementViewRow = PaperSettlementRow & {
+  sequence: number;
+  settled_at: string;
+  event_slug: string | null;
+  event_title: string | null;
+  market_question: string | null;
+};
+
+type PaperTradeFillGroup = {
+  orderId: string;
+  tokenId: string;
+  conditionId: string;
+  eventId: string;
+  eventSlug: string | null;
+  eventTitle: string | null;
+  marketId: string;
+  marketQuestion: string | null;
+  direction: "YES" | "NO" | null;
+  side: "BUY" | "SELL";
+  occurredAt: string;
+  sequence: number;
+  fills: Array<{
+    priceMicros: number;
+    sizeMicros: number;
+    netSizeMicros: number;
+    feeMicros: number;
+  }>;
+};
+
+type PaperTradePositionState = {
+  tokenId: string;
+  conditionId: string;
+  eventId: string;
+  eventSlug: string | null;
+  eventTitle: string | null;
+  marketId: string;
+  marketQuestion: string | null;
+  direction: "YES" | "NO" | null;
+  quantityMicros: number;
+  costMicros: number;
+};
+
+type PaperTradeRecordCache = {
+  lastFillSequence: number;
+  lastSettlementUpdateAt: string | null;
+  latestOccurredAt: string | null;
+  seenSettlementConditionIds: Set<string>;
+  positionByToken: Map<string, PaperTradePositionState>;
+  recentRecords: PaperTradeRecord[];
+  totalCount: number;
+};
+
 type PaperEventLockRow = {
   event_id: string;
   active_token_id: string | null;
@@ -300,6 +403,7 @@ type TestFakBuyPlanningResult = TestFakBuyPreviewResult & {
 };
 
 const FINAL_RESOLUTION_STATUSES = new Set(["resolved", "settled"]);
+const MAX_PAPER_TRADE_RECORDS = 100;
 
 function normalizeFinalResolutionStatus(value: string): string {
   const normalized = value.trim().toLowerCase();
@@ -480,6 +584,7 @@ function parseCategoryJson(value: string): string[] {
 export class PaperDatabase {
   private readonly database: Database.Database;
   private paperValidationBlocked = false;
+  private paperTradeRecordCache: PaperTradeRecordCache | null = null;
 
   public constructor(
     databasePath: string,
@@ -779,6 +884,7 @@ export class PaperDatabase {
       return { strategy: this.getStrategyState(), preferences };
     });
     this.paperValidationBlocked = false;
+    this.paperTradeRecordCache = null;
     return result;
   }
 
@@ -1069,6 +1175,341 @@ export class PaperDatabase {
       )
       .all(limit) as unknown as PaperSettlementRow[];
     return rows.map(rowToPaperSettlement);
+  }
+
+  public listPaperTradeRecords(limit = 20): PaperTradeRecordPage {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_PAPER_TRADE_RECORDS
+    ) {
+      throw new Error("Paper trade-record limit must be an integer from 1 to 100");
+    }
+    // Reconstruct the ledger once, then let the expanded UI poll only new Fill
+    // rowids and newly settled Conditions. Backdated activity rebuilds safely.
+    const cache: PaperTradeRecordCache = this.paperTradeRecordCache ?? {
+      lastFillSequence: 0,
+      lastSettlementUpdateAt: null,
+      latestOccurredAt: null,
+      seenSettlementConditionIds: new Set<string>(),
+      positionByToken: new Map<string, PaperTradePositionState>(),
+      recentRecords: [],
+      totalCount: 0,
+    };
+    const fillRows = this.database
+      .prepare(
+        `SELECT pf.rowid AS sequence, pf.order_id, po.token_id,
+          po.condition_id, po.event_id, po.market_id, po.side,
+          pf.price_micros, pf.size_micros, pf.net_size_micros,
+          pf.fee_micros, pf.created_at,
+          pm.event_slug, pm.event_title, pm.market_question, pm.direction
+        FROM paper_fills pf
+        JOIN paper_orders po ON po.id = pf.order_id
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = po.token_id
+        WHERE pf.rowid > ?
+        ORDER BY pf.created_at, pf.rowid`,
+      )
+      .all(cache.lastFillSequence) as unknown as PaperTradeFillRow[];
+    const settlementCandidates = this.database
+      .prepare(
+        `SELECT ps.rowid AS sequence, ps.condition_id, ps.market_id,
+          ps.event_id, ps.status, ps.resolution_status, ps.winning_token_id,
+          ps.winning_outcome, ps.redemption_status, ps.outcome,
+          ps.position_cost_micros, ps.payout_micros,
+          ps.realized_pnl_micros, ps.attempt_count, ps.last_error,
+          ps.settled_at, ps.redeemed_at, ps.created_at, ps.updated_at,
+          pm.event_slug, pm.event_title, pm.market_question
+        FROM paper_settlements ps
+        LEFT JOIN paper_market_metadata pm ON pm.token_id = (
+          SELECT pm2.token_id FROM paper_market_metadata pm2
+          WHERE pm2.market_id = ps.market_id
+          ORDER BY pm2.token_id LIMIT 1
+        )
+        WHERE ps.status = 'SETTLED'
+          AND ps.settled_at IS NOT NULL
+          AND (? IS NULL OR ps.updated_at >= ?)
+          AND (ps.position_cost_micros != 0 OR ps.payout_micros != 0
+            OR ps.realized_pnl_micros != 0 OR ps.outcome != 'NO_POSITION')
+        ORDER BY ps.settled_at, ps.rowid`,
+      )
+      .all(
+        cache.lastSettlementUpdateAt,
+        cache.lastSettlementUpdateAt,
+      ) as unknown as PaperTradeSettlementViewRow[];
+    const settlementRows = settlementCandidates.filter(
+      (settlement) =>
+        !cache.seenSettlementConditionIds.has(settlement.condition_id),
+    );
+
+    const earliestNewActivityAt = [...fillRows, ...settlementRows]
+      .map((row) =>
+        "order_id" in row ? row.created_at : row.settled_at,
+      )
+      .sort()[0];
+    if (
+      cache.latestOccurredAt !== null &&
+      earliestNewActivityAt !== undefined &&
+      earliestNewActivityAt <= cache.latestOccurredAt
+    ) {
+      this.paperTradeRecordCache = null;
+      return this.listPaperTradeRecords(limit);
+    }
+
+    const fillGroups = new Map<string, PaperTradeFillGroup>();
+    for (const row of fillRows) {
+      const key = `${row.order_id}\u0000${row.created_at}`;
+      const group = fillGroups.get(key) ?? {
+        orderId: row.order_id,
+        tokenId: row.token_id,
+        conditionId: row.condition_id,
+        eventId: row.event_id,
+        eventSlug: row.event_slug,
+        eventTitle: row.event_title,
+        marketId: row.market_id,
+        marketQuestion: row.market_question,
+        direction: row.direction,
+        side: row.side,
+        occurredAt: row.created_at,
+        sequence: row.sequence,
+        fills: [],
+      };
+      group.sequence = Math.min(group.sequence, row.sequence);
+      group.fills.push({
+        priceMicros: row.price_micros,
+        sizeMicros: row.size_micros,
+        netSizeMicros: row.net_size_micros,
+        feeMicros: row.fee_micros,
+      });
+      fillGroups.set(key, group);
+    }
+
+    const activities: Array<
+      | {
+          kind: "TRADE";
+          occurredAt: string;
+          sequence: number;
+          group: PaperTradeFillGroup;
+        }
+      | {
+          kind: "SETTLEMENT";
+          occurredAt: string;
+          sequence: number;
+          settlement: PaperTradeSettlementViewRow;
+        }
+    > = [
+      ...Array.from(fillGroups.values(), (group) => ({
+        kind: "TRADE" as const,
+        occurredAt: group.occurredAt,
+        sequence: group.sequence,
+        group,
+      })),
+      ...settlementRows.map((settlement) => ({
+        kind: "SETTLEMENT" as const,
+        occurredAt: settlement.settled_at,
+        sequence: settlement.sequence,
+        settlement,
+      })),
+    ].sort(
+      (left, right) =>
+        left.occurredAt.localeCompare(right.occurredAt) ||
+        (left.kind === right.kind
+          ? left.sequence - right.sequence
+          : left.kind === "TRADE"
+            ? -1
+            : 1),
+    );
+
+    const positionByToken = cache.positionByToken;
+    const records: PaperTradeRecord[] = [];
+    for (const activity of activities) {
+      if (activity.kind === "SETTLEMENT") {
+        const settlement = activity.settlement;
+        const settledPositions = Array.from(positionByToken.values()).filter(
+          (position) =>
+            position.conditionId === settlement.condition_id &&
+            position.quantityMicros > 0,
+        );
+        const representative = settledPositions[0];
+        records.push({
+          id: `settlement:${settlement.condition_id}`,
+          type: "SETTLEMENT",
+          tokenId:
+            settledPositions.length === 1 ? representative?.tokenId ?? null : null,
+          conditionId: settlement.condition_id,
+          eventId: settlement.event_id,
+          eventSlug: representative?.eventSlug ?? settlement.event_slug,
+          eventTitle: representative?.eventTitle ?? settlement.event_title,
+          marketId: settlement.market_id,
+          marketQuestion:
+            representative?.marketQuestion ?? settlement.market_question,
+          direction:
+            settledPositions.length === 1
+              ? representative?.direction ?? null
+              : null,
+          quantityMicros: null,
+          priceMicros: null,
+          amountMicros: settlement.payout_micros,
+          realizedPnlMicros: settlement.realized_pnl_micros,
+          settlementOutcome: settlement.outcome,
+          winningOutcome: settlement.winning_outcome,
+          occurredAt: activity.occurredAt,
+        });
+        for (const position of settledPositions) {
+          position.quantityMicros = 0;
+          position.costMicros = 0;
+        }
+        continue;
+      }
+
+      const group = activity.group;
+      const grossSizeMicros = group.fills.reduce(
+        (total, fill) => total + fill.sizeMicros,
+        0,
+      );
+      const quantityMicros = group.fills.reduce(
+        (total, fill) =>
+          total + (group.side === "BUY" ? fill.netSizeMicros : fill.sizeMicros),
+        0,
+      );
+      const grossAmountMicros = group.fills.reduce(
+        (total, fill) =>
+          total + calculateOrderCostMicros(fill.priceMicros, fill.sizeMicros),
+        0,
+      );
+      const feeMicros = group.fills.reduce(
+        (total, fill) => total + fill.feeMicros,
+        0,
+      );
+      if (grossSizeMicros <= 0 || quantityMicros <= 0) {
+        throw new Error(
+          `Paper trade record has an invalid fill group: ${group.orderId}`,
+        );
+      }
+      const weightedPriceNumerator = group.fills.reduce(
+        (total, fill) =>
+          total + BigInt(fill.priceMicros) * BigInt(fill.sizeMicros),
+        0n,
+      );
+      const priceMicros = Number(
+        weightedPriceNumerator / BigInt(grossSizeMicros),
+      );
+      const previous = positionByToken.get(group.tokenId) ?? {
+        tokenId: group.tokenId,
+        conditionId: group.conditionId,
+        eventId: group.eventId,
+        eventSlug: group.eventSlug,
+        eventTitle: group.eventTitle,
+        marketId: group.marketId,
+        marketQuestion: group.marketQuestion,
+        direction: group.direction,
+        quantityMicros: 0,
+        costMicros: 0,
+      };
+      if (
+        previous.quantityMicros > 0 &&
+        previous.conditionId !== group.conditionId
+      ) {
+        throw new Error(`Paper trade record changes condition identity: ${group.tokenId}`);
+      }
+
+      if (group.side === "BUY") {
+        const type: PaperTradeRecordType =
+          previous.quantityMicros > 0 ? "ADD" : "OPEN";
+        previous.quantityMicros += quantityMicros;
+        previous.costMicros += grossAmountMicros;
+        positionByToken.set(group.tokenId, previous);
+        records.push({
+          id: `trade:${group.orderId}:${group.occurredAt}`,
+          type,
+          tokenId: group.tokenId,
+          conditionId: group.conditionId,
+          eventId: group.eventId,
+          eventSlug: group.eventSlug,
+          eventTitle: group.eventTitle,
+          marketId: group.marketId,
+          marketQuestion: group.marketQuestion,
+          direction: group.direction,
+          quantityMicros,
+          priceMicros,
+          amountMicros: grossAmountMicros,
+          realizedPnlMicros: null,
+          settlementOutcome: null,
+          winningOutcome: null,
+          occurredAt: group.occurredAt,
+        });
+        continue;
+      }
+
+      if (previous.quantityMicros < quantityMicros) {
+        throw new Error(
+          `Paper trade record sell exceeds position history: ${group.tokenId}`,
+        );
+      }
+      const releasedCostMicros =
+        quantityMicros === previous.quantityMicros
+          ? previous.costMicros
+          : Number(
+              (BigInt(previous.costMicros) * BigInt(quantityMicros)) /
+                BigInt(previous.quantityMicros),
+            );
+      const amountMicros = Math.max(0, grossAmountMicros - feeMicros);
+      const realizedPnlMicros = amountMicros - releasedCostMicros;
+      previous.quantityMicros -= quantityMicros;
+      previous.costMicros -= releasedCostMicros;
+      positionByToken.set(group.tokenId, previous);
+      records.push({
+        id: `trade:${group.orderId}:${group.occurredAt}`,
+        type: previous.quantityMicros === 0 ? "CLOSE" : "PARTIAL_CLOSE",
+        tokenId: group.tokenId,
+        conditionId: group.conditionId,
+        eventId: group.eventId,
+        eventSlug: group.eventSlug,
+        eventTitle: group.eventTitle,
+        marketId: group.marketId,
+        marketQuestion: group.marketQuestion,
+        direction: group.direction,
+        quantityMicros,
+        priceMicros,
+        amountMicros,
+        realizedPnlMicros,
+        settlementOutcome: null,
+        winningOutcome: null,
+        occurredAt: group.occurredAt,
+      });
+    }
+
+    cache.lastFillSequence = fillRows.reduce(
+      (latest, fill) => Math.max(latest, fill.sequence),
+      cache.lastFillSequence,
+    );
+    for (const settlement of settlementCandidates) {
+      if (
+        cache.lastSettlementUpdateAt === null ||
+        settlement.updated_at > cache.lastSettlementUpdateAt
+      ) {
+        cache.lastSettlementUpdateAt = settlement.updated_at;
+      }
+    }
+    for (const settlement of settlementRows) {
+      cache.seenSettlementConditionIds.add(settlement.condition_id);
+    }
+    cache.totalCount += records.length;
+    cache.recentRecords.push(...records);
+    if (cache.recentRecords.length > MAX_PAPER_TRADE_RECORDS) {
+      cache.recentRecords.splice(
+        0,
+        cache.recentRecords.length - MAX_PAPER_TRADE_RECORDS,
+      );
+    }
+    const latestRecord = cache.recentRecords.at(-1);
+    if (latestRecord !== undefined) {
+      cache.latestOccurredAt = latestRecord.occurredAt;
+    }
+    this.paperTradeRecordCache = cache;
+    return {
+      records: cache.recentRecords.slice(-limit).reverse(),
+      totalCount: cache.totalCount,
+    };
   }
 
   public getPaperSettlement(conditionId: string): PaperSettlement | null {

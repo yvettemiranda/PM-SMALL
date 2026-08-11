@@ -17,6 +17,7 @@ import type {
   PaperEventLock,
   PaperPositionView,
   PaperSettlement,
+  PaperTradeRecord,
   StrategyState,
 } from "./infrastructure/db/database.js";
 import type { LiveExecutorDisabled } from "./infrastructure/execution/live-executor-disabled.js";
@@ -132,6 +133,26 @@ function serializeSettlement(settlement: PaperSettlement) {
     positionCost: microsToDecimalString(settlement.positionCostMicros),
     payout: microsToDecimalString(settlement.payoutMicros),
     realizedPnl: microsToDecimalString(settlement.realizedPnlMicros),
+  };
+}
+
+function serializeTradeRecord(record: PaperTradeRecord) {
+  return {
+    ...record,
+    marketUrl: polymarketEventUrl(record.eventSlug, record.eventId),
+    quantity:
+      record.quantityMicros === null
+        ? null
+        : microsToDecimalString(record.quantityMicros),
+    price:
+      record.priceMicros === null
+        ? null
+        : microsToDecimalString(record.priceMicros),
+    amount: microsToDecimalString(record.amountMicros),
+    realizedPnl:
+      record.realizedPnlMicros === null
+        ? null
+        : microsToDecimalString(record.realizedPnlMicros),
   };
 }
 
@@ -1005,6 +1026,17 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
       .listActivePaperOrders()
       .filter((order) => order.side === "BUY").length,
   }));
+
+  app.get("/api/test/trade-records", async (request) => {
+    const query = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse(request.query);
+    const page = dependencies.database.listPaperTradeRecords(query.limit);
+    return {
+      totalCount: page.totalCount,
+      records: page.records.map(serializeTradeRecord),
+    };
+  });
 
   app.get("/api/test/positions", async () => ({
     positions: serializePositionViews(

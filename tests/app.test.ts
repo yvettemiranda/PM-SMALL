@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { CandidateScanner } from "../src/domain/market-scanner.js";
 import type { TokenOrderBook, TradeCandidate } from "../src/domain/types.js";
@@ -608,6 +608,15 @@ describe("HTTP app", () => {
       payload: { candidateId: candidate.candidateId },
     });
 
+    const recordsBeforeReset = await app.inject({
+      method: "GET",
+      url: "/api/test/trade-records?limit=20",
+    });
+    expect(recordsBeforeReset.json()).toMatchObject({
+      totalCount: 1,
+      records: [{ type: "OPEN" }],
+    });
+
     const whileRunning = await app.inject({
       method: "POST",
       url: "/api/test/reset",
@@ -674,6 +683,11 @@ describe("HTTP app", () => {
     });
     expect(database.listPaperOrders()).toEqual([]);
     expect(database.listPaperPositions()).toEqual([]);
+    const recordsAfterReset = await app.inject({
+      method: "GET",
+      url: "/api/test/trade-records?limit=20",
+    });
+    expect(recordsAfterReset.json()).toEqual({ totalCount: 0, records: [] });
   });
 
   it("serves the compact single-column TEST UI without per-market participation controls", async () => {
@@ -702,7 +716,18 @@ describe("HTTP app", () => {
     expect(page.body).toContain('id="realized-pnl"');
     expect(page.body).toContain('id="unrealized-pnl"');
     expect(page.body).toContain("当前持仓");
+    expect(page.body).toContain("交易记录");
     expect(page.body).toContain("扫描事件");
+    expect(page.body).toMatch(
+      /id="trade-records-toggle"[^>]*aria-expanded="false"[^>]*aria-controls="trade-records-content"/,
+    );
+    expect(page.body).toMatch(/id="trade-records-content"[^>]*hidden/);
+    expect(page.body.indexOf("当前持仓")).toBeLessThan(
+      page.body.indexOf("交易记录"),
+    );
+    expect(page.body.indexOf("交易记录")).toBeLessThan(
+      page.body.indexOf("扫描事件"),
+    );
     expect(page.body).toContain('id="scan-refresh-state"');
     expect(page.body).toContain('id="position-list-controls"');
     expect(page.body).toContain('id="toggle-positions"');
@@ -722,6 +747,472 @@ describe("HTTP app", () => {
     expect(page.body).not.toContain("开始新一轮");
     expect(page.body).not.toContain('id="new-cycle"');
     expect(page.body).not.toContain("PAPER");
+  });
+
+  it("returns recent TEST trade records as order-level position activities", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const candidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+        fixedSellPriceMicros: 30_000,
+      });
+      database.setStrategyStatus("RUNNING");
+      const executeBuy = (bookVersion: string) =>
+        database.executeTestFakBuy({
+          candidate,
+          book: {
+            tokenId: candidate.tokenId,
+            conditionId: candidate.conditionId,
+            bookVersion,
+            bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+            asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+            minOrderSizeMicros: 5_000_000,
+            tickSizeMicros: 10_000,
+            isNegativeRisk: false,
+          },
+          maxPriceMicros: 30_000,
+          orderBudgetMicros: 1_000_000,
+          eligibility: testEligibilitySettings(),
+          feeRateMicros: 0,
+          feeExponent: 1,
+        });
+
+      vi.setSystemTime(new Date("2026-08-11T08:00:00.000Z"));
+      expect(executeBuy("TRADE-RECORD-BUY-1").spentMicros).toBe(200_000);
+      vi.setSystemTime(new Date("2026-08-11T08:01:00.000Z"));
+      expect(executeBuy("TRADE-RECORD-BUY-2").spentMicros).toBe(200_000);
+      vi.setSystemTime(new Date("2026-08-11T08:02:00.000Z"));
+      expect(
+        database.executeTestFakSells({
+          tokenId: candidate.tokenId,
+          bookVersion: "TRADE-RECORD-SELL-1",
+          bids: [{ priceMicros: 30_000, sizeMicros: 5_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+        }).filledSizeMicros,
+      ).toBe(5_000_000);
+      vi.setSystemTime(new Date("2026-08-11T08:03:00.000Z"));
+      expect(
+        database.executeTestFakSells({
+          tokenId: candidate.tokenId,
+          bookVersion: "TRADE-RECORD-SELL-2",
+          bids: [{ priceMicros: 30_000, sizeMicros: 15_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+        }).filledSizeMicros,
+      ).toBe(15_000_000);
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ totalCount: 5 });
+      expect(
+        response.json().records.map((record: Record<string, unknown>) => ({
+          type: record.type,
+          quantity: record.quantity,
+          price: record.price,
+          amount: record.amount,
+          realizedPnl: record.realizedPnl,
+          eventTitle: record.eventTitle,
+          marketQuestion: record.marketQuestion,
+          direction: record.direction,
+        })),
+      ).toEqual([
+        {
+          type: "CLOSE",
+          quantity: "10",
+          price: "0.03",
+          amount: "0.3",
+          realizedPnl: "0.1",
+          eventTitle: candidate.eventTitle,
+          marketQuestion: candidate.marketQuestion,
+          direction: "YES",
+        },
+        {
+          type: "PARTIAL_CLOSE",
+          quantity: "5",
+          price: "0.03",
+          amount: "0.15",
+          realizedPnl: "0.05",
+          eventTitle: candidate.eventTitle,
+          marketQuestion: candidate.marketQuestion,
+          direction: "YES",
+        },
+        {
+          type: "PARTIAL_CLOSE",
+          quantity: "5",
+          price: "0.03",
+          amount: "0.15",
+          realizedPnl: "0.05",
+          eventTitle: candidate.eventTitle,
+          marketQuestion: candidate.marketQuestion,
+          direction: "YES",
+        },
+        {
+          type: "ADD",
+          quantity: "10",
+          price: "0.02",
+          amount: "0.2",
+          realizedPnl: null,
+          eventTitle: candidate.eventTitle,
+          marketQuestion: candidate.marketQuestion,
+          direction: "YES",
+        },
+        {
+          type: "OPEN",
+          quantity: "10",
+          price: "0.02",
+          amount: "0.2",
+          realizedPnl: null,
+          eventTitle: candidate.eventTitle,
+          marketQuestion: candidate.marketQuestion,
+          direction: "YES",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("combines one TEST order's multi-level fills into one trade record", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const candidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+      });
+      database.setStrategyStatus("RUNNING");
+      vi.setSystemTime(new Date("2026-08-11T08:30:00.000Z"));
+
+      const result = database.executeTestFakBuy({
+        candidate,
+        book: {
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: "TRADE-RECORD-MULTI-LEVEL-BUY",
+          bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+          asks: [
+            { priceMicros: 20_000, sizeMicros: 5_000_000 },
+            { priceMicros: 30_000, sizeMicros: 5_000_000 },
+          ],
+          minOrderSizeMicros: 5_000_000,
+          tickSizeMicros: 10_000,
+          isNegativeRisk: false,
+        },
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+      expect(result.spentMicros).toBe(250_000);
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        totalCount: 1,
+        records: [
+          {
+            type: "OPEN",
+            quantity: "10",
+            price: "0.025",
+            amount: "0.25",
+            occurredAt: "2026-08-11T08:30:00.000Z",
+          },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes cached trade records with fee-adjusted quantities and proceeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const candidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+        fixedSellPriceMicros: 30_000,
+      });
+      database.setStrategyStatus("RUNNING");
+      vi.setSystemTime(new Date("2026-08-11T08:40:00.000Z"));
+
+      const buy = database.executeTestFakBuy({
+        candidate,
+        book: {
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: "TRADE-RECORD-FEE-BUY",
+          bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+          asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          tickSizeMicros: 10_000,
+          isNegativeRisk: false,
+        },
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 50_000,
+        feeExponent: 1,
+      });
+      expect(buy).toMatchObject({
+        spentMicros: 200_000,
+        feeMicros: 9_800,
+        createdSellOrders: [{ originalSizeMicros: 9_510_000 }],
+      });
+
+      const afterBuy = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+      expect(afterBuy.json()).toMatchObject({
+        totalCount: 1,
+        records: [
+          {
+            type: "OPEN",
+            quantity: "9.51",
+            amount: "0.2",
+            realizedPnl: null,
+          },
+        ],
+      });
+
+      vi.setSystemTime(new Date("2026-08-11T08:41:00.000Z"));
+      const sell = database.executeTestFakSells({
+        tokenId: candidate.tokenId,
+        bookVersion: "TRADE-RECORD-FEE-SELL",
+        bids: [{ priceMicros: 30_000, sizeMicros: 9_510_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 50_000,
+        feeExponent: 1,
+      });
+      expect(sell).toMatchObject({
+        filledSizeMicros: 9_510_000,
+        grossProceedsMicros: 285_300,
+        feeMicros: 13_838,
+        netProceedsMicros: 271_462,
+      });
+
+      const afterSell = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+      expect(afterSell.json()).toMatchObject({
+        totalCount: 2,
+        records: [
+          {
+            type: "CLOSE",
+            quantity: "9.51",
+            amount: "0.271462",
+            realizedPnl: "0.071462",
+          },
+          { type: "OPEN", quantity: "9.51", amount: "0.2" },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("includes completed position settlements in recent TEST trade records", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const candidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+      });
+      database.setStrategyStatus("RUNNING");
+      vi.setSystemTime(new Date("2026-08-11T09:00:00.000Z"));
+      database.executeTestFakBuy({
+        candidate,
+        book: {
+          tokenId: candidate.tokenId,
+          conditionId: candidate.conditionId,
+          bookVersion: "TRADE-RECORD-SETTLEMENT-BUY",
+          bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+          asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          tickSizeMicros: 10_000,
+          isNegativeRisk: false,
+        },
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+      });
+      const beforeSettlement = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+      expect(beforeSettlement.json()).toMatchObject({
+        totalCount: 1,
+        records: [{ type: "OPEN", amount: "0.2" }],
+      });
+      database.applyPaperSettlement({
+        target: {
+          conditionId: candidate.conditionId,
+          marketId: candidate.marketId,
+          eventId: candidate.eventId,
+        },
+        closed: true,
+        resolutionStatus: "resolved",
+        winningTokenId: candidate.tokenId,
+        winningOutcome: "Yes",
+        now: new Date("2026-08-11T09:01:00.000Z"),
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        totalCount: 2,
+        records: [
+          {
+            type: "SETTLEMENT",
+            tokenId: candidate.tokenId,
+            direction: "YES",
+            amount: "10",
+            realizedPnl: "9.8",
+            settlementOutcome: "WIN",
+            winningOutcome: "Yes",
+            occurredAt: "2026-08-11T09:01:00.000Z",
+          },
+          { type: "OPEN", amount: "0.2" },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rebuilds cached trade records when an older settlement is backfilled later", async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, database } = makeTestApp([]);
+      const recentCandidate = makeCurrentCandidate({
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+      });
+      const backfilledCandidate = makeCurrentCandidate({
+        candidateId: "backfilled-token:20000",
+        tokenId: "backfilled-token",
+        conditionId: "backfilled-condition",
+        marketId: "backfilled-market",
+        eventId: "backfilled-event",
+        eventSlug: "backfilled-event",
+        eventTitle: "Backfilled event",
+        marketQuestion: "Was this settlement backfilled?",
+        executableBuyPriceMicros: 20_000,
+        makerBuyPriceMicros: 20_000,
+        bestAskMicros: 20_000,
+      });
+      const executeBuy = (candidate: TradeCandidate, bookVersion: string) =>
+        database.executeTestFakBuy({
+          candidate,
+          book: {
+            tokenId: candidate.tokenId,
+            conditionId: candidate.conditionId,
+            bookVersion,
+            bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+            asks: [{ priceMicros: 20_000, sizeMicros: 10_000_000 }],
+            minOrderSizeMicros: 5_000_000,
+            tickSizeMicros: 10_000,
+            isNegativeRisk: false,
+          },
+          maxPriceMicros: 30_000,
+          orderBudgetMicros: 1_000_000,
+          eligibility: testEligibilitySettings(),
+          feeRateMicros: 0,
+          feeExponent: 1,
+        });
+      const settle = (candidate: TradeCandidate, now: Date) =>
+        database.applyPaperSettlement({
+          target: {
+            conditionId: candidate.conditionId,
+            marketId: candidate.marketId,
+            eventId: candidate.eventId,
+          },
+          closed: true,
+          resolutionStatus: "resolved",
+          winningTokenId: candidate.tokenId,
+          winningOutcome: "Yes",
+          now,
+        });
+
+      database.setStrategyStatus("RUNNING");
+      vi.setSystemTime(new Date("2026-08-11T08:50:00.000Z"));
+      executeBuy(backfilledCandidate, "TRADE-RECORD-BACKFILL-BUY");
+      vi.setSystemTime(new Date("2026-08-11T09:00:00.000Z"));
+      executeBuy(recentCandidate, "TRADE-RECORD-RECENT-BUY");
+      settle(recentCandidate, new Date("2026-08-11T09:10:00.000Z"));
+
+      const beforeBackfill = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+      expect(beforeBackfill.json()).toMatchObject({ totalCount: 3 });
+
+      settle(backfilledCandidate, new Date("2026-08-11T09:20:00.000Z"));
+      // Model an imported/backfilled row: its event time is old while the
+      // monotonic update time still reflects when it reached this database.
+      database["database"]
+        .prepare(
+          "UPDATE paper_settlements SET settled_at = ? WHERE condition_id = ?",
+        )
+        .run(
+          "2026-08-11T08:55:00.000Z",
+          backfilledCandidate.conditionId,
+        );
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/test/trade-records?limit=20",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        totalCount: 4,
+        records: [
+          {
+            type: "SETTLEMENT",
+            conditionId: recentCandidate.conditionId,
+            occurredAt: "2026-08-11T09:10:00.000Z",
+          },
+          { type: "OPEN", conditionId: recentCandidate.conditionId },
+          {
+            type: "SETTLEMENT",
+            conditionId: backfilledCandidate.conditionId,
+            occurredAt: "2026-08-11T08:55:00.000Z",
+          },
+          { type: "OPEN", conditionId: backfilledCandidate.conditionId },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not expose a manual new-cycle endpoint", async () => {

@@ -11,6 +11,13 @@ const ui = {
   staleCandidateCount: 0,
   visibleCandidateCount: 20,
   positionsExpanded: false,
+  tradeRecordsExpanded: false,
+  tradeRecordsLoaded: false,
+  tradeRecordsLoading: false,
+  tradeRecords: [],
+  tradeRecordTotalCount: 0,
+  tradeRecordsError: null,
+  tradeRecordsLoadedAt: 0,
   configDirty: false,
   loading: false,
   reloadRequested: false,
@@ -20,6 +27,8 @@ const ui = {
 };
 
 const POSITION_PREVIEW_LIMIT = 20;
+const TRADE_RECORD_LIMIT = 20;
+const TRADE_RECORD_REFRESH_MS = 3_000;
 const CATEGORY_LABELS_ZH = {
   Politics: "政治",
   Sports: "体育",
@@ -324,6 +333,98 @@ function renderPositions(positions = []) {
     : '<p class="empty-state">暂无已成交持仓</p>';
 }
 
+function renderTradeRecords() {
+  const toggle = $("#trade-records-toggle");
+  const content = $("#trade-records-content");
+  const count = $("#trade-records-count");
+  toggle.setAttribute("aria-expanded", String(ui.tradeRecordsExpanded));
+  toggle.setAttribute(
+    "aria-label",
+    ui.tradeRecordsExpanded ? "收起交易记录" : "展开交易记录",
+  );
+  content.hidden = !ui.tradeRecordsExpanded;
+  count.textContent = ui.tradeRecordsLoading && !ui.tradeRecordsLoaded
+    ? "读取中"
+    : ui.tradeRecordsLoaded
+      ? `${formatCount(ui.tradeRecordTotalCount)}条`
+      : "展开";
+  if (!ui.tradeRecordsExpanded) return;
+
+  if (ui.tradeRecordsLoading && !ui.tradeRecordsLoaded) {
+    $("#trade-records").innerHTML = '<p class="empty-state">正在读取交易记录…</p>';
+    return;
+  }
+  if (ui.tradeRecordsError !== null && !ui.tradeRecordsLoaded) {
+    $("#trade-records").innerHTML = `<p class="empty-state trade-record-error">交易记录加载失败：${escapeHtml(ui.tradeRecordsError)}</p>`;
+    return;
+  }
+  $("#trade-records").innerHTML = ui.tradeRecords.length
+    ? ui.tradeRecords.map(tradeRecordMarkup).join("")
+    : '<p class="empty-state">暂无交易记录</p>';
+}
+
+function tradeRecordMarkup(record) {
+  const typeLabel = {
+    OPEN: "开仓",
+    ADD: "加仓",
+    PARTIAL_CLOSE: "部分平仓",
+    CLOSE: "已平仓",
+    SETTLEMENT: "已结算",
+  }[record.type] || "交易";
+  const eventTitle = record.eventTitle && record.eventTitle !== record.marketQuestion
+    ? `<span class="event-title">${escapeHtml(record.eventTitle)}</span>`
+    : "";
+  const direction = record.direction
+    ? `<span class="trade-record-direction">${escapeHtml(record.direction)}</span>`
+    : "";
+  const price = record.price === null
+    ? ""
+    : `<span>价格 <strong>${formatCents(record.price)}</strong></span>`;
+  const quantity = record.quantity === null
+    ? ""
+    : `<span>数量 <strong>${formatQuantity(record.quantity)}</strong></span>`;
+  const amountLabel = record.type === "SETTLEMENT"
+    ? "结算"
+    : record.type === "OPEN" || record.type === "ADD"
+      ? "投入"
+      : "回款";
+  const amount = `<span>${amountLabel} <strong>${formatMoney(record.amount)}</strong></span>`;
+  const realizedPnl = record.realizedPnl === null
+    ? ""
+    : `<span>盈亏 <strong data-tone="${Number(record.realizedPnl) > 0 ? "positive" : Number(record.realizedPnl) < 0 ? "negative" : "neutral"}">${formatMoney(record.realizedPnl, true)}</strong></span>`;
+  const settlementResult = record.type === "SETTLEMENT" && record.winningOutcome
+    ? `<span>结果 <strong>${escapeHtml(record.winningOutcome)}</strong></span>`
+    : "";
+  return `<article class="trade-record-row">
+    <div class="trade-record-main">
+      <span class="trade-record-kind trade-record-kind-${escapeHtml(record.type.toLowerCase())}">${escapeHtml(typeLabel)}</span>
+      <div class="trade-record-copy">${marketTitleMarkup(record)}${eventTitle}</div>
+      <time datetime="${escapeHtml(record.occurredAt)}">${formatDate(record.occurredAt)}</time>
+    </div>
+    <div class="trade-record-meta">${direction}${price}${quantity}${amount}${realizedPnl}${settlementResult}</div>
+  </article>`;
+}
+
+async function loadTradeRecords({ silent = false } = {}) {
+  if (ui.tradeRecordsLoading) return;
+  ui.tradeRecordsLoading = true;
+  ui.tradeRecordsError = null;
+  renderTradeRecords();
+  try {
+    const response = await api(`/api/test/trade-records?limit=${TRADE_RECORD_LIMIT}`);
+    ui.tradeRecords = Array.isArray(response.records) ? response.records : [];
+    ui.tradeRecordTotalCount = Number(response.totalCount) || 0;
+    ui.tradeRecordsLoaded = true;
+  } catch (error) {
+    ui.tradeRecordsError = error.message;
+    if (!silent) showMessage(`交易记录加载失败：${error.message}`, true);
+  } finally {
+    ui.tradeRecordsLoading = false;
+    ui.tradeRecordsLoadedAt = Date.now();
+    renderTradeRecords();
+  }
+}
+
 function formatCurrentSellPrice(position) {
   if (position.currentSellPriceStatus === "READY") {
     return formatCents(position.currentSellPrice);
@@ -544,6 +645,12 @@ function applyDashboard(dashboard) {
   renderCandidates();
   renderScanStatus(dashboard.marketScan);
   renderPreferences(dashboard.preferences, dashboard.strategy);
+  if (
+    ui.tradeRecordsExpanded &&
+    Date.now() - ui.tradeRecordsLoadedAt >= TRADE_RECORD_REFRESH_MS
+  ) {
+    void loadTradeRecords({ silent: true });
+  }
 }
 
 async function loadDashboard({ silent = false } = {}) {
@@ -812,6 +919,11 @@ $("#reset-test").addEventListener("click", async () => {
     recordMutation();
     ui.visibleCandidateCount = 20;
     ui.configDirty = false;
+    ui.tradeRecords = [];
+    ui.tradeRecordTotalCount = 0;
+    ui.tradeRecordsLoaded = false;
+    ui.tradeRecordsLoadedAt = 0;
+    renderTradeRecords();
     showMessage("TEST已彻底重置，并保持暂停状态");
     await loadDashboard();
   } catch (error) {
@@ -863,6 +975,18 @@ $("#toggle-positions").addEventListener("click", () => {
   renderPositions(ui.dashboard?.positions ?? []);
 });
 
+$("#trade-records-toggle").addEventListener("click", () => {
+  ui.tradeRecordsExpanded = !ui.tradeRecordsExpanded;
+  renderTradeRecords();
+  if (
+    ui.tradeRecordsExpanded &&
+    (!ui.tradeRecordsLoaded ||
+      Date.now() - ui.tradeRecordsLoadedAt >= TRADE_RECORD_REFRESH_MS)
+  ) {
+    void loadTradeRecords();
+  }
+});
+
 $("#load-more").addEventListener("click", async () => {
   ui.visibleCandidateCount = Math.min(ui.displayCandidateCount, ui.visibleCandidateCount + 20);
   await loadDashboard();
@@ -870,6 +994,7 @@ $("#load-more").addEventListener("click", async () => {
 
 renderModeControl();
 renderRunControls();
+renderTradeRecords();
 void loadDashboard();
 window.setInterval(() => {
   void loadDashboard({ silent: true });
