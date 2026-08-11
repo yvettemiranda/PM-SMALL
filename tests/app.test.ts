@@ -71,7 +71,7 @@ describe("HTTP app", () => {
     expect(expandedDashboard.statusCode).toBe(200);
   });
 
-  it("renders configurable buy bounds and the complete target sell formula", async () => {
+  it("renders configurable buy bounds and a compact target sell formula", async () => {
     const { app } = makeTestApp([]);
     const page = await app.inject({ method: "GET", url: "/" });
 
@@ -82,7 +82,12 @@ describe("HTTP app", () => {
     expect(page.body).toContain('id="target-sell-multiplier"');
     expect(page.body).toMatch(/id="target-sell-increase"[\s\S]*?required/);
     expect(page.body).toMatch(/id="target-sell-multiplier"[\s\S]*?required/);
-    expect(page.body).toContain("目标卖价 = min（99¢");
+    expect(page.body).toMatch(/id="target-sell-formula"[^>]*tabindex="0"/);
+    expect(page.body).toMatch(
+      /id="target-sell-formula"[^>]*aria-keyshortcuts="ArrowLeft ArrowRight Home End"/,
+    );
+    expect(page.body).toContain("卖价=min(99¢,tick↑max(买价+1¢,买价×1.5))");
+    expect(page.body).not.toContain("按市场 tick 向上取整");
   });
 
   it("promotes a monitored market immediately when its live ask reaches the cap", async () => {

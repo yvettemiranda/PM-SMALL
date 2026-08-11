@@ -219,6 +219,56 @@ legend,
 }
 .all-category-option { margin-bottom: 8px; font-weight: 680; }
 .chip-options { display: flex; flex-wrap: wrap; gap: 7px; }
+.category-heading {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.category-heading > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.category-block .all-category-option {
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+}
+.category-block .chip-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.category-block .category-chip {
+  position: relative;
+  min-height: 30px;
+  justify-content: center;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.category-block .category-chip span { overflow: hidden; text-overflow: ellipsis; }
+.category-block .category-chip input,
+.category-block .all-category-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.category-block .category-chip:has(input:focus-visible),
+.category-block .all-category-option:has(input:focus-visible) {
+  outline: 2px solid #11a187;
+  outline-offset: 2px;
+}
+.category-block .field-note { margin-top: 7px; font-size: 9px; }
 .category-chip:has(input:checked),
 .check-options label:has(input:checked),
 .all-category-option:has(input:checked) {
@@ -280,45 +330,67 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 }
 .formula-preview {
   display: block;
-  padding: 10px;
+  padding: 8px 9px;
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid #cce2dc;
   border-radius: 8px;
   background: var(--accent-soft);
   color: #315d53;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 650;
-  line-height: 1.65;
-  overflow-wrap: anywhere;
+  line-height: 1.35;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+.formula-preview::-webkit-scrollbar { display: none; }
+
+.formula-preview:focus-visible {
+  outline: 2px solid #11a187;
+  outline-offset: 2px;
 }
 .formula-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 9px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 8px;
 }
+.formula-fields .field > span:first-child { margin-bottom: 5px; font-size: 10px; }
+.formula-fields .unit-input { min-height: 36px; }
+.formula-fields .unit-input input { padding: 6px 8px; }
 .multiplier-input { grid-template-columns: 1fr 30px; }
 
 .duration-inputs {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: end;
-  gap: 8px;
-  margin-top: 10px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
 }
-.duration-bound { min-width: 0; }
+.duration-bound {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+}
 .duration-bound > span:first-child {
   display: block;
-  margin-bottom: 5px;
+  margin: 0;
   color: var(--muted);
   font-size: 9px;
+  white-space: nowrap;
 }
-.duration-separator { padding-bottom: 12px; color: var(--muted); font-size: 10px; }
+.duration-bound .unit-input { min-height: 34px; grid-template-columns: 1fr 22px; }
+.duration-bound .unit-input input { padding: 6px 7px; }
+.duration-bound .unit-input > span { padding-right: 6px; font-size: 10px; }
+.duration-separator { padding: 0; color: var(--muted); font-size: 10px; }
 
 .range-fields { display: grid; gap: 17px; }
 .range-heading { align-items: baseline; }
 .range-heading > span { margin: 0; }
 .range-heading strong { color: var(--accent); font-size: 14px; font-variant-numeric: tabular-nums; }
-.range-field input { width: 100%; margin: 10px 0 4px; }
+.range-field > input[type="range"] { width: 100%; margin: 10px 0 4px; }
 .range-marks {
   display: flex;
   justify-content: space-between;
@@ -499,7 +571,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .portfolio article { padding: 9px 4px; }
   .portfolio strong { font-size: 14px; }
   .config-panel { padding: 12px; }
-  .money-fields, .formula-fields, .config-actions { grid-template-columns: 1fr; }
+  .money-fields, .config-actions { grid-template-columns: 1fr; }
   .scan-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
   .scan-state { margin-top: 3px; }
   .section-heading { min-height: 45px; }

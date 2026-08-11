@@ -465,9 +465,9 @@ function renderCategories(preferences) {
     .join("");
   $("#category-note").textContent = categories.length
     ? all
-      ? `已全选 Polymarket 首页的 ${categories.length} 个栏目；新栏目会自动纳入。`
-      : `已选择 ${selectedIds.length} / ${categories.length} 个首页栏目。`
-    : "正在同步 Polymarket 首页栏目。";
+      ? `已全选 ${categories.length} 个首页栏目 · 新栏目自动纳入`
+      : `已选 ${selectedIds.length}/${categories.length} 个首页栏目`
+    : "正在同步首页栏目…";
 }
 
 function isTenthCent(value) {
@@ -487,7 +487,7 @@ function renderTargetSellFormula() {
   const increase = numberFromInput("#target-sell-increase");
   const multiplier = numberFromInput("#target-sell-multiplier");
   $("#target-sell-formula").textContent =
-    `目标卖价 = min（99¢，按市场 tick 向上取整［max（实际买入成交价 + ${displayConfigNumber(increase, "—")}¢，实际买入成交价 × ${displayConfigNumber(multiplier, "—")}）］）`;
+    `卖价=min(99¢,tick↑max(买价+${displayConfigNumber(increase, "—")}¢,买价×${displayConfigNumber(multiplier, "—")}))`;
 }
 
 function renderPreferences(preferences, strategy, force = false) {
@@ -690,6 +690,16 @@ $("#config-close").addEventListener("click", () => {
 $("#config-form").addEventListener("input", () => {
   ui.configDirty = true;
   renderTargetSellFormula();
+});
+
+$("#target-sell-formula").addEventListener("keydown", (event) => {
+  const formula = event.currentTarget;
+  if (event.key === "ArrowLeft") formula.scrollLeft -= 40;
+  else if (event.key === "ArrowRight") formula.scrollLeft += 40;
+  else if (event.key === "Home") formula.scrollLeft = 0;
+  else if (event.key === "End") formula.scrollLeft = formula.scrollWidth;
+  else return;
+  event.preventDefault();
 });
 
 $("#all-categories").addEventListener("change", () => {
