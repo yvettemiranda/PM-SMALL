@@ -1423,9 +1423,27 @@ describe("HTTP app", () => {
               getEventEvaluations: () =>
                 candidates
                   .getEventIds()
-                  .map((eventId) =>
-                    eventOpportunities!.evaluateEvent(eventId),
-                  ),
+                  .map((eventId) => {
+                    const evaluation =
+                      eventOpportunities!.evaluateEvent(eventId);
+                    return {
+                      eventId: evaluation.eventId,
+                      status: evaluation.status,
+                      locked: evaluation.locked,
+                      lock: evaluation.lock,
+                      participantCount: evaluation.participantCount,
+                      eligibleOpportunityCount:
+                        evaluation.eligibleOpportunityCount,
+                      incompleteTokenIds: evaluation.incompleteTokenIds,
+                      opportunityTokenIds: evaluation.opportunities.map(
+                        (opportunity) => opportunity.candidate.tokenId,
+                      ),
+                      winner: evaluation.winner?.candidate ?? null,
+                      arbitrationPerformed: evaluation.arbitrationPerformed,
+                      snapshotVersion: evaluation.snapshotVersion,
+                      maxResultCount: evaluation.maxResultCount,
+                    };
+                  }),
               requestRun: () => {},
             },
           }),

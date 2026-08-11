@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import type { AppConfig } from "../config.js";
 import type { TradingExecutionAdapter } from "../domain/execution.js";
 import type { TradeCandidate } from "../domain/types.js";
@@ -34,9 +35,24 @@ export type PaperAutomationStatus = {
   recovery: PaperRecoveryResult | null;
 };
 
+export type PaperAutomationEventEvaluation = {
+  eventId: string;
+  status: EventOpportunityEvaluation["status"];
+  locked: boolean;
+  lock: EventOpportunityEvaluation["lock"];
+  participantCount: number;
+  eligibleOpportunityCount: number;
+  incompleteTokenIds: string[];
+  opportunityTokenIds: string[];
+  winner: TradeCandidate | null;
+  arbitrationPerformed: boolean;
+  snapshotVersion: string;
+  maxResultCount: number;
+};
+
 export interface PaperAutomationRuntime {
   getStatus(): PaperAutomationStatus;
-  getEventEvaluations?(): EventOpportunityEvaluation[];
+  getEventEvaluations?(): PaperAutomationEventEvaluation[];
   requestRun(): void;
 }
 
@@ -79,7 +95,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
   private readonly attemptedBuyIntentByEvent = new Map<string, string>();
   private readonly latestEventEvaluationById = new Map<
     string,
-    EventOpportunityEvaluation
+    PaperAutomationEventEvaluation
   >();
   private readonly eventOpportunities: EventOpportunityService;
 
@@ -197,7 +213,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     };
   }
 
-  public getEventEvaluations(): EventOpportunityEvaluation[] {
+  public getEventEvaluations(): PaperAutomationEventEvaluation[] {
     return [...this.latestEventEvaluationById.values()].sort((left, right) =>
       left.eventId.localeCompare(right.eventId),
     );
@@ -209,8 +225,8 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       const eventIds = runAll ? null : new Set(this.pendingEventIds);
       this.fullRunRequested = false;
       this.pendingEventIds.clear();
-      this.runOnce(eventIds);
-      await Promise.resolve();
+      await this.runOnce(eventIds);
+      await yieldToEventLoop();
     }
   }
 
@@ -218,7 +234,7 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     return this.fullRunRequested || this.pendingEventIds.size > 0;
   }
 
-  private runOnce(eventIds: ReadonlySet<string> | null): void {
+  private async runOnce(eventIds: ReadonlySet<string> | null): Promise<void> {
     const now = new Date();
     try {
       const cancelledFiltered =
@@ -246,9 +262,15 @@ export class PaperAutomationService implements PaperAutomationRuntime {
           }
         }
       }
-      const evaluations = requestedEventIds.map((eventId) =>
-        this.evaluateEvent(eventId, now),
-      );
+      const evaluations: PaperAutomationEventEvaluation[] = [];
+      let sliceStartedAtMs = performance.now();
+      for (const eventId of requestedEventIds) {
+        if (!this.started) {
+          break;
+        }
+        evaluations.push(this.evaluateEvent(eventId, now).summary);
+        sliceStartedAtMs = await yieldIfSliceExpired(sliceStartedAtMs);
+      }
       const direction =
         this.candidateSelection?.getCandidateSortDirection?.() ?? "ASC";
       evaluations.sort((left, right) =>
@@ -257,14 +279,24 @@ export class PaperAutomationService implements PaperAutomationRuntime {
 
       if (this.database.getStrategyState().status === "RUNNING") {
         for (const evaluation of evaluations) {
+          sliceStartedAtMs = await yieldIfSliceExpired(sliceStartedAtMs);
+          if (
+            !this.started ||
+            this.database.getStrategyState().status !== "RUNNING"
+          ) {
+            break;
+          }
           if (evaluation.status !== "READY" || evaluation.winner === null) {
             continue;
           }
-          const rechecked = this.evaluateEvent(evaluation.eventId, new Date());
+          const rechecked = this.evaluateEvent(
+            evaluation.eventId,
+            new Date(),
+          ).evaluation;
           const changed =
             rechecked.snapshotVersion !== evaluation.snapshotVersion ||
             rechecked.winner?.candidate.tokenId !==
-              evaluation.winner.candidate.tokenId;
+              evaluation.winner.tokenId;
           if (changed) {
             this.staleArbitrationRejectionCount += 1;
             this.arbitrationRecomputeCount += 1;
@@ -317,9 +349,16 @@ export class PaperAutomationService implements PaperAutomationRuntime {
     }
   }
 
-  private evaluateEvent(eventId: string, now: Date): EventOpportunityEvaluation {
+  private evaluateEvent(
+    eventId: string,
+    now: Date,
+  ): {
+    evaluation: EventOpportunityEvaluation;
+    summary: PaperAutomationEventEvaluation;
+  } {
     const evaluation = this.eventOpportunities.evaluateEvent(eventId, now);
-    this.latestEventEvaluationById.set(eventId, evaluation);
+    const summary = summarizeEventEvaluation(evaluation);
+    this.latestEventEvaluationById.set(eventId, summary);
     this.eventsEvaluatedCount += 1;
     if (evaluation.status === "INCOMPLETE") {
       this.incompleteEventCount += 1;
@@ -331,24 +370,67 @@ export class PaperAutomationService implements PaperAutomationRuntime {
       this.maxObservedResultCount,
       evaluation.maxResultCount,
     );
-    return evaluation;
+    return { evaluation, summary };
   }
 }
 
 function compareEventEvaluations(
-  left: EventOpportunityEvaluation,
-  right: EventOpportunityEvaluation,
+  left: PaperAutomationEventEvaluation,
+  right: PaperAutomationEventEvaluation,
   direction: CandidateSortDirection,
 ): number {
-  const leftProgress = left.winner?.candidate.progressPercent ??
+  const leftProgress = left.winner?.progressPercent ??
     (direction === "ASC" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
-  const rightProgress = right.winner?.candidate.progressPercent ??
+  const rightProgress = right.winner?.progressPercent ??
     (direction === "ASC" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
   const progressComparison =
     direction === "ASC"
       ? leftProgress - rightProgress
       : rightProgress - leftProgress;
   return progressComparison || left.eventId.localeCompare(right.eventId);
+}
+
+function summarizeEventEvaluation(
+  evaluation: EventOpportunityEvaluation,
+): PaperAutomationEventEvaluation {
+  const winner = evaluation.winner?.candidate ?? null;
+  return {
+    eventId: evaluation.eventId,
+    status: evaluation.status,
+    locked: evaluation.locked,
+    lock: evaluation.lock === null ? null : { ...evaluation.lock },
+    participantCount: evaluation.participantCount,
+    eligibleOpportunityCount: evaluation.eligibleOpportunityCount,
+    incompleteTokenIds: [...evaluation.incompleteTokenIds],
+    opportunityTokenIds: evaluation.opportunities.map(
+      (opportunity) => opportunity.candidate.tokenId,
+    ),
+    winner:
+      winner === null
+        ? null
+        : {
+            ...winner,
+            categoryIds: [...winner.categoryIds],
+            categoryLabels: [...winner.categoryLabels],
+          },
+    arbitrationPerformed: evaluation.arbitrationPerformed,
+    snapshotVersion: evaluation.snapshotVersion,
+    maxResultCount: evaluation.maxResultCount,
+  };
+}
+
+const MAX_AUTOMATION_SYNC_SLICE_MS = 10;
+
+async function yieldIfSliceExpired(sliceStartedAtMs: number): Promise<number> {
+  if (performance.now() - sliceStartedAtMs < MAX_AUTOMATION_SYNC_SLICE_MS) {
+    return sliceStartedAtMs;
+  }
+  await yieldToEventLoop();
+  return performance.now();
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function isExpectedPlacementRejection(error: unknown): boolean {

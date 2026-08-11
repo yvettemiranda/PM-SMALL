@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { buildApp } from "../src/app.js";
 import { PaperDatabase } from "../src/infrastructure/db/database.js";
+import { LiveExecutorDisabled } from "../src/infrastructure/execution/live-executor-disabled.js";
 import { CandidateService } from "../src/services/candidate-service.js";
 import type {
   MarketStreamStatus,
@@ -530,6 +532,95 @@ describe("PaperAutomationService", () => {
     automation.start();
     await waitFor(() => automation.getStatus().lastRunAt !== null);
 
+    expect(database.listPaperOrders()).toHaveLength(0);
+  });
+
+  it("keeps the event loop responsive during a wide-price full refresh", async () => {
+    const eventCount = 1_500;
+    const scannedCandidates = Array.from({ length: eventCount }, (_, index) =>
+      makeCurrentCandidate({
+        candidateId: `wide-token-${index}:500000`,
+        tokenId: `wide-token-${index}`,
+        eventId: `wide-event-${index}`,
+        conditionId: `wide-condition-${index}`,
+        marketId: `wide-market-${index}`,
+        bestBidMicros: 250_000,
+        bestAskMicros: 500_000,
+        executableBuyPriceMicros: 500_000,
+        makerBuyPriceMicros: 500_000,
+        fixedSellPriceMicros: 750_000,
+        minOrderSizeMicros: 1_000_000,
+      }),
+    );
+    const candidates = new CandidateService(
+      { scan: async () => scannedCandidates },
+      15_000,
+    );
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    const preferences = new PaperTradingPreferencesService(database, testConfig);
+    preferences.updateMarketFilters({
+      marketTypes: ["BINARY", "TERNARY"],
+      minBuyPriceMicros: 1_000,
+      maxBuyPriceMicros: 990_000,
+      maxMarketDurationDays: 30,
+    });
+    const marketStream = new FakeMarketRuntime();
+    marketStream.bids = [
+      { priceMicros: 250_000, sizeMicros: 100_000_000 },
+    ];
+    const automation = new PaperAutomationService(
+      candidates,
+      database,
+      marketStream,
+      { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+      preferences,
+    );
+    const app = buildApp({
+      config: { ...testConfig, paperSchedulerIntervalMs: 60_000 },
+      database,
+      candidates,
+      tradingPreferences: preferences,
+      liveExecutor: new LiveExecutorDisabled(),
+      marketStream,
+      paperAutomation: automation,
+    });
+    resources.push(database, automation, app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    automation.start();
+    await waitFor(() => automation.getStatus().lastRunAt !== null);
+    const previousRunAt = automation.getStatus().lastRunAt;
+    const previousEvaluatedCount = automation.getStatus().eventsEvaluatedCount;
+    database.setStrategyStatus("RUNNING");
+
+    await candidates.refresh();
+    await waitFor(
+      () =>
+        automation.getStatus().eventsEvaluatedCount > previousEvaluatedCount,
+    );
+    const inProgressEvaluatedCount =
+      automation.getStatus().eventsEvaluatedCount - previousEvaluatedCount;
+    expect(inProgressEvaluatedCount).toBeGreaterThan(0);
+    expect(inProgressEvaluatedCount).toBeLessThan(eventCount);
+
+    const pauseStartedAt = performance.now();
+    const pauseResponse = await fetch(`${address}/api/test/pause`, {
+      method: "POST",
+    });
+    const pauseResponseDelayMs = performance.now() - pauseStartedAt;
+    expect(pauseResponse.status).toBe(200);
+    expect(await pauseResponse.json()).toMatchObject({
+      strategy: { mode: "TEST", status: "PAUSED" },
+    });
+    expect(pauseResponseDelayMs).toBeLessThan(100);
+    await waitFor(() => automation.getStatus().lastRunAt !== previousRunAt);
+    const cachedEvaluations = automation.getEventEvaluations();
+    expect(cachedEvaluations).toHaveLength(eventCount);
+    expect(cachedEvaluations[0]).not.toHaveProperty("opportunities");
+    expect(cachedEvaluations[0]?.opportunityTokenIds).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(cachedEvaluations))).toBeLessThan(
+      4_000_000,
+    );
+    expect(database.getStrategyState().status).toBe("PAUSED");
     expect(database.listPaperOrders()).toHaveLength(0);
   });
 

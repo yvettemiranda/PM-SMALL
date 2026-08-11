@@ -34,6 +34,7 @@
 - 最低与最高买价均可按 `0.1¢` 输入，范围为 `0.1¢–99¢`，且最低值不得超过最高值；默认买价范围为 `0.1¢–99¢`，不能以 `Best Ask > 0` 替代明确边界。
 - 扫描结果不提供逐 Token 勾选。所有同时符合类别、结果数量、价格、买卖盘比例、生命周期进度、总时长和盘口条件的候选都自动参与 TEST。
 - CandidateService 必须同时维护 `tokenId -> candidate`、`tokenId -> eventId` 和 `eventId -> siblings` 索引。Token 报价变化只重算所属 Event；定时全量校正可以遍历全部 Event，但实时路径不得遍历全候选。Event 已锁定后，兄弟 Token 普通报价变化不重新仲裁。
+- 定时全量 Event 校正必须按有界时间片向 HTTP、行情和暂停请求让出事件循环；每次让出后若策略已不再 `RUNNING`，不得继续新买。自动化状态缓存只保留展示和重算所需的 Event 状态、Winner、Token 身份和版本摘要，不得为每个 Event 长期持有完整 Book、FAK Preview 或买入 Intent。
 - 不同 Event 之间先按当前可交易状态分组：`READY` Event 固定排在待定 Event 前面；每组内部再按生命周期进度正序或倒序处理，默认正序。排序只影响跨 Event 顺序和展示，不放宽进度硬门槛。
 
 ## Event 完整性、FAK Preview 与仲裁

@@ -24,7 +24,10 @@ import type { LiveExecutorDisabled } from "./infrastructure/execution/live-execu
 import { TestExecutor } from "./infrastructure/execution/test-executor.js";
 import type { CandidateService, CandidateSnapshot } from "./services/candidate-service.js";
 import type { PaperMarketRuntime } from "./services/market-stream-service.js";
-import type { PaperAutomationRuntime } from "./services/paper-automation-service.js";
+import type {
+  PaperAutomationEventEvaluation,
+  PaperAutomationRuntime,
+} from "./services/paper-automation-service.js";
 import {
   EventOpportunityService,
   type EventOpportunityEvaluation,
@@ -233,7 +236,7 @@ function buildEventMarketScan(
     siblings.push(candidate);
     candidatesByEvent.set(candidate.eventId, siblings);
   }
-  const evaluationByEvent = new Map<string, EventOpportunityEvaluation>(
+  const evaluationByEvent = new Map<string, PaperAutomationEventEvaluation>(
     (dependencies.paperAutomation?.getEventEvaluations?.() ?? []).map(
       (evaluation) => [evaluation.eventId, evaluation],
     ),
@@ -263,7 +266,7 @@ function buildEventMarketScan(
     );
     const evaluation = evaluationByEvent.get(eventId);
     const lock = evaluation?.lock ?? lockByEvent.get(eventId) ?? null;
-    const cachedWinner = evaluation?.winner?.candidate;
+    const cachedWinner = evaluation?.winner;
     const fallbackWinner =
       evaluation === undefined && dependencies.marketStream === undefined
         ? dependencies.tradingPreferences
@@ -293,9 +296,7 @@ function buildEventMarketScan(
     const winnerTokenId = winner?.tokenId ?? null;
     const incompleteTokenIds = new Set(evaluation?.incompleteTokenIds ?? []);
     const opportunityTokenIds = new Set(
-      evaluation?.opportunities.map(
-        (opportunity) => opportunity.candidate.tokenId,
-      ) ?? [],
+      evaluation?.opportunityTokenIds ?? [],
     );
     const outcomes = [...siblings]
       .sort(
