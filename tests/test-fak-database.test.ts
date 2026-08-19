@@ -231,6 +231,65 @@ describe("TEST FAK accounting", () => {
     });
   });
 
+  it("keeps the remaining position protected after a normal partial target sell", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: makeBook({
+        bookVersion: "PARTIAL-TARGET-BUY",
+        asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+      stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+    });
+
+    expect(
+      database.executeTestFakSells({
+        tokenId: candidate.tokenId,
+        bookVersion: "PARTIAL-TARGET-SELL",
+        bids: [{ priceMicros: 30_000, sizeMicros: 20_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 0,
+        feeExponent: 1,
+      }).filledSizeMicros,
+    ).toBe(20_000_000);
+    expect(database.getPaperStopLoss(candidate.tokenId)).toMatchObject({
+      state: "WATCHING",
+      thresholdPriceMicros: 8_000,
+    });
+
+    const observeLow = (bookVersion: string, observedAt: string) =>
+      database.executeTestStopLoss({
+        tokenId: candidate.tokenId,
+        bookVersion,
+        bids: [{ priceMicros: 7_000, sizeMicros: 30_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 0,
+        feeExponent: 1,
+        observedAt: new Date(observedAt),
+      });
+    expect(observeLow("PARTIAL-TARGET-LOW-1", "2026-01-02T00:00:00.000Z").state)
+      .toBe("ARMED");
+    expect(
+      observeLow("PARTIAL-TARGET-LOW-2", "2026-01-02T00:00:31.000Z"),
+    ).toMatchObject({
+      state: "STOPPED",
+      triggered: true,
+      filledSizeMicros: 30_000_000,
+    });
+  });
+
   it("persists an armed stop and completes confirmation after restart", () => {
     const directory = mkdtempSync(join(tmpdir(), "pm-small-stop-restart-"));
     const databasePath = join(directory, "paper.db");
