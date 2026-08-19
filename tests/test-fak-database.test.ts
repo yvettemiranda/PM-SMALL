@@ -231,6 +231,80 @@ describe("TEST FAK accounting", () => {
     });
   });
 
+  it("persists the recovery time and ignores a clock rollback before re-arming", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-stop-recovery-"));
+    const databasePath = join(directory, "paper.db");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const first = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      first.setStrategyStatus("RUNNING");
+      first.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          bookVersion: "ROLLBACK-BUY",
+          asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+        stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+      });
+      const observe = (bookVersion: string, bid: number, observedAt: string) =>
+        first.executeTestStopLoss({
+          tokenId: candidate.tokenId,
+          bookVersion,
+          bids: [{ priceMicros: bid, sizeMicros: 50_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+          observedAt: new Date(observedAt),
+        });
+      expect(observe("ROLLBACK-LOW-1", 7_000, "2026-01-02T00:00:00.000Z").state)
+        .toBe("ARMED");
+      expect(observe("ROLLBACK-HIGH", 8_000, "2026-01-02T00:00:20.000Z").state)
+        .toBe("WATCHING");
+    } finally {
+      first.close();
+    }
+
+    const restarted = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      const observe = (bookVersion: string, observedAt: string) =>
+        restarted.executeTestStopLoss({
+          tokenId: candidate.tokenId,
+          bookVersion,
+          bids: [{ priceMicros: 7_000, sizeMicros: 50_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+          observedAt: new Date(observedAt),
+        });
+      expect(observe("ROLLBACK-STALE-LOW", "2026-01-02T00:00:10.000Z"))
+        .toMatchObject({ state: "WATCHING", triggered: false });
+      expect(observe("ROLLBACK-LOW-2", "2026-01-02T00:00:21.000Z").state)
+        .toBe("ARMED");
+      expect(observe("ROLLBACK-LOW-3", "2026-01-02T00:00:51.000Z"))
+        .toMatchObject({
+          state: "STOPPED",
+          triggered: true,
+          filledSizeMicros: 50_000_000,
+        });
+      expect(restarted.validatePaperState()).toMatchObject({
+        passed: true,
+        errors: [],
+      });
+    } finally {
+      restarted.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the remaining position protected after a normal partial target sell", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);

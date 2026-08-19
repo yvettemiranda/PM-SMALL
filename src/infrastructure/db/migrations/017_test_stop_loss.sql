@@ -82,6 +82,8 @@ CREATE TABLE paper_stop_losses (
   threshold_price_micros INTEGER NOT NULL CHECK (threshold_price_micros > 0),
   state TEXT NOT NULL
     CHECK (state IN ('WATCHING', 'ARMED', 'EXITING', 'STOPPED')),
+  last_observed_at TEXT,
+  last_observed_book_version TEXT,
   below_since TEXT,
   last_below_at TEXT,
   last_below_book_version TEXT,
@@ -92,17 +94,27 @@ CREATE TABLE paper_stop_losses (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (
+    (last_observed_at IS NULL AND last_observed_book_version IS NULL)
+    OR
+    (last_observed_at IS NOT NULL AND last_observed_book_version IS NOT NULL)
+  ),
+  CHECK (
     (state = 'WATCHING' AND below_since IS NULL AND last_below_at IS NULL
       AND last_below_book_version IS NULL AND below_observation_count = 0
       AND triggered_at IS NULL AND completed_at IS NULL)
     OR
     (state = 'ARMED' AND below_since IS NOT NULL AND last_below_at IS NOT NULL
-      AND last_below_book_version IS NOT NULL AND below_observation_count >= 1
+      AND last_observed_at IS NOT NULL
+      AND last_observed_book_version IS NOT NULL
+      AND last_below_book_version IS NOT NULL
+      AND below_observation_count >= 1
       AND triggered_at IS NULL AND completed_at IS NULL)
     OR
-    (state = 'EXITING' AND triggered_at IS NOT NULL AND completed_at IS NULL)
+    (state = 'EXITING' AND last_observed_at IS NOT NULL
+      AND triggered_at IS NOT NULL AND completed_at IS NULL)
     OR
-    (state = 'STOPPED' AND triggered_at IS NOT NULL AND completed_at IS NOT NULL)
+    (state = 'STOPPED' AND last_observed_at IS NOT NULL
+      AND triggered_at IS NOT NULL AND completed_at IS NOT NULL)
   )
 );
 

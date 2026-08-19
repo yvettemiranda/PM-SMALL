@@ -230,6 +230,8 @@ export type PaperStopLoss = {
   entryPriceMicros: number;
   thresholdPriceMicros: number;
   state: StopLossState;
+  lastObservedAt: string | null;
+  lastObservedBookVersion: string | null;
   belowSince: string | null;
   lastBelowAt: string | null;
   lastBelowBookVersion: string | null;
@@ -434,6 +436,8 @@ type PaperStopLossRow = {
   entry_price_micros: number;
   threshold_price_micros: number;
   state: StopLossState;
+  last_observed_at: string | null;
+  last_observed_book_version: string | null;
   below_since: string | null;
   last_below_at: string | null;
   last_below_book_version: string | null;
@@ -657,6 +661,8 @@ function rowToPaperStopLoss(row: PaperStopLossRow): PaperStopLoss {
     entryPriceMicros: row.entry_price_micros,
     thresholdPriceMicros: row.threshold_price_micros,
     state: row.state,
+    lastObservedAt: row.last_observed_at,
+    lastObservedBookVersion: row.last_observed_book_version,
     belowSince: row.below_since,
     lastBelowAt: row.last_below_at,
     lastBelowBookVersion: row.last_below_book_version,
@@ -1286,7 +1292,8 @@ export class PaperDatabase {
       .prepare(
         `SELECT token_id, event_id, market_id, condition_id,
           multiplier_micros, entry_price_micros, threshold_price_micros,
-          state, below_since, last_below_at, last_below_book_version,
+          state, last_observed_at, last_observed_book_version,
+          below_since, last_below_at, last_below_book_version,
           below_observation_count, triggered_at, completed_at,
           created_at, updated_at
         FROM paper_stop_losses ORDER BY event_id, token_id`,
@@ -3406,7 +3413,9 @@ export class PaperDatabase {
           .prepare(
             `UPDATE paper_stop_losses
             SET entry_price_micros = ?, threshold_price_micros = ?,
-                state = 'WATCHING', below_since = NULL, last_below_at = NULL,
+                state = 'WATCHING', last_observed_at = NULL,
+                last_observed_book_version = NULL,
+                below_since = NULL, last_below_at = NULL,
                 last_below_book_version = NULL, below_observation_count = 0,
                 triggered_at = NULL, completed_at = NULL, updated_at = ?
             WHERE token_id = ? AND state IN ('WATCHING', 'ARMED')`,
@@ -3434,23 +3443,42 @@ export class PaperDatabase {
         if (bestBidMicros === null) {
           return emptyTestStopLoss(stopLoss.state);
         }
+        const lastObservedAtMs = Date.parse(stopLoss.last_observed_at ?? "");
+        if (input.bookVersion === stopLoss.last_observed_book_version) {
+          return emptyTestStopLoss(stopLoss.state);
+        }
+        if (
+          stopLoss.last_observed_at !== null &&
+          (!Number.isFinite(lastObservedAtMs) || observedAtMs < lastObservedAtMs)
+        ) {
+          return emptyTestStopLoss(stopLoss.state);
+        }
         if (bestBidMicros >= stopLoss.threshold_price_micros) {
           if (stopLoss.state === "ARMED") {
             this.database
               .prepare(
                 `UPDATE paper_stop_losses
-                SET state = 'WATCHING', below_since = NULL,
+                SET state = 'WATCHING', last_observed_at = ?,
+                    last_observed_book_version = ?, below_since = NULL,
                     last_below_at = NULL, last_below_book_version = NULL,
                     below_observation_count = 0, updated_at = ?
                 WHERE token_id = ?`,
               )
-              .run(observedAt, input.tokenId);
+              .run(observedAt, input.bookVersion, observedAt, input.tokenId);
             this.writeAudit(
               "TEST_STOP_LOSS_RECOVERED",
               "market_token",
               input.tokenId,
               { bestBidMicros, thresholdPriceMicros: stopLoss.threshold_price_micros },
             );
+          } else {
+            this.database
+              .prepare(
+                `UPDATE paper_stop_losses
+                SET last_observed_at = ?, last_observed_book_version = ?,
+                    updated_at = ? WHERE token_id = ?`,
+              )
+              .run(observedAt, input.bookVersion, observedAt, input.tokenId);
           }
           return emptyTestStopLoss("WATCHING");
         }
@@ -3459,11 +3487,15 @@ export class PaperDatabase {
           this.database
             .prepare(
               `UPDATE paper_stop_losses
-              SET state = 'ARMED', below_since = ?, last_below_at = ?,
+              SET state = 'ARMED', last_observed_at = ?,
+                  last_observed_book_version = ?, below_since = ?,
+                  last_below_at = ?,
                   last_below_book_version = ?, below_observation_count = 1,
                   updated_at = ? WHERE token_id = ?`,
             )
             .run(
+              observedAt,
+              input.bookVersion,
               observedAt,
               observedAt,
               input.bookVersion,
@@ -3481,10 +3513,8 @@ export class PaperDatabase {
         const belowSinceMs = Date.parse(stopLoss.below_since ?? "");
         const lastBelowAtMs = Date.parse(stopLoss.last_below_at ?? "");
         if (
-          input.bookVersion === stopLoss.last_below_book_version ||
           !Number.isFinite(belowSinceMs) ||
-          !Number.isFinite(lastBelowAtMs) ||
-          observedAtMs < lastBelowAtMs
+          !Number.isFinite(lastBelowAtMs)
         ) {
           return emptyTestStopLoss("ARMED");
         }
@@ -3496,11 +3526,15 @@ export class PaperDatabase {
           this.database
             .prepare(
               `UPDATE paper_stop_losses
-              SET last_below_at = ?, last_below_book_version = ?,
+              SET last_observed_at = ?, last_observed_book_version = ?,
+                  last_below_at = ?,
+                  last_below_book_version = ?,
                   below_observation_count = ?, updated_at = ?
               WHERE token_id = ?`,
             )
             .run(
+              observedAt,
+              input.bookVersion,
               observedAt,
               input.bookVersion,
               observationCount,
@@ -3513,11 +3547,14 @@ export class PaperDatabase {
         this.database
           .prepare(
             `UPDATE paper_stop_losses
-            SET state = 'EXITING', last_below_at = ?,
+            SET state = 'EXITING', last_observed_at = ?,
+                last_observed_book_version = ?, last_below_at = ?,
                 last_below_book_version = ?, below_observation_count = ?,
                 triggered_at = ?, updated_at = ? WHERE token_id = ?`,
           )
           .run(
+            observedAt,
+            input.bookVersion,
             observedAt,
             input.bookVersion,
             observationCount,
@@ -4434,15 +4471,18 @@ export class PaperDatabase {
         `INSERT INTO paper_stop_losses(
           token_id, event_id, market_id, condition_id,
           multiplier_micros, entry_price_micros, threshold_price_micros,
-          state, below_since, last_below_at, last_below_book_version,
+          state, last_observed_at, last_observed_book_version,
+          below_since, last_below_at, last_below_book_version,
           below_observation_count, triggered_at, completed_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'WATCHING', NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'WATCHING', NULL, NULL, NULL, NULL, NULL,
           0, NULL, NULL, ?, ?)
         ON CONFLICT(token_id) DO UPDATE SET
           entry_price_micros = excluded.entry_price_micros,
           threshold_price_micros = excluded.threshold_price_micros,
-          state = 'WATCHING', below_since = NULL, last_below_at = NULL,
+          state = 'WATCHING', last_observed_at = NULL,
+          last_observed_book_version = NULL,
+          below_since = NULL, last_below_at = NULL,
           last_below_book_version = NULL, below_observation_count = 0,
           triggered_at = NULL, completed_at = NULL, updated_at = excluded.updated_at`,
       )
@@ -5060,7 +5100,8 @@ export class PaperDatabase {
       .prepare(
         `SELECT token_id, event_id, market_id, condition_id,
           multiplier_micros, entry_price_micros, threshold_price_micros,
-          state, below_since, last_below_at, last_below_book_version,
+          state, last_observed_at, last_observed_book_version,
+          below_since, last_below_at, last_below_book_version,
           below_observation_count, triggered_at, completed_at,
           created_at, updated_at
         FROM paper_stop_losses WHERE token_id = ?`,
@@ -5075,7 +5116,8 @@ export class PaperDatabase {
       .prepare(
         `SELECT token_id, event_id, market_id, condition_id,
           multiplier_micros, entry_price_micros, threshold_price_micros,
-          state, below_since, last_below_at, last_below_book_version,
+          state, last_observed_at, last_observed_book_version,
+          below_since, last_below_at, last_below_book_version,
           below_observation_count, triggered_at, completed_at,
           created_at, updated_at
         FROM paper_stop_losses
