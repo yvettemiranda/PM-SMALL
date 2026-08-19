@@ -1,5 +1,6 @@
 import type {
   ImmediateBuyIntent,
+  StopLossIntent,
   TargetSellIntent,
   TradingExecutionAdapter,
 } from "../../domain/execution.js";
@@ -20,6 +21,10 @@ export class LiveExecutorDisabled implements TradingExecutionAdapter {
   }
 
   public executeTargetSells(_intent: TargetSellIntent): never {
+    throw new LiveExecutionDisabledError();
+  }
+
+  public executeStopLoss(_intent: StopLossIntent): never {
     throw new LiveExecutionDisabledError();
   }
 

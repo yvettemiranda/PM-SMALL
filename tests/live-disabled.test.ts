@@ -23,6 +23,9 @@ describe("LiveExecutorDisabled", () => {
     expect(() => executor.executeTargetSells({} as never)).toThrow(
       LiveExecutionDisabledError,
     );
+    expect(() => executor.executeStopLoss({} as never)).toThrow(
+      LiveExecutionDisabledError,
+    );
     await expect(executor.placeOrder()).rejects.toBeInstanceOf(
       LiveExecutionDisabledError,
     );
@@ -36,6 +39,7 @@ describe("LiveExecutorDisabled", () => {
         mode: "LIVE",
         enabled: true,
         executeBuy: (intent) => testExecutor.executeBuy(intent),
+        executeStopLoss: (intent) => testExecutor.executeStopLoss(intent),
         executeTargetSells: (intent) =>
           testExecutor.executeTargetSells(intent),
       };

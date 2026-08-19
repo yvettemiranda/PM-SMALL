@@ -1,6 +1,8 @@
 import type {
   ImmediateBuyExecution,
   ImmediateBuyIntent,
+  StopLossExecution,
+  StopLossIntent,
   TargetSellExecution,
   TargetSellIntent,
   TradingExecutionAdapter,
@@ -19,5 +21,9 @@ export class TestExecutor implements TradingExecutionAdapter {
 
   public executeTargetSells(intent: TargetSellIntent): TargetSellExecution {
     return this.database.executeTestFakSells(intent);
+  }
+
+  public executeStopLoss(intent: StopLossIntent): StopLossExecution {
+    return this.database.executeTestStopLoss(intent);
   }
 }

@@ -307,8 +307,13 @@ function renderPositions(positions = []) {
           const cycleStatus = {
             ACCUMULATING: "仍可累计",
             EXITING: "退出阶段",
+            STOP_ARMED: "止损确认中",
+            STOP_EXITING: "止损退出中",
             LEGACY_CONFLICT: "旧仓冲突·只减仓",
           }[position.cycleStatus] || "周期状态待确认";
+          const stopLossSummary = position.stopLossThreshold === null
+            ? ""
+            : `<span>止损线 <strong>${formatCents(position.stopLossThreshold)} (${escapeHtml(position.stopLossMultiplier)}×)</strong></span>`;
           return `<article class="position-row">
             <div class="row-heading">
               <div class="market-copy">${marketTitleMarkup(position)}${eventTitle}</div>
@@ -324,6 +329,7 @@ function renderPositions(positions = []) {
               <span>Event 周期 <strong>${escapeHtml(cycleStatus)}</strong></span>
               <span>冻结预算 <strong>${position.cycleBudget === null ? "—" : formatMoney(position.cycleBudget)}</strong></span>
               <span>本轮已用 <strong>${formatMoney(position.cycleSpent)}</strong></span>
+              ${stopLossSummary}
             </div>
             <div class="progress-heading"><span>市场生命周期</span><strong>${progressText}</strong></div>
             ${progressMarkup(position.progressPercent, "市场生命周期")}
@@ -591,6 +597,15 @@ function renderTargetSellFormula() {
     `卖价=min(99¢,tick↑max(买价+${displayConfigNumber(increase, "—")}¢,买价×${displayConfigNumber(multiplier, "—")}))`;
 }
 
+function renderStopLossControl() {
+  const enabled = $("#stop-loss-enabled").checked;
+  $("#stop-loss-multiplier").disabled = !enabled;
+  $(".stop-loss-multiplier-field").setAttribute(
+    "aria-disabled",
+    String(!enabled),
+  );
+}
+
 function renderPreferences(preferences, strategy, force = false) {
   if (ui.configDirty && !force) return;
   $("#binary-market").checked = preferences.marketTypes.includes("BINARY");
@@ -600,6 +615,9 @@ function renderPreferences(preferences, strategy, force = false) {
   $("#max-buy-price").value = String(preferences.maxBuyPriceCents);
   $("#target-sell-increase").value = String(preferences.targetSellPriceIncreaseCents);
   $("#target-sell-multiplier").value = String(preferences.targetSellPriceMultiplier);
+  $("#stop-loss-enabled").checked = preferences.stopLossEnabled === true;
+  $("#stop-loss-multiplier").value = String(preferences.stopLossMultiplier);
+  renderStopLossControl();
   renderTargetSellFormula();
   $("#bid-ask-ratio").value = String(preferences.minBidAskRatioPercent);
   $("#bid-ask-ratio-value").textContent = String(preferences.minBidAskRatioPercent);
@@ -702,6 +720,8 @@ function collectConfigPayload() {
   const maxBuyPriceCents = numberFromInput("#max-buy-price");
   const targetSellPriceIncreaseCents = numberFromInput("#target-sell-increase");
   const targetSellPriceMultiplier = numberFromInput("#target-sell-multiplier");
+  const stopLossEnabled = $("#stop-loss-enabled").checked;
+  const stopLossMultiplier = numberFromInput("#stop-loss-multiplier");
   const minMarketDurationDays = Number($("#min-market-duration").value);
   const maxMarketDurationDays = Number($("#max-market-duration").value);
   const initialCapital = Number($("#initial-capital").value);
@@ -722,6 +742,9 @@ function collectConfigPayload() {
   }
   if (!Number.isFinite(targetSellPriceMultiplier) || targetSellPriceMultiplier < 0) {
     throw new Error("目标卖价倍数参数必须是大于等于0的数字");
+  }
+  if (!Number.isFinite(stopLossMultiplier) || stopLossMultiplier <= 0 || stopLossMultiplier >= 1) {
+    throw new Error("止损倍数必须是大于0且小于1的数字");
   }
   if (!Number.isInteger(minMarketDurationDays) || minMarketDurationDays < 1 || minMarketDurationDays > 365) {
     throw new Error("最短市场总时长必须是1至365天之间的整数");
@@ -750,6 +773,8 @@ function collectConfigPayload() {
     maxBuyPriceCents,
     targetSellPriceIncreaseCents,
     targetSellPriceMultiplier,
+    stopLossEnabled,
+    stopLossMultiplier,
     minMarketDurationDays,
     maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
@@ -769,6 +794,8 @@ function savedPreferencePayload(overrides = {}) {
     maxBuyPriceCents: ui.preferences.maxBuyPriceCents,
     targetSellPriceIncreaseCents: ui.preferences.targetSellPriceIncreaseCents,
     targetSellPriceMultiplier: ui.preferences.targetSellPriceMultiplier,
+    stopLossEnabled: ui.preferences.stopLossEnabled,
+    stopLossMultiplier: ui.preferences.stopLossMultiplier,
     minMarketDurationDays: ui.preferences.minMarketDurationDays,
     maxMarketDurationDays: ui.preferences.maxMarketDurationDays,
     candidateSortDirection: ui.preferences.candidateSortDirection,
@@ -798,6 +825,8 @@ $("#config-form").addEventListener("input", () => {
   ui.configDirty = true;
   renderTargetSellFormula();
 });
+
+$("#stop-loss-enabled").addEventListener("change", renderStopLossControl);
 
 $("#target-sell-formula").addEventListener("keydown", (event) => {
   const formula = event.currentTarget;

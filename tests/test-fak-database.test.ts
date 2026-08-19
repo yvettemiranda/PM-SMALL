@@ -89,6 +89,218 @@ describe("TEST FAK accounting", () => {
     ).toMatchObject({ priceMicros: 44_000 });
   });
 
+  it("confirms a fresh weighted-entry stop for 30 seconds, exits in FAK slices, and blocks Event re-entry", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const buyInput = {
+      candidate,
+      book: makeBook({
+        bookVersion: "STOP-BUY",
+        bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+        asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+      stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+    };
+    expect(database.executeTestFakBuy(buyInput).spentMicros).toBe(1_000_000);
+    expect(database.listPaperStopLosses()).toEqual([
+      expect.objectContaining({
+        tokenId: candidate.tokenId,
+        eventId: candidate.eventId,
+        state: "WATCHING",
+        entryPriceMicros: 20_000,
+        thresholdPriceMicros: 8_000,
+        multiplierMicros: 400_000,
+      }),
+    ]);
+
+    const stopIntent = {
+      tokenId: candidate.tokenId,
+      bookVersion: "STOP-BID-1",
+      bids: [{ priceMicros: 7_000, sizeMicros: 20_000_000 }],
+      minOrderSizeMicros: 5_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+      observedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    expect(database.executeTestStopLoss(stopIntent)).toMatchObject({
+      state: "ARMED",
+      triggered: false,
+      filledSizeMicros: 0,
+    });
+
+    expect(
+      database.executeTestStopLoss({
+        ...stopIntent,
+        observedAt: new Date("2026-01-02T00:00:31.000Z"),
+      }),
+    ).toMatchObject({ state: "ARMED", triggered: false, filledSizeMicros: 0 });
+
+    expect(
+      database.executeTestStopLoss({
+        ...stopIntent,
+        bookVersion: "STOP-BID-2",
+        observedAt: new Date("2026-01-02T00:00:31.000Z"),
+      }),
+    ).toMatchObject({
+      state: "EXITING",
+      triggered: true,
+      cancelledTargetCount: 1,
+      filledSizeMicros: 20_000_000,
+    });
+    expect(database.listCurrentPaperPositionViews()[0]).toMatchObject({
+      quantityMicros: 30_000_000,
+      firstSellAt: expect.any(String),
+    });
+    expect(
+      database
+        .listPaperOrders()
+        .filter((order) => order.executionKind === "TARGET"),
+    ).toEqual([expect.objectContaining({ status: "CANCELLED" })]);
+
+    expect(
+      database.executeTestStopLoss({
+        ...stopIntent,
+        bookVersion: "STOP-BID-3",
+        bids: [{ priceMicros: 6_000, sizeMicros: 30_000_000 }],
+        observedAt: new Date("2026-01-02T00:00:32.000Z"),
+      }),
+    ).toMatchObject({ state: "STOPPED", filledSizeMicros: 30_000_000 });
+    expect(database.listCurrentPaperPositionViews()).toEqual([]);
+    expect(database.validatePaperState()).toMatchObject({ passed: true, errors: [] });
+    expect(
+      database.executeTestFakBuy({
+        ...buyInput,
+        book: { ...buyInput.book, bookVersion: "STOP-REENTRY" },
+      }).outcome,
+    ).toBe("BLOCKED");
+  });
+
+  it("resets stop confirmation after an executable bid recovers to the threshold", () => {
+    const database = new PaperDatabase(":memory:", 100_000_000);
+    databases.push(database);
+    database.setStrategyStatus("RUNNING");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: makeBook({
+        bookVersion: "RECOVERY-BUY",
+        asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+      }),
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      eligibility: testEligibilitySettings(),
+      feeRateMicros: 0,
+      feeExponent: 1,
+      stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+    });
+    const observe = (bookVersion: string, bid: number, seconds: number) =>
+      database.executeTestStopLoss({
+        tokenId: candidate.tokenId,
+        bookVersion,
+        bids: [{ priceMicros: bid, sizeMicros: 50_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        feeRateMicros: 0,
+        feeExponent: 1,
+        observedAt: new Date(`2026-01-02T00:00:${String(seconds).padStart(2, "0")}.000Z`),
+      });
+
+    expect(observe("RECOVERY-LOW-1", 7_000, 0).state).toBe("ARMED");
+    expect(observe("RECOVERY-HIGH", 8_000, 20).state).toBe("WATCHING");
+    expect(observe("RECOVERY-LOW-2", 7_000, 31)).toMatchObject({
+      state: "ARMED",
+      triggered: false,
+    });
+    expect(observe("RECOVERY-LOW-3", 7_000, 32)).toMatchObject({
+      state: "ARMED",
+      triggered: false,
+    });
+  });
+
+  it("persists an armed stop and completes confirmation after restart", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pm-small-stop-restart-"));
+    const databasePath = join(directory, "paper.db");
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    const first = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      first.setStrategyStatus("RUNNING");
+      first.executeTestFakBuy({
+        candidate,
+        book: makeBook({
+          bookVersion: "PERSIST-BUY",
+          asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+        }),
+        maxPriceMicros: 30_000,
+        orderBudgetMicros: 1_000_000,
+        eligibility: testEligibilitySettings(),
+        feeRateMicros: 0,
+        feeExponent: 1,
+        stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+      });
+      expect(
+        first.executeTestStopLoss({
+          tokenId: candidate.tokenId,
+          bookVersion: "PERSIST-LOW-1",
+          bids: [{ priceMicros: 7_000, sizeMicros: 50_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+          observedAt: new Date("2026-01-02T00:00:00.000Z"),
+        }).state,
+      ).toBe("ARMED");
+    } finally {
+      first.close();
+    }
+
+    const restarted = new PaperDatabase(databasePath, 100_000_000);
+    try {
+      expect(restarted.getPaperStopLoss(candidate.tokenId)).toMatchObject({
+        state: "ARMED",
+        belowObservationCount: 1,
+      });
+      expect(
+        restarted.executeTestStopLoss({
+          tokenId: candidate.tokenId,
+          bookVersion: "PERSIST-LOW-2",
+          bids: [{ priceMicros: 7_000, sizeMicros: 50_000_000 }],
+          minOrderSizeMicros: 5_000_000,
+          feeRateMicros: 0,
+          feeExponent: 1,
+          observedAt: new Date("2026-01-02T00:00:31.000Z"),
+        }),
+      ).toMatchObject({
+        state: "STOPPED",
+        triggered: true,
+        filledSizeMicros: 50_000_000,
+      });
+      expect(restarted.validatePaperState()).toMatchObject({
+        passed: true,
+        errors: [],
+      });
+    } finally {
+      restarted.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("matches Preview coverage to real FAK sells when targets share all Bid depth", () => {
     const database = new PaperDatabase(":memory:", 100_000_000);
     databases.push(database);
@@ -1156,6 +1368,8 @@ function defaultPreferences(): Omit<PaperTradingPreferences, "updatedAt"> {
     maxBuyPriceMicros: 30_000,
     targetSellPriceIncreaseMicros: 10_000,
     targetSellPriceMultiplierMicros: 1_500_000,
+    stopLossEnabled: true,
+    stopLossMultiplierMicros: 400_000,
     minBidAskRatioPercent: 50,
     minMarketDurationDays: 1,
     maxMarketDurationDays: 30,

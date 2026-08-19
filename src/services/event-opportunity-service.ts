@@ -13,6 +13,7 @@ import {
 } from "../domain/market-eligibility.js";
 import type { CandidateSortDirection, FakBuyPreview } from "../domain/trading-strategy.js";
 import type { TokenOrderBook, TradeCandidate } from "../domain/types.js";
+import type { StopLossSettings } from "../domain/stop-loss.js";
 import type {
   PaperDatabase,
   PaperEventLock,
@@ -26,6 +27,7 @@ export interface EventOpportunitySelection {
   getMaxBuyPriceMicros?(): number;
   getOrderBudgetMicros?(): number;
   getTargetSellPriceSettings?(): TargetSellPriceSettings;
+  getStopLossSettings?(): StopLossSettings;
   getEligibilitySettings?(): MarketEligibilitySettings;
   getCandidateSortDirection?(): CandidateSortDirection;
   getStateVersion?(): string;
@@ -161,6 +163,10 @@ export class EventOpportunityService {
         increaseMicros: this.config.targetSellPriceIncreaseMicros,
         multiplierMicros: this.config.targetSellPriceMultiplierMicros,
       };
+    const stopLossSettings = this.selection?.getStopLossSettings?.() ?? {
+      enabled: this.config.stopLossEnabled,
+      multiplierMicros: this.config.stopLossMultiplierMicros,
+    };
     const opportunities: EventOpportunity[] = [];
     for (const candidate of participants) {
       const book = books.get(candidate.tokenId);
@@ -195,6 +201,7 @@ export class EventOpportunityService {
         feeRateMicros: candidate.feeRateMicros,
         feeExponent: candidate.feeExponent,
         targetSellPriceSettings,
+        stopLossSettings,
         eligibility,
       };
       const preview = this.database.previewTestFakBuy(intent);

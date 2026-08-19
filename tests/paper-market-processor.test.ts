@@ -66,6 +66,84 @@ describe("PaperMarketProcessor", () => {
     expect(processor.getStatus().paperSellFillCount).toBe(1);
   });
 
+  it("confirms and executes a persisted stop loss before target sells", () => {
+    const candidate = makeCandidate({
+      executableBuyPriceMicros: 20_000,
+      makerBuyPriceMicros: 20_000,
+      bestAskMicros: 20_000,
+    });
+    database.executeTestFakBuy({
+      candidate,
+      book: {
+        tokenId: candidate.tokenId,
+        conditionId: candidate.conditionId,
+        bookVersion: "PROCESSOR-STOP-BUY",
+        bids: [{ priceMicros: 10_000, sizeMicros: 100_000_000 }],
+        asks: [{ priceMicros: 20_000, sizeMicros: 50_000_000 }],
+        minOrderSizeMicros: 5_000_000,
+        tickSizeMicros: 10_000,
+        isNegativeRisk: false,
+      },
+      maxPriceMicros: 30_000,
+      orderBudgetMicros: 1_000_000,
+      feeRateMicros: 0,
+      feeExponent: 1,
+      stopLossSettings: { enabled: true, multiplierMicros: 400_000 },
+      eligibility: testEligibilitySettings(),
+    });
+
+    processor.handle({
+      type: "book",
+      tokenId: candidate.tokenId,
+      bids: [{ priceMicros: 7_000, sizeMicros: 20_000_000 }],
+      asks: [],
+      timestampMs: 100,
+    });
+    expect(database.getPaperStopLoss(candidate.tokenId)).toMatchObject({
+      state: "ARMED",
+    });
+
+    vi.setSystemTime(new Date("2026-01-02T00:00:31.000Z"));
+    processor.handle({
+      type: "price_change",
+      tokenId: candidate.tokenId,
+      side: "BUY",
+      priceMicros: 7_000,
+      sizeMicros: 10_000_000,
+      timestampMs: 101,
+    });
+    expect(database.getPaperStopLoss(candidate.tokenId)).toMatchObject({
+      state: "EXITING",
+      triggeredAt: "2026-01-02T00:00:31.000Z",
+    });
+    expect(database.listCurrentPaperPositionViews()[0]).toMatchObject({
+      quantityMicros: 40_000_000,
+    });
+    expect(
+      database.listActivePaperOrders(candidate.tokenId).filter(
+        (order) => order.side === "SELL",
+      ),
+    ).toEqual([]);
+    expect(database.validatePaperState()).toMatchObject({ passed: true, errors: [] });
+
+    vi.setSystemTime(new Date("2026-01-02T00:00:32.000Z"));
+    processor.handle({
+      type: "price_change",
+      tokenId: candidate.tokenId,
+      side: "BUY",
+      priceMicros: 7_000,
+      sizeMicros: 40_000_000,
+      timestampMs: 102,
+    });
+    expect(database.getPaperStopLoss(candidate.tokenId)).toMatchObject({
+      state: "STOPPED",
+      completedAt: "2026-01-02T00:00:32.000Z",
+    });
+    expect(database.listCurrentPaperPositionViews()).toEqual([]);
+    expect(processor.getStatus().paperSellFillCount).toBe(2);
+    expect(database.validatePaperState()).toMatchObject({ passed: true, errors: [] });
+  });
+
   it("continues reducing an existing position after validation pauses new risk", () => {
     const candidate = makeCandidate({
       executableBuyPriceMicros: 20_000,

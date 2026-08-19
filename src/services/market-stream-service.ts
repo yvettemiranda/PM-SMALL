@@ -153,6 +153,9 @@ export class MarketStreamService implements PaperMarketRuntime {
         ...this.database
           .listActivePaperOrders()
           .map((order) => order.tokenId),
+        ...this.database
+          .listCurrentPaperPositionViews()
+          .map((position) => position.tokenId),
       ]),
     ).sort();
 

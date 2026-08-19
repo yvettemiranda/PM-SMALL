@@ -231,6 +231,8 @@ describe("PaperDatabase", () => {
       maxBuyPriceMicros: 30_000,
       targetSellPriceIncreaseMicros: 10_000,
       targetSellPriceMultiplierMicros: 1_500_000,
+      stopLossEnabled: true,
+      stopLossMultiplierMicros: 400_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 30,
       maxMarketProgressPercent: 20,
@@ -275,7 +277,7 @@ describe("PaperDatabase", () => {
           schemaVersion
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 16 });
+        ).toEqual({ version: 17 });
       } finally {
         schemaVersion.close();
       }
@@ -295,6 +297,8 @@ describe("PaperDatabase", () => {
       maxBuyPriceMicros: 20_000,
       targetSellPriceIncreaseMicros: 10_000,
       targetSellPriceMultiplierMicros: 1_500_000,
+      stopLossEnabled: true,
+      stopLossMultiplierMicros: 400_000,
       minMarketDurationDays: 1,
       maxMarketDurationDays: 60,
       maxMarketProgressPercent: 37,
@@ -354,7 +358,8 @@ describe("PaperDatabase", () => {
         DROP TABLE paper_trading_preferences;
         ALTER TABLE paper_trading_preferences_v13 RENAME TO paper_trading_preferences;
         DROP TABLE paper_event_locks;
-        DELETE FROM schema_migrations WHERE version IN (14, 15, 16);
+        DROP TABLE paper_stop_losses;
+        DELETE FROM schema_migrations WHERE version IN (14, 15, 16, 17);
         DELETE FROM audit_log
         WHERE event_type IN (
           'TEST_MARKET_DURATION_RANGE_MIGRATION_COMPLETED',
@@ -373,6 +378,8 @@ describe("PaperDatabase", () => {
         maxBuyPriceMicros: 20_000,
         targetSellPriceIncreaseMicros: 10_000,
         targetSellPriceMultiplierMicros: 1_500_000,
+        stopLossEnabled: false,
+        stopLossMultiplierMicros: 400_000,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 60,
         maxMarketProgressPercent: 37,
@@ -402,7 +409,7 @@ describe("PaperDatabase", () => {
           inspectedDatabase
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get(),
-        ).toEqual({ version: 16 });
+        ).toEqual({ version: 17 });
         expect(
           inspectedDatabase
             .prepare(
@@ -463,6 +470,8 @@ describe("PaperDatabase", () => {
         maxBuyPriceMicros: 30_000,
         targetSellPriceIncreaseMicros: 10_000,
         targetSellPriceMultiplierMicros: 1_500_000,
+        stopLossEnabled: true,
+        stopLossMultiplierMicros: 400_000,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 30,
         maxMarketProgressPercent: 20,
@@ -500,7 +509,8 @@ describe("PaperDatabase", () => {
           SET event_id = 'conflict-event'
           WHERE token_id = 'conflict-second';
           DROP TABLE paper_event_locks;
-          DELETE FROM schema_migrations WHERE version IN (15, 16);
+          DROP TABLE paper_stop_losses;
+          DELETE FROM schema_migrations WHERE version IN (15, 16, 17);
           DELETE FROM audit_log
           WHERE event_type = 'TEST_EVENT_CYCLE_MIGRATION_COMPLETED';
         `);
@@ -518,6 +528,11 @@ describe("PaperDatabase", () => {
           "BINARY",
           "TERNARY",
         ]);
+        expect(upgraded.getPaperTradingPreferences()).toMatchObject({
+          stopLossEnabled: false,
+          stopLossMultiplierMicros: 400_000,
+        });
+        expect(upgraded.listPaperStopLosses()).toEqual([]);
         expect(upgraded.getPaperEventLock("single-event")).toMatchObject({
           state: "ACTIVE",
           activeTokenId: single.tokenId,

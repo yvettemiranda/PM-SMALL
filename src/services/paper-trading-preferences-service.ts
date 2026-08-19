@@ -24,6 +24,10 @@ import {
   type TargetSellPriceSettings,
 } from "../domain/price.js";
 import type { TradeCandidate } from "../domain/types.js";
+import {
+  DEFAULT_STOP_LOSS_MULTIPLIER_MICROS,
+  type StopLossSettings,
+} from "../domain/stop-loss.js";
 import type { PaperDatabase } from "../infrastructure/db/database.js";
 
 const MIN_MARKET_DURATION_DAYS = 1;
@@ -39,6 +43,8 @@ export type PaperTradingPreferencesSnapshot = {
   maxBuyPriceMicros: number;
   targetSellPriceIncreaseMicros: number;
   targetSellPriceMultiplierMicros: number;
+  stopLossEnabled: boolean;
+  stopLossMultiplierMicros: number;
   minBidAskRatioPercent: number;
   minMarketDurationDays: number;
   maxMarketDurationDays: number;
@@ -63,6 +69,8 @@ const RESET_TEST_PREFERENCES: Omit<
     DEFAULT_TARGET_SELL_PRICE_INCREASE_MICROS,
   targetSellPriceMultiplierMicros:
     DEFAULT_TARGET_SELL_PRICE_MULTIPLIER_MICROS,
+  stopLossEnabled: true,
+  stopLossMultiplierMicros: DEFAULT_STOP_LOSS_MULTIPLIER_MICROS,
   minBidAskRatioPercent: 50,
   minMarketDurationDays: 1,
   maxMarketDurationDays: 30,
@@ -77,6 +85,8 @@ type MarketFilterUpdate = Pick<
   minBuyPriceMicros?: number;
   targetSellPriceIncreaseMicros?: number;
   targetSellPriceMultiplierMicros?: number;
+  stopLossEnabled?: boolean;
+  stopLossMultiplierMicros?: number;
   minMarketDurationDays?: number;
   allCategories?: boolean;
   selectedCategories?: readonly string[];
@@ -93,6 +103,8 @@ type NormalizedMarketFilters = Pick<
   | "maxBuyPriceMicros"
   | "targetSellPriceIncreaseMicros"
   | "targetSellPriceMultiplierMicros"
+  | "stopLossEnabled"
+  | "stopLossMultiplierMicros"
   | "minBidAskRatioPercent"
   | "minMarketDurationDays"
   | "maxMarketDurationDays"
@@ -126,6 +138,8 @@ export class PaperTradingPreferencesService {
       maxBuyPriceMicros: config.maxBuyPriceMicros,
       targetSellPriceIncreaseMicros: config.targetSellPriceIncreaseMicros,
       targetSellPriceMultiplierMicros: config.targetSellPriceMultiplierMicros,
+      stopLossEnabled: config.stopLossEnabled,
+      stopLossMultiplierMicros: config.stopLossMultiplierMicros,
       minBidAskRatioPercent: config.minBidAskRatioPercent,
       minMarketDurationDays: config.minMarketDurationDays,
       maxMarketDurationDays: config.maxMarketDurationDays,
@@ -185,6 +199,13 @@ export class PaperTradingPreferencesService {
     return {
       increaseMicros: this.snapshot.targetSellPriceIncreaseMicros,
       multiplierMicros: this.snapshot.targetSellPriceMultiplierMicros,
+    };
+  }
+
+  public getStopLossSettings(): StopLossSettings {
+    return {
+      enabled: this.snapshot.stopLossEnabled,
+      multiplierMicros: this.snapshot.stopLossMultiplierMicros,
     };
   }
 
@@ -250,6 +271,9 @@ export class PaperTradingPreferencesService {
       targetSellPriceMultiplierMicros:
         update.targetSellPriceMultiplierMicros ??
         this.snapshot.targetSellPriceMultiplierMicros,
+      stopLossEnabled: update.stopLossEnabled ?? this.snapshot.stopLossEnabled,
+      stopLossMultiplierMicros:
+        update.stopLossMultiplierMicros ?? this.snapshot.stopLossMultiplierMicros,
       minBidAskRatioPercent:
         update.minBidAskRatioPercent ?? this.snapshot.minBidAskRatioPercent,
       minMarketDurationDays:
@@ -357,6 +381,8 @@ function validateMarketFilterValues(
     | "maxBuyPriceMicros"
     | "targetSellPriceIncreaseMicros"
     | "targetSellPriceMultiplierMicros"
+    | "stopLossEnabled"
+    | "stopLossMultiplierMicros"
     | "minBidAskRatioPercent"
     | "minMarketDurationDays"
     | "maxMarketDurationDays"
@@ -393,6 +419,13 @@ function validateMarketFilterValues(
     values.targetSellPriceMultiplierMicros < 0
   ) {
     throw new Error("Target sell-price multiplier must be non-negative");
+  }
+  if (
+    !Number.isSafeInteger(values.stopLossMultiplierMicros) ||
+    values.stopLossMultiplierMicros <= 0 ||
+    values.stopLossMultiplierMicros >= 1_000_000
+  ) {
+    throw new Error("Stop-loss multiplier must be greater than 0 and less than 1");
   }
   if (
     !Number.isInteger(values.minMarketDurationDays) ||

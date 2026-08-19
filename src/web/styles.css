@@ -403,6 +403,22 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .subsection-heading > span { font-size: 12px; font-weight: 700; }
 .subsection-heading small { color: var(--muted); font-size: 10px; }
 .money-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.stop-loss-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 9px;
+  margin-top: 10px;
+}
+.stop-loss-toggle {
+  min-height: 39px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 11px;
+}
+.stop-loss-multiplier-field[aria-disabled="true"] { opacity: 0.55; }
 .test-settings .danger { width: 100%; margin-top: 10px; }
 .config-actions { display: grid; margin-top: 10px; }
 
@@ -660,7 +676,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
   .portfolio article { padding: 9px 4px; }
   .portfolio strong { font-size: 14px; }
   .config-panel { padding: 12px; }
-  .money-fields, .config-actions { grid-template-columns: 1fr; }
+  .money-fields, .stop-loss-settings, .config-actions { grid-template-columns: 1fr; }
   .scan-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
   .scan-state { margin-top: 3px; }
   .section-heading { min-height: 45px; }

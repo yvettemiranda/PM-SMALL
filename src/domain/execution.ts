@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import type { MarketEligibilitySettings } from "./market-eligibility.js";
 import type { TargetSellPriceSettings } from "./price.js";
+import type { StopLossSettings } from "./stop-loss.js";
 
 export type ExecutionMode = "TEST" | "LIVE";
 export type ImmediateBuyOutcome = "FILLED" | "PARTIAL" | "NO_FILL" | "BLOCKED";
@@ -29,6 +30,7 @@ export type ImmediateBuyIntent = {
   feeRateMicros: number;
   feeExponent: number;
   targetSellPriceSettings?: TargetSellPriceSettings;
+  stopLossSettings?: StopLossSettings;
   eligibility: MarketEligibilitySettings;
 };
 
@@ -59,9 +61,22 @@ export type TargetSellExecution = {
   consumedBids: ConsumedBookLevel[];
 };
 
+export type StopLossState = "WATCHING" | "ARMED" | "EXITING" | "STOPPED";
+
+export type StopLossIntent = TargetSellIntent & {
+  observedAt: Date;
+};
+
+export type StopLossExecution = TargetSellExecution & {
+  state: StopLossState | null;
+  triggered: boolean;
+  cancelledTargetCount: number;
+};
+
 export interface TradingExecutionAdapter {
   readonly mode: ExecutionMode;
   readonly enabled: boolean;
   executeBuy(intent: ImmediateBuyIntent): ImmediateBuyExecution;
+  executeStopLoss(intent: StopLossIntent): StopLossExecution;
   executeTargetSells(intent: TargetSellIntent): TargetSellExecution;
 }

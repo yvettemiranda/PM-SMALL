@@ -16,6 +16,7 @@ import type {
   PaperDatabase,
   PaperEventLock,
   PaperPositionView,
+  PaperStopLoss,
   PaperSettlement,
   PaperTradeRecord,
   StrategyState,
@@ -82,6 +83,8 @@ function publicConfig(
     ),
     targetSellPriceMultiplier:
       preferences.targetSellPriceMultiplierMicros / 1_000_000,
+    stopLossEnabled: preferences.stopLossEnabled,
+    stopLossMultiplier: preferences.stopLossMultiplierMicros / 1_000_000,
     minBidAskRatioPercent: preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     scanIntervalMs: config.scanIntervalMs,
@@ -452,6 +455,8 @@ function serializePreferences(preferences: PaperTradingPreferencesSnapshot) {
       preferences.targetSellPriceIncreaseMicros / 10_000,
     targetSellPriceMultiplier:
       preferences.targetSellPriceMultiplierMicros / 1_000_000,
+    stopLossEnabled: preferences.stopLossEnabled,
+    stopLossMultiplier: preferences.stopLossMultiplierMicros / 1_000_000,
     minBidAskRatioPercent: preferences.minBidAskRatioPercent,
     maxMarketProgressPercent: preferences.maxMarketProgressPercent,
     orderAmount: microsToDecimalString(preferences.orderBudgetMicros),
@@ -521,6 +526,7 @@ type PositionSerializationContext = {
   candidateByToken: Map<string, TradeCandidate>;
   eventLockByEvent: Map<string, PaperEventLock>;
   targetSellPricesByToken: Map<string, number[]>;
+  stopLossByToken: Map<string, PaperStopLoss>;
 };
 
 function positionSerializationContext(
@@ -548,6 +554,11 @@ function positionSerializationContext(
         .map((eventLock) => [eventLock.eventId, eventLock]),
     ),
     targetSellPricesByToken,
+    stopLossByToken: new Map(
+      dependencies.database
+        .listPaperStopLosses()
+        .map((stopLoss) => [stopLoss.tokenId, stopLoss]),
+    ),
   };
 }
 
@@ -591,8 +602,13 @@ function serializePositionView(
     dependencies,
   );
   const targetSellPrices = context.targetSellPricesByToken.get(position.tokenId) ?? [];
+  const stopLoss = context.stopLossByToken.get(position.tokenId) ?? null;
   const cycleStatus =
-    eventLock?.state === "LEGACY_CONFLICT"
+    stopLoss?.state === "EXITING"
+      ? "STOP_EXITING"
+      : stopLoss?.state === "ARMED"
+        ? "STOP_ARMED"
+        : eventLock?.state === "LEGACY_CONFLICT"
       ? "LEGACY_CONFLICT"
       : position.firstSellAt === null
         ? "ACCUMULATING"
@@ -612,6 +628,15 @@ function serializePositionView(
     eventLockState: eventLock?.state ?? null,
     activeTokenId: eventLock?.activeTokenId ?? null,
     cycleStatus,
+    stopLossStatus: stopLoss?.state ?? null,
+    stopLossMultiplier:
+      stopLoss === null ? null : stopLoss.multiplierMicros / 1_000_000,
+    stopLossThreshold:
+      stopLoss === null
+        ? null
+        : microsToDecimalString(stopLoss.thresholdPriceMicros),
+    stopLossBelowSince: stopLoss?.belowSince ?? null,
+    stopLossTriggeredAt: stopLoss?.triggeredAt ?? null,
     cycleBudget:
       eventLock?.state !== "ACTIVE"
         ? null
@@ -903,6 +928,17 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
             "Target multiplier is outside the supported precision",
           )
           .optional(),
+        stopLossEnabled: z.boolean().optional(),
+        stopLossMultiplier: z
+          .number()
+          .finite()
+          .positive()
+          .lt(1)
+          .refine(
+            (value) => Number.isSafeInteger(Math.round(value * 1_000_000)),
+            "Stop-loss multiplier is outside the supported precision",
+          )
+          .optional(),
         minMarketDurationDays: z.number().int().min(1).max(365).optional(),
         maxMarketDurationDays: z.number().int().min(1).max(365),
         allCategories: z.boolean().optional(),
@@ -984,6 +1020,16 @@ export function buildApp(dependencies: AppDependencies): FastifyInstance {
         : {
             targetSellPriceMultiplierMicros: multiplierToMicros(
               body.targetSellPriceMultiplier,
+            ),
+          }),
+      ...(body.stopLossEnabled === undefined
+        ? {}
+        : { stopLossEnabled: body.stopLossEnabled }),
+      ...(body.stopLossMultiplier === undefined
+        ? {}
+        : {
+            stopLossMultiplierMicros: multiplierToMicros(
+              body.stopLossMultiplier,
             ),
           }),
       minMarketDurationDays: requestedMinMarketDurationDays,

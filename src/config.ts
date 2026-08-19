@@ -17,6 +17,12 @@ const buyPriceFromEnvironment = (fallback: number, label: string) =>
     )
     .default(fallback);
 
+const booleanFromEnvironment = (fallback: boolean) =>
+  z
+    .enum(["true", "false"])
+    .default(fallback ? "true" : "false")
+    .transform((value) => value === "true");
+
 const configSchema = z.object({
   HOST: z.string().min(1).default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -43,6 +49,17 @@ const configSchema = z.object({
       "TARGET_SELL_PRICE_MULTIPLIER exceeds the supported precision",
     )
     .default(1.5),
+  STOP_LOSS_ENABLED: booleanFromEnvironment(true),
+  STOP_LOSS_MULTIPLIER: z.coerce
+    .number()
+    .finite()
+    .gt(0)
+    .lt(1)
+    .refine(
+      (value) => Number.isSafeInteger(Math.round(value * USD_SCALE)),
+      "STOP_LOSS_MULTIPLIER exceeds the supported precision",
+    )
+    .default(0.4),
   MIN_BID_ASK_RATIO_PERCENT: z.coerce.number().int().min(1).max(100).default(50),
   MAX_MARKET_PROGRESS_PERCENT: z.coerce.number().int().min(1).max(100).default(20),
   SCAN_INTERVAL_MS: z.coerce.number().int().min(1_000).default(15_000),
@@ -66,6 +83,8 @@ export type AppConfig = {
   maxBuyPriceMicros: number;
   targetSellPriceIncreaseMicros: number;
   targetSellPriceMultiplierMicros: number;
+  stopLossEnabled: boolean;
+  stopLossMultiplierMicros: number;
   minBidAskRatioPercent: number;
   maxMarketProgressPercent: number;
   scanIntervalMs: number;
@@ -120,6 +139,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     targetSellPriceMultiplierMicros: toMicros(
       parsed.TARGET_SELL_PRICE_MULTIPLIER,
     ),
+    stopLossEnabled: parsed.STOP_LOSS_ENABLED,
+    stopLossMultiplierMicros: toMicros(parsed.STOP_LOSS_MULTIPLIER),
     minBidAskRatioPercent: parsed.MIN_BID_ASK_RATIO_PERCENT,
     maxMarketProgressPercent: parsed.MAX_MARKET_PROGRESS_PERCENT,
     scanIntervalMs: parsed.SCAN_INTERVAL_MS,

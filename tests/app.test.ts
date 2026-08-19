@@ -330,6 +330,8 @@ describe("HTTP app", () => {
         maxBuyPriceCents: 99,
         targetSellPriceIncreaseCents: 0.125,
         targetSellPriceMultiplier: 1.812345,
+        stopLossEnabled: false,
+        stopLossMultiplier: 0.375,
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
         minMarketDurationDays: 7,
@@ -352,6 +354,8 @@ describe("HTTP app", () => {
         maxBuyPriceCents: 99,
         targetSellPriceIncreaseCents: 0.125,
         targetSellPriceMultiplier: 1.812345,
+        stopLossEnabled: false,
+        stopLossMultiplier: 0.375,
         minBidAskRatioPercent: 60,
         maxMarketProgressPercent: 15,
         minMarketDurationDays: 7,
@@ -700,6 +704,8 @@ describe("HTTP app", () => {
         maxBuyPriceCents: 99,
         targetSellPriceIncreaseCents: 1,
         targetSellPriceMultiplier: 1.5,
+        stopLossEnabled: true,
+        stopLossMultiplier: 0.4,
         minBidAskRatioPercent: 50,
         minMarketDurationDays: 1,
         maxMarketDurationDays: 30,
@@ -708,6 +714,7 @@ describe("HTTP app", () => {
     });
     expect(database.listPaperOrders()).toEqual([]);
     expect(database.listPaperPositions()).toEqual([]);
+    expect(database.listPaperStopLosses()).toEqual([]);
     const recordsAfterReset = await app.inject({
       method: "GET",
       url: "/api/test/trade-records?limit=20",
@@ -729,6 +736,8 @@ describe("HTTP app", () => {
     expect(page.body).toContain("全选");
     expect(page.body).toContain("最低买卖盘比例");
     expect(page.body).toContain("生命周期进度");
+    expect(page.body).toContain('id="stop-loss-enabled"');
+    expect(page.body).toContain('id="stop-loss-multiplier"');
     expect(page.body).toContain("总模拟资金");
     expect(page.body).toContain("每 Event 每轮金额");
     expect(page.body).toContain("多元市场（4+）");
@@ -777,6 +786,7 @@ describe("HTTP app", () => {
   it("returns recent TEST trade records as order-level position activities", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T08:00:00.000Z"));
       const { app, database } = makeTestApp([]);
       const candidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -805,7 +815,6 @@ describe("HTTP app", () => {
           feeExponent: 1,
         });
 
-      vi.setSystemTime(new Date("2026-08-11T08:00:00.000Z"));
       expect(executeBuy("TRADE-RECORD-BUY-1").spentMicros).toBe(200_000);
       vi.setSystemTime(new Date("2026-08-11T08:01:00.000Z"));
       expect(executeBuy("TRADE-RECORD-BUY-2").spentMicros).toBe(200_000);
@@ -910,6 +919,7 @@ describe("HTTP app", () => {
   it("keeps separate sell executions from the same millisecond as separate trade records", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T08:15:00.000Z"));
       const { app, database } = makeTestApp([]);
       const candidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -918,8 +928,6 @@ describe("HTTP app", () => {
         fixedSellPriceMicros: 30_000,
       });
       database.setStrategyStatus("RUNNING");
-      vi.setSystemTime(new Date("2026-08-11T08:15:00.000Z"));
-
       expect(
         database.executeTestFakBuy({
           candidate,
@@ -986,6 +994,7 @@ describe("HTTP app", () => {
   it("combines one TEST order's multi-level fills into one trade record", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T08:30:00.000Z"));
       const { app, database } = makeTestApp([]);
       const candidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -993,8 +1002,6 @@ describe("HTTP app", () => {
         bestAskMicros: 20_000,
       });
       database.setStrategyStatus("RUNNING");
-      vi.setSystemTime(new Date("2026-08-11T08:30:00.000Z"));
-
       const result = database.executeTestFakBuy({
         candidate,
         book: {
@@ -1044,6 +1051,7 @@ describe("HTTP app", () => {
   it("refreshes cached trade records with fee-adjusted quantities and proceeds", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T08:40:00.000Z"));
       const { app, database } = makeTestApp([]);
       const candidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -1052,8 +1060,6 @@ describe("HTTP app", () => {
         fixedSellPriceMicros: 30_000,
       });
       database.setStrategyStatus("RUNNING");
-      vi.setSystemTime(new Date("2026-08-11T08:40:00.000Z"));
-
       const buy = database.executeTestFakBuy({
         candidate,
         book: {
@@ -1134,6 +1140,7 @@ describe("HTTP app", () => {
   it("includes completed position settlements in recent TEST trade records", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T09:00:00.000Z"));
       const { app, database } = makeTestApp([]);
       const candidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -1141,7 +1148,6 @@ describe("HTTP app", () => {
         bestAskMicros: 20_000,
       });
       database.setStrategyStatus("RUNNING");
-      vi.setSystemTime(new Date("2026-08-11T09:00:00.000Z"));
       database.executeTestFakBuy({
         candidate,
         book: {
@@ -1211,6 +1217,7 @@ describe("HTTP app", () => {
   it("rebuilds cached trade records when an older settlement is backfilled later", async () => {
     vi.useFakeTimers();
     try {
+      vi.setSystemTime(new Date("2026-08-11T08:50:00.000Z"));
       const { app, database } = makeTestApp([]);
       const recentCandidate = makeCurrentCandidate({
         executableBuyPriceMicros: 20_000,
@@ -1264,7 +1271,6 @@ describe("HTTP app", () => {
         });
 
       database.setStrategyStatus("RUNNING");
-      vi.setSystemTime(new Date("2026-08-11T08:50:00.000Z"));
       executeBuy(backfilledCandidate, "TRADE-RECORD-BACKFILL-BUY");
       vi.setSystemTime(new Date("2026-08-11T09:00:00.000Z"));
       executeBuy(recentCandidate, "TRADE-RECORD-RECENT-BUY");

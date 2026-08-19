@@ -16,6 +16,8 @@ export const testConfig: AppConfig = {
   maxBuyPriceMicros: 30_000,
   targetSellPriceIncreaseMicros: 10_000,
   targetSellPriceMultiplierMicros: 1_500_000,
+  stopLossEnabled: true,
+  stopLossMultiplierMicros: 400_000,
   minBidAskRatioPercent: 50,
   maxMarketProgressPercent: 20,
   scanIntervalMs: 15_000,

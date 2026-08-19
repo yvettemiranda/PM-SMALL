@@ -9,6 +9,9 @@ import type {
   ImmediateBuyExecution,
   ImmediateBuyIntent,
   ImmediateBuyOutcome,
+  StopLossExecution,
+  StopLossIntent,
+  StopLossState,
   TargetSellExecution,
 } from "../../domain/execution.js";
 import {
@@ -25,6 +28,10 @@ import {
 import { isMarketEligible } from "../../domain/market-eligibility.js";
 import type { MarketEligibilitySettings } from "../../domain/market-eligibility.js";
 import type { MarketType } from "../../domain/market-type.js";
+import {
+  calculateStopLossThresholdMicros,
+  STOP_LOSS_CONFIRMATION_WINDOW_MS,
+} from "../../domain/stop-loss.js";
 import {
   planFakSellTargets,
   previewFakBuy,
@@ -204,11 +211,32 @@ export type PaperTradingPreferences = {
   maxBuyPriceMicros: number;
   targetSellPriceIncreaseMicros: number;
   targetSellPriceMultiplierMicros: number;
+  stopLossEnabled: boolean;
+  stopLossMultiplierMicros: number;
   minBidAskRatioPercent: number;
   minMarketDurationDays: number;
   maxMarketDurationDays: number;
   maxMarketProgressPercent: number;
   candidatesSelectedByDefault: boolean;
+  updatedAt: string;
+};
+
+export type PaperStopLoss = {
+  tokenId: string;
+  eventId: string;
+  marketId: string;
+  conditionId: string;
+  multiplierMicros: number;
+  entryPriceMicros: number;
+  thresholdPriceMicros: number;
+  state: StopLossState;
+  belowSince: string | null;
+  lastBelowAt: string | null;
+  lastBelowBookVersion: string | null;
+  belowObservationCount: number;
+  triggeredAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -397,6 +425,25 @@ type PaperEventLockRow = {
   updated_at: string;
 };
 
+type PaperStopLossRow = {
+  token_id: string;
+  event_id: string;
+  market_id: string;
+  condition_id: string;
+  multiplier_micros: number;
+  entry_price_micros: number;
+  threshold_price_micros: number;
+  state: StopLossState;
+  below_since: string | null;
+  last_below_at: string | null;
+  last_below_book_version: string | null;
+  below_observation_count: number;
+  triggered_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type TestFakBuyPlanningResult = TestFakBuyPreviewResult & {
   availableBids: BookLevel[];
   availableAsks: BookLevel[];
@@ -562,6 +609,8 @@ function rowToPaperTradingPreferences(row: {
   max_buy_price_micros: number;
   target_sell_price_increase_micros: number;
   target_sell_price_multiplier_micros: number;
+  stop_loss_enabled: number;
+  stop_loss_multiplier_micros: number;
   min_bid_ask_ratio_percent: number;
   min_market_duration_days: number;
   max_market_duration_days: number;
@@ -587,11 +636,34 @@ function rowToPaperTradingPreferences(row: {
     maxBuyPriceMicros: row.max_buy_price_micros,
     targetSellPriceIncreaseMicros: row.target_sell_price_increase_micros,
     targetSellPriceMultiplierMicros: row.target_sell_price_multiplier_micros,
+    stopLossEnabled: row.stop_loss_enabled === 1,
+    stopLossMultiplierMicros: row.stop_loss_multiplier_micros,
     minBidAskRatioPercent: row.min_bid_ask_ratio_percent,
     minMarketDurationDays: row.min_market_duration_days,
     maxMarketDurationDays: row.max_market_duration_days,
     maxMarketProgressPercent: row.max_market_progress_percent,
     candidatesSelectedByDefault: row.candidates_selected_by_default === 1,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToPaperStopLoss(row: PaperStopLossRow): PaperStopLoss {
+  return {
+    tokenId: row.token_id,
+    eventId: row.event_id,
+    marketId: row.market_id,
+    conditionId: row.condition_id,
+    multiplierMicros: row.multiplier_micros,
+    entryPriceMicros: row.entry_price_micros,
+    thresholdPriceMicros: row.threshold_price_micros,
+    state: row.state,
+    belowSince: row.below_since,
+    lastBelowAt: row.last_below_at,
+    lastBelowBookVersion: row.last_below_book_version,
+    belowObservationCount: row.below_observation_count,
+    triggeredAt: row.triggered_at,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
@@ -656,6 +728,7 @@ export class PaperDatabase {
       { version: 14, file: "014_market_duration_range.sql" },
       { version: 15, file: "015_event_cycles.sql" },
       { version: 16, file: "016_configurable_prices.sql" },
+      { version: 17, file: "017_test_stop_loss.sql" },
     ];
 
     for (const migration of migrations) {
@@ -868,7 +941,8 @@ export class PaperDatabase {
           (SELECT COUNT(*) FROM paper_fills) +
           (SELECT COUNT(*) FROM paper_positions) +
           (SELECT COUNT(*) FROM paper_settlements) +
-          (SELECT COUNT(*) FROM paper_event_locks) AS count`,
+          (SELECT COUNT(*) FROM paper_event_locks) +
+          (SELECT COUNT(*) FROM paper_stop_losses) AS count`,
       )
       .get() as { count: number };
     return row.count;
@@ -893,6 +967,7 @@ export class PaperDatabase {
         .run();
       this.database.prepare("DELETE FROM paper_orders").run();
       this.database.prepare("DELETE FROM paper_settlements").run();
+      this.database.prepare("DELETE FROM paper_stop_losses").run();
       this.database.prepare("DELETE FROM paper_event_locks").run();
       this.database.prepare("DELETE FROM paper_positions").run();
       this.database.prepare("DELETE FROM paper_market_metadata").run();
@@ -936,12 +1011,13 @@ export class PaperDatabase {
             min_buy_price_micros, max_buy_price_micros,
             target_sell_price_increase_micros,
             target_sell_price_multiplier_micros,
+            stop_loss_enabled, stop_loss_multiplier_micros,
             min_market_duration_days, max_market_duration_days,
             max_market_progress_percent,
             candidates_selected_by_default, all_categories_enabled,
             selected_categories_json, candidate_sort_direction,
             order_budget_micros, min_bid_ask_ratio_percent, updated_at
-          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           defaults.marketTypes.includes("BINARY") ? 1 : 0,
@@ -951,6 +1027,8 @@ export class PaperDatabase {
           defaults.maxBuyPriceMicros,
           defaults.targetSellPriceIncreaseMicros,
           defaults.targetSellPriceMultiplierMicros,
+          defaults.stopLossEnabled ? 1 : 0,
+          defaults.stopLossMultiplierMicros,
           defaults.minMarketDurationDays,
           defaults.maxMarketDurationDays,
           defaults.maxMarketProgressPercent,
@@ -999,6 +1077,7 @@ export class PaperDatabase {
               min_buy_price_micros = ?, max_buy_price_micros = ?,
               target_sell_price_increase_micros = ?,
               target_sell_price_multiplier_micros = ?,
+              stop_loss_enabled = ?, stop_loss_multiplier_micros = ?,
               min_market_duration_days = ?, max_market_duration_days = ?,
               max_market_progress_percent = ?,
               candidates_selected_by_default = ?, all_categories_enabled = ?,
@@ -1014,6 +1093,8 @@ export class PaperDatabase {
           preferences.maxBuyPriceMicros,
           preferences.targetSellPriceIncreaseMicros,
           preferences.targetSellPriceMultiplierMicros,
+          preferences.stopLossEnabled ? 1 : 0,
+          preferences.stopLossMultiplierMicros,
           preferences.minMarketDurationDays,
           preferences.maxMarketDurationDays,
           preferences.maxMarketProgressPercent,
@@ -1041,6 +1122,8 @@ export class PaperDatabase {
           preferences.targetSellPriceIncreaseMicros,
         targetSellPriceMultiplierMicros:
           preferences.targetSellPriceMultiplierMicros,
+        stopLossEnabled: preferences.stopLossEnabled,
+        stopLossMultiplierMicros: preferences.stopLossMultiplierMicros,
         minBidAskRatioPercent: preferences.minBidAskRatioPercent,
         minMarketDurationDays: preferences.minMarketDurationDays,
         maxMarketDurationDays: preferences.maxMarketDurationDays,
@@ -1196,6 +1279,25 @@ export class PaperDatabase {
   public getPaperEventLock(eventId: string): PaperEventLock | null {
     const row = this.getPaperEventLockRow(eventId);
     return row === undefined ? null : rowToPaperEventLock(row);
+  }
+
+  public listPaperStopLosses(): PaperStopLoss[] {
+    const rows = this.database
+      .prepare(
+        `SELECT token_id, event_id, market_id, condition_id,
+          multiplier_micros, entry_price_micros, threshold_price_micros,
+          state, below_since, last_below_at, last_below_book_version,
+          below_observation_count, triggered_at, completed_at,
+          created_at, updated_at
+        FROM paper_stop_losses ORDER BY event_id, token_id`,
+      )
+      .all() as unknown as PaperStopLossRow[];
+    return rows.map(rowToPaperStopLoss);
+  }
+
+  public getPaperStopLoss(tokenId: string): PaperStopLoss | null {
+    const row = this.getPaperStopLossRow(tokenId);
+    return row === undefined ? null : rowToPaperStopLoss(row);
   }
 
   public listPaperSettlements(limit = 100): PaperSettlement[] {
@@ -1917,8 +2019,18 @@ export class PaperDatabase {
             order.filledSizeMicros,
         );
       }
+      const exitingStopTokens = new Set(
+        this.listPaperStopLosses()
+          .filter((stopLoss) => stopLoss.state === "EXITING")
+          .map((stopLoss) => stopLoss.tokenId),
+      );
       for (const position of positions) {
-        if ((activeSellByToken.get(position.token_id) ?? 0) !== position.quantity_micros) {
+        const activeSellSizeMicros = activeSellByToken.get(position.token_id) ?? 0;
+        if (
+          exitingStopTokens.has(position.token_id)
+            ? activeSellSizeMicros !== 0
+            : activeSellSizeMicros !== position.quantity_micros
+        ) {
           throw new Error(
             `Active paper sells do not cover position at settlement: ${position.token_id}`,
           );
@@ -1969,6 +2081,7 @@ export class PaperDatabase {
                 cycle_closed_at = ?, updated_at = ? WHERE token_id = ?`,
           )
           .run(positionPnl, nowIso, nowIso, position.token_id);
+        this.finalizePaperStopLossAfterPositionClose(position.token_id, nowIso);
       }
 
       if (positions.length > 0) {
@@ -2387,6 +2500,11 @@ export class PaperDatabase {
           order.filledSizeMicros,
       );
     }
+    const exitingStopTokenIds = new Set(
+      this.listPaperStopLosses()
+        .filter((stopLoss) => stopLoss.state === "EXITING")
+        .map((stopLoss) => stopLoss.tokenId),
+    );
     for (const position of positionRows) {
       const fillPositionKey = `${position.condition_id}\u0000${position.token_id}`;
       if (
@@ -2406,9 +2524,11 @@ export class PaperDatabase {
       if (position.quantity_micros <= 0) {
         continue;
       }
+      const activeSellSizeMicros = activeSellByToken.get(position.token_id) ?? 0;
       if (
-        (activeSellByToken.get(position.token_id) ?? 0) !==
-        position.quantity_micros
+        exitingStopTokenIds.has(position.token_id)
+          ? activeSellSizeMicros !== 0
+          : activeSellSizeMicros !== position.quantity_micros
       ) {
         errors.push(
           `Active paper sells do not cover position: ${position.token_id}`,
@@ -2428,6 +2548,7 @@ export class PaperDatabase {
     }
 
     errors.push(...this.collectPaperEventStateErrors(activeOrders));
+    errors.push(...this.collectPaperStopLossStateErrors(activeOrders));
 
     const settledConditions = this.database
       .prepare(
@@ -2644,6 +2765,120 @@ export class PaperDatabase {
       .all() as unknown as Array<{ event_id: string }>;
     for (const row of postSellBuyRows) {
       errors.add(`Paper Event has a BUY created after first sell: ${row.event_id}`);
+    }
+    return [...errors];
+  }
+
+  private collectPaperStopLossStateErrors(
+    activeOrders: readonly PaperOrder[],
+  ): string[] {
+    const errors = new Set<string>();
+    const metadataByToken = new Map(
+      (
+        this.database
+          .prepare(
+            `SELECT token_id, event_id, market_id
+            FROM paper_market_metadata`,
+          )
+          .all() as unknown as Array<{
+          token_id: string;
+          event_id: string;
+          market_id: string;
+        }>
+      ).map((metadata) => [metadata.token_id, metadata]),
+    );
+    const positionByToken = new Map(
+      (
+        this.database
+          .prepare(
+            `SELECT token_id, quantity_micros, gross_buy_size_micros,
+              gross_buy_notional_micros, condition_id
+            FROM paper_positions`,
+          )
+          .all() as unknown as Array<{
+          token_id: string;
+          quantity_micros: number;
+          gross_buy_size_micros: number;
+          gross_buy_notional_micros: number;
+          condition_id: string;
+        }>
+      ).map((position) => [position.token_id, position]),
+    );
+    const lockByEvent = new Map(
+      this.listPaperEventLocks().map((lock) => [lock.eventId, lock]),
+    );
+
+    for (const stopLoss of this.listPaperStopLosses()) {
+      const metadata = metadataByToken.get(stopLoss.tokenId);
+      if (
+        metadata?.event_id !== stopLoss.eventId ||
+        metadata.market_id !== stopLoss.marketId
+      ) {
+        errors.add(`TEST stop loss has mismatched market identity: ${stopLoss.tokenId}`);
+      }
+      const position = positionByToken.get(stopLoss.tokenId);
+      if (position?.condition_id !== stopLoss.conditionId) {
+        errors.add(`TEST stop loss has mismatched condition identity: ${stopLoss.tokenId}`);
+      }
+      const activeForToken = activeOrders.filter(
+        (order) => order.tokenId === stopLoss.tokenId,
+      );
+      if (
+        ["ARMED", "EXITING", "STOPPED"].includes(stopLoss.state) &&
+        activeForToken.some((order) => order.side === "BUY")
+      ) {
+        errors.add(`TEST stop loss has an active BUY: ${stopLoss.tokenId}`);
+      }
+      if (stopLoss.state === "STOPPED") {
+        if ((position?.quantity_micros ?? 0) !== 0) {
+          errors.add(`Completed TEST stop loss still has a position: ${stopLoss.tokenId}`);
+        }
+        if (activeForToken.some((order) => order.side === "SELL")) {
+          errors.add(`Completed TEST stop loss still has an active SELL: ${stopLoss.tokenId}`);
+        }
+        if (lockByEvent.has(stopLoss.eventId)) {
+          errors.add(`Completed TEST stop loss still has an Event lock: ${stopLoss.eventId}`);
+        }
+        continue;
+      }
+      if (
+        position === undefined ||
+        position.quantity_micros <= 0 ||
+        position.gross_buy_size_micros <= 0 ||
+        position.gross_buy_notional_micros <= 0
+      ) {
+        errors.add(`Active TEST stop loss has no positive position: ${stopLoss.tokenId}`);
+        continue;
+      }
+      const entryPriceMicros = Number(
+        (BigInt(position.gross_buy_notional_micros) * 1_000_000n) /
+          BigInt(position.gross_buy_size_micros),
+      );
+      const thresholdPriceMicros = calculateStopLossThresholdMicros(
+        entryPriceMicros,
+        stopLoss.multiplierMicros,
+      );
+      if (
+        stopLoss.entryPriceMicros !== entryPriceMicros ||
+        stopLoss.thresholdPriceMicros !== thresholdPriceMicros
+      ) {
+        errors.add(`TEST stop loss price basis is stale: ${stopLoss.tokenId}`);
+      }
+      const lock = lockByEvent.get(stopLoss.eventId);
+      if (
+        lock?.state !== "ACTIVE" ||
+        lock.activeTokenId !== stopLoss.tokenId ||
+        lock.marketId !== stopLoss.marketId ||
+        lock.conditionId !== stopLoss.conditionId
+      ) {
+        errors.add(`Active TEST stop loss has no matching Event lock: ${stopLoss.tokenId}`);
+      }
+      if (
+        stopLoss.state === "EXITING" &&
+        activeForToken.some((order) => order.side === "SELL")
+      ) {
+        errors.add(`Triggered TEST stop loss still has an active target: ${stopLoss.tokenId}`);
+      }
     }
     return [...errors];
   }
@@ -2927,6 +3162,11 @@ export class PaperDatabase {
           plan.spentMicros,
           now,
         );
+      this.updatePaperStopLossAfterBuy(
+        input,
+        planning.eventLock !== null,
+        now,
+      );
       this.database
         .prepare(
           `UPDATE strategy_state
@@ -3090,6 +3330,7 @@ export class PaperDatabase {
           completedAt,
           "FIRST_SELL",
         );
+        this.finalizePaperStopLossAfterPositionClose(input.tokenId, completedAt);
         this.releasePaperEventLockIfClosedForToken(input.tokenId, completedAt);
       }
       this.recordTestBookConsumption(
@@ -3105,6 +3346,346 @@ export class PaperDatabase {
         netProceedsMicros,
         feeMicros,
         filledOrderCount,
+        consumedBids,
+      };
+    });
+  }
+
+  public executeTestStopLoss(input: StopLossIntent): StopLossExecution {
+    const observedAtMs = input.observedAt.getTime();
+    if (!Number.isFinite(observedAtMs)) {
+      throw new Error("TEST stop-loss observation time is invalid");
+    }
+    return this.transaction(() => {
+      let stopLoss = this.getPaperStopLossRow(input.tokenId);
+      if (stopLoss === undefined || input.bookVersion.trim().length === 0) {
+        return emptyTestStopLoss(stopLoss?.state ?? null);
+      }
+      const observedAt = input.observedAt.toISOString();
+      const position = this.database
+        .prepare(
+          `SELECT quantity_micros, gross_buy_size_micros,
+            gross_buy_notional_micros
+          FROM paper_positions WHERE token_id = ?`,
+        )
+        .get(input.tokenId) as
+        | {
+            quantity_micros: number;
+            gross_buy_size_micros: number;
+            gross_buy_notional_micros: number;
+          }
+        | undefined;
+      if (position === undefined || position.quantity_micros <= 0) {
+        if (stopLoss.state === "EXITING") {
+          this.database
+            .prepare(
+              `UPDATE paper_stop_losses
+              SET state = 'STOPPED', completed_at = ?, updated_at = ?
+              WHERE token_id = ?`,
+            )
+            .run(observedAt, observedAt, input.tokenId);
+          this.releasePaperEventLockIfClosed(stopLoss.event_id, observedAt);
+          return emptyTestStopLoss("STOPPED");
+        }
+        return emptyTestStopLoss(stopLoss.state);
+      }
+
+      const entryPriceMicros = Number(
+        (BigInt(position.gross_buy_notional_micros) * 1_000_000n) /
+          BigInt(position.gross_buy_size_micros),
+      );
+      const thresholdPriceMicros = calculateStopLossThresholdMicros(
+        entryPriceMicros,
+        stopLoss.multiplier_micros,
+      );
+      if (
+        entryPriceMicros !== stopLoss.entry_price_micros ||
+        thresholdPriceMicros !== stopLoss.threshold_price_micros
+      ) {
+        this.database
+          .prepare(
+            `UPDATE paper_stop_losses
+            SET entry_price_micros = ?, threshold_price_micros = ?,
+                state = 'WATCHING', below_since = NULL, last_below_at = NULL,
+                last_below_book_version = NULL, below_observation_count = 0,
+                triggered_at = NULL, completed_at = NULL, updated_at = ?
+            WHERE token_id = ? AND state IN ('WATCHING', 'ARMED')`,
+          )
+          .run(
+            entryPriceMicros,
+            thresholdPriceMicros,
+            observedAt,
+            input.tokenId,
+          );
+        stopLoss = this.getPaperStopLossRow(input.tokenId) as PaperStopLossRow;
+      }
+
+      const availableBids = this.availableTestBookLevels(
+        input.tokenId,
+        input.bookVersion,
+        "BID",
+        input.bids,
+      );
+      const bestBidMicros = bestBidLevel(availableBids)?.priceMicros ?? null;
+      let triggered = false;
+      let cancelledTargetCount = 0;
+
+      if (stopLoss.state === "WATCHING" || stopLoss.state === "ARMED") {
+        if (bestBidMicros === null) {
+          return emptyTestStopLoss(stopLoss.state);
+        }
+        if (bestBidMicros >= stopLoss.threshold_price_micros) {
+          if (stopLoss.state === "ARMED") {
+            this.database
+              .prepare(
+                `UPDATE paper_stop_losses
+                SET state = 'WATCHING', below_since = NULL,
+                    last_below_at = NULL, last_below_book_version = NULL,
+                    below_observation_count = 0, updated_at = ?
+                WHERE token_id = ?`,
+              )
+              .run(observedAt, input.tokenId);
+            this.writeAudit(
+              "TEST_STOP_LOSS_RECOVERED",
+              "market_token",
+              input.tokenId,
+              { bestBidMicros, thresholdPriceMicros: stopLoss.threshold_price_micros },
+            );
+          }
+          return emptyTestStopLoss("WATCHING");
+        }
+
+        if (stopLoss.state === "WATCHING") {
+          this.database
+            .prepare(
+              `UPDATE paper_stop_losses
+              SET state = 'ARMED', below_since = ?, last_below_at = ?,
+                  last_below_book_version = ?, below_observation_count = 1,
+                  updated_at = ? WHERE token_id = ?`,
+            )
+            .run(
+              observedAt,
+              observedAt,
+              input.bookVersion,
+              observedAt,
+              input.tokenId,
+            );
+          this.writeAudit("TEST_STOP_LOSS_ARMED", "market_token", input.tokenId, {
+            bestBidMicros,
+            thresholdPriceMicros: stopLoss.threshold_price_micros,
+            bookVersion: input.bookVersion,
+          });
+          return emptyTestStopLoss("ARMED");
+        }
+
+        const belowSinceMs = Date.parse(stopLoss.below_since ?? "");
+        const lastBelowAtMs = Date.parse(stopLoss.last_below_at ?? "");
+        if (
+          input.bookVersion === stopLoss.last_below_book_version ||
+          !Number.isFinite(belowSinceMs) ||
+          !Number.isFinite(lastBelowAtMs) ||
+          observedAtMs < lastBelowAtMs
+        ) {
+          return emptyTestStopLoss("ARMED");
+        }
+        const observationCount = stopLoss.below_observation_count + 1;
+        if (
+          observationCount < 2 ||
+          observedAtMs - belowSinceMs < STOP_LOSS_CONFIRMATION_WINDOW_MS
+        ) {
+          this.database
+            .prepare(
+              `UPDATE paper_stop_losses
+              SET last_below_at = ?, last_below_book_version = ?,
+                  below_observation_count = ?, updated_at = ?
+              WHERE token_id = ?`,
+            )
+            .run(
+              observedAt,
+              input.bookVersion,
+              observationCount,
+              observedAt,
+              input.tokenId,
+            );
+          return emptyTestStopLoss("ARMED");
+        }
+
+        this.database
+          .prepare(
+            `UPDATE paper_stop_losses
+            SET state = 'EXITING', last_below_at = ?,
+                last_below_book_version = ?, below_observation_count = ?,
+                triggered_at = ?, updated_at = ? WHERE token_id = ?`,
+          )
+          .run(
+            observedAt,
+            input.bookVersion,
+            observationCount,
+            observedAt,
+            observedAt,
+            input.tokenId,
+          );
+        stopLoss = this.getPaperStopLossRow(input.tokenId) as PaperStopLossRow;
+        triggered = true;
+        this.writeAudit("TEST_STOP_LOSS_TRIGGERED", "market_token", input.tokenId, {
+          eventId: stopLoss.event_id,
+          bestBidMicros,
+          entryPriceMicros: stopLoss.entry_price_micros,
+          thresholdPriceMicros: stopLoss.threshold_price_micros,
+          confirmationWindowMs: STOP_LOSS_CONFIRMATION_WINDOW_MS,
+          observationCount,
+        });
+      }
+
+      if (stopLoss.state === "STOPPED") {
+        return emptyTestStopLoss("STOPPED");
+      }
+
+      const targets = this.listActivePaperOrders(input.tokenId).filter(
+        (order) => order.side === "SELL" && order.executionKind === "TARGET",
+      );
+      for (const target of targets) {
+        this.database
+          .prepare(
+            "UPDATE paper_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+          )
+          .run(observedAt, target.id);
+        this.writeAudit("PAPER_SELL_CANCELLED", "paper_order", target.id, {
+          reason: "STOP_LOSS",
+        });
+      }
+      cancelledTargetCount = targets.length;
+      this.cancelActiveBuysForToken(input.tokenId, observedAt, "STOP_LOSS");
+
+      const plan = planFakSellTargets({
+        bids: availableBids,
+        targets: [
+          {
+            targetIndex: 0,
+            minPriceMicros: 1,
+            availableSizeMicros: position.quantity_micros,
+          },
+        ],
+        minOrderSizeMicros: input.minOrderSizeMicros,
+        feeRateMicros: input.feeRateMicros,
+        feeExponent: input.feeExponent,
+      })[0];
+      if (plan === undefined) {
+        return {
+          ...emptyTestStopLoss("EXITING"),
+          triggered,
+          cancelledTargetCount,
+        };
+      }
+
+      const orderId = randomUUID();
+      const orderStatus: PaperOrderStatus = plan.fullyFilled
+        ? "FILLED"
+        : "CANCELLED";
+      const referenceOrder = targets[0];
+      this.database
+        .prepare(
+          `INSERT INTO paper_orders(
+            id, token_id, condition_id, event_id, market_id, game_starts_at,
+            market_opened_at, market_ends_at, side, price_micros,
+            target_sell_price_micros, linked_buy_order_id,
+            original_size_micros, filled_size_micros,
+            queue_ahead_size_micros, observed_trade_size_micros,
+            status, execution_kind, cash_limit_micros, fee_micros,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SELL', 1, NULL, NULL, ?, ?, 0, 0,
+            ?, 'FAK', 0, ?, ?, ?)`,
+        )
+        .run(
+          orderId,
+          input.tokenId,
+          stopLoss.condition_id,
+          stopLoss.event_id,
+          stopLoss.market_id,
+          referenceOrder?.gameStartsAt ?? null,
+          referenceOrder?.marketOpenedAt ?? null,
+          referenceOrder?.marketEndsAt ?? null,
+          position.quantity_micros,
+          plan.filledSizeMicros,
+          orderStatus,
+          plan.feeMicros,
+          observedAt,
+          observedAt,
+        );
+      for (const [index, fill] of plan.fills.entries()) {
+        this.database
+          .prepare(
+            `INSERT INTO paper_fills(
+              id, order_id, source_trade_id, price_micros, size_micros,
+              net_size_micros, fee_micros, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            orderId,
+            `TEST-FAK-SELL:${orderId}:${index}`,
+            fill.priceMicros,
+            fill.sizeMicros,
+            fill.sizeMicros,
+            fill.feeMicros,
+            observedAt,
+          );
+      }
+      this.applyTestFakSellAccounting(
+        input.tokenId,
+        plan.filledSizeMicros,
+        plan.netProceedsMicros,
+        observedAt,
+      );
+      const consumedBids = plan.fills.map((fill) => ({
+        priceMicros: fill.priceMicros,
+        sizeMicros: fill.sizeMicros,
+      }));
+      this.recordTestBookConsumption(
+        input.tokenId,
+        input.bookVersion,
+        "BID",
+        consumedBids,
+        observedAt,
+      );
+      const remainingQuantityMicros =
+        position.quantity_micros - plan.filledSizeMicros;
+      const state: StopLossState =
+        remainingQuantityMicros === 0 ? "STOPPED" : "EXITING";
+      if (state === "STOPPED") {
+        this.database
+          .prepare(
+            `UPDATE paper_stop_losses
+            SET state = 'STOPPED', completed_at = ?, updated_at = ?
+            WHERE token_id = ?`,
+          )
+          .run(observedAt, observedAt, input.tokenId);
+        this.releasePaperEventLockIfClosed(stopLoss.event_id, observedAt);
+      } else {
+        this.database
+          .prepare(
+            "UPDATE paper_stop_losses SET updated_at = ? WHERE token_id = ?",
+          )
+          .run(observedAt, input.tokenId);
+      }
+      this.writeAudit("TEST_STOP_LOSS_FAK_EXECUTED", "paper_order", orderId, {
+        tokenId: input.tokenId,
+        filledSizeMicros: plan.filledSizeMicros,
+        remainingQuantityMicros,
+        grossProceedsMicros: plan.grossProceedsMicros,
+        netProceedsMicros: plan.netProceedsMicros,
+        feeMicros: plan.feeMicros,
+        state,
+      });
+      return {
+        state,
+        triggered,
+        cancelledTargetCount,
+        filledSizeMicros: plan.filledSizeMicros,
+        grossProceedsMicros: plan.grossProceedsMicros,
+        netProceedsMicros: plan.netProceedsMicros,
+        feeMicros: plan.feeMicros,
+        filledOrderCount: 1,
         consumedBids,
       };
     });
@@ -3786,6 +4367,105 @@ export class PaperDatabase {
       );
   }
 
+  private updatePaperStopLossAfterBuy(
+    input: ImmediateBuyIntent,
+    continuingCycle: boolean,
+    now: string,
+  ): void {
+    const existing = this.getPaperStopLossRow(input.candidate.tokenId);
+    if (continuingCycle) {
+      if (existing === undefined) {
+        // A preference change must not retroactively add stop behavior to an
+        // already-open cycle.
+        return;
+      }
+      if (
+        existing.event_id !== input.candidate.eventId ||
+        existing.market_id !== input.candidate.marketId ||
+        existing.condition_id !== input.candidate.conditionId ||
+        existing.state === "EXITING" ||
+        existing.state === "STOPPED"
+      ) {
+        throw new Error("TEST stop-loss state does not match the active Event cycle");
+      }
+    } else {
+      this.database
+        .prepare(
+          `DELETE FROM paper_stop_losses
+          WHERE token_id = ? AND state IN ('WATCHING', 'ARMED')`,
+        )
+        .run(input.candidate.tokenId);
+      if (input.stopLossSettings?.enabled !== true) {
+        return;
+      }
+    }
+
+    const multiplierMicros = continuingCycle
+      ? (existing?.multiplier_micros ?? 0)
+      : (input.stopLossSettings?.multiplierMicros ?? 0);
+    const position = this.database
+      .prepare(
+        `SELECT gross_buy_size_micros, gross_buy_notional_micros
+        FROM paper_positions WHERE token_id = ?`,
+      )
+      .get(input.candidate.tokenId) as
+      | {
+          gross_buy_size_micros: number;
+          gross_buy_notional_micros: number;
+        }
+      | undefined;
+    if (
+      position === undefined ||
+      position.gross_buy_size_micros <= 0 ||
+      position.gross_buy_notional_micros <= 0
+    ) {
+      throw new Error("TEST stop loss requires a positive weighted buy entry");
+    }
+    const entryPriceMicros = Number(
+      (BigInt(position.gross_buy_notional_micros) * 1_000_000n) /
+        BigInt(position.gross_buy_size_micros),
+    );
+    const thresholdPriceMicros = calculateStopLossThresholdMicros(
+      entryPriceMicros,
+      multiplierMicros,
+    );
+    this.database
+      .prepare(
+        `INSERT INTO paper_stop_losses(
+          token_id, event_id, market_id, condition_id,
+          multiplier_micros, entry_price_micros, threshold_price_micros,
+          state, below_since, last_below_at, last_below_book_version,
+          below_observation_count, triggered_at, completed_at,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'WATCHING', NULL, NULL, NULL,
+          0, NULL, NULL, ?, ?)
+        ON CONFLICT(token_id) DO UPDATE SET
+          entry_price_micros = excluded.entry_price_micros,
+          threshold_price_micros = excluded.threshold_price_micros,
+          state = 'WATCHING', below_since = NULL, last_below_at = NULL,
+          last_below_book_version = NULL, below_observation_count = 0,
+          triggered_at = NULL, completed_at = NULL, updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.candidate.tokenId,
+        input.candidate.eventId,
+        input.candidate.marketId,
+        input.candidate.conditionId,
+        multiplierMicros,
+        entryPriceMicros,
+        thresholdPriceMicros,
+        now,
+        now,
+      );
+    this.writeAudit("TEST_STOP_LOSS_CONFIGURED", "market_token", input.candidate.tokenId, {
+      eventId: input.candidate.eventId,
+      entryPriceMicros,
+      thresholdPriceMicros,
+      multiplierMicros,
+      continuingCycle,
+    });
+  }
+
   private planTestFakBuy(
     input: ImmediateBuyIntent,
     requireRunning: boolean,
@@ -3793,6 +4473,10 @@ export class PaperDatabase {
     const { candidate, book } = input;
     const state = this.getStrategyState();
     const eventLock = this.getPaperEventLock(candidate.eventId);
+    const blockingStopLoss = this.getBlockingPaperStopLossForEvent(
+      candidate.eventId,
+    );
+    const tokenStopLoss = this.getPaperStopLossRow(candidate.tokenId);
     const position = this.database
       .prepare(
         `SELECT quantity_micros, cost_micros, first_sell_at,
@@ -3813,6 +4497,8 @@ export class PaperDatabase {
       strategyUpdatedAt: state.updatedAt,
       availableCashMicros: state.availableCashMicros,
       eventLock,
+      blockingStopLoss: blockingStopLoss ?? null,
+      tokenStopLoss: tokenStopLoss ?? null,
       position: position ?? null,
     });
     const result = (
@@ -3842,6 +4528,9 @@ export class PaperDatabase {
       candidate.isNegativeRisk !== book.isNegativeRisk ||
       book.bookVersion.trim().length === 0
     ) {
+      return result("BLOCKED");
+    }
+    if (blockingStopLoss !== undefined) {
       return result("BLOCKED");
     }
     if (
@@ -4171,6 +4860,43 @@ export class PaperDatabase {
       : this.releasePaperEventLockIfClosed(row.event_id, now);
   }
 
+  private finalizePaperStopLossAfterPositionClose(
+    tokenId: string,
+    now: string,
+  ): void {
+    const stopLoss = this.getPaperStopLossRow(tokenId);
+    if (stopLoss === undefined) {
+      return;
+    }
+    const position = this.database
+      .prepare(
+        "SELECT quantity_micros FROM paper_positions WHERE token_id = ?",
+      )
+      .get(tokenId) as { quantity_micros: number } | undefined;
+    if ((position?.quantity_micros ?? 0) > 0) {
+      return;
+    }
+    if (stopLoss.state === "EXITING") {
+      this.database
+        .prepare(
+          `UPDATE paper_stop_losses
+          SET state = 'STOPPED', completed_at = ?, updated_at = ?
+          WHERE token_id = ?`,
+        )
+        .run(now, now, tokenId);
+      this.writeAudit("TEST_STOP_LOSS_COMPLETED", "market_token", tokenId, {
+        eventId: stopLoss.event_id,
+        completedAt: now,
+      });
+      return;
+    }
+    if (stopLoss.state === "WATCHING" || stopLoss.state === "ARMED") {
+      this.database.prepare("DELETE FROM paper_stop_losses WHERE token_id = ?").run(
+        tokenId,
+      );
+    }
+  }
+
   private releasePaperEventLockIfClosed(eventId: string, now: string): boolean {
     const eventLock = this.getPaperEventLockRow(eventId);
     if (eventLock === undefined) {
@@ -4265,6 +4991,8 @@ export class PaperDatabase {
         max_buy_price_micros: number;
         target_sell_price_increase_micros: number;
         target_sell_price_multiplier_micros: number;
+        stop_loss_enabled: number;
+        stop_loss_multiplier_micros: number;
         min_market_duration_days: number;
         max_market_duration_days: number;
         max_market_progress_percent: number;
@@ -4283,6 +5011,7 @@ export class PaperDatabase {
           min_buy_price_micros, max_buy_price_micros,
           target_sell_price_increase_micros,
           target_sell_price_multiplier_micros,
+          stop_loss_enabled, stop_loss_multiplier_micros,
           min_market_duration_days, max_market_duration_days,
           max_market_progress_percent,
           min_bid_ask_ratio_percent,
@@ -4300,6 +5029,8 @@ export class PaperDatabase {
           max_buy_price_micros: number;
           target_sell_price_increase_micros: number;
           target_sell_price_multiplier_micros: number;
+          stop_loss_enabled: number;
+          stop_loss_multiplier_micros: number;
           min_market_duration_days: number;
           max_market_duration_days: number;
           max_market_progress_percent: number;
@@ -4322,6 +5053,36 @@ export class PaperDatabase {
         FROM paper_event_locks WHERE event_id = ?`,
       )
       .get(eventId) as PaperEventLockRow | undefined;
+  }
+
+  private getPaperStopLossRow(tokenId: string): PaperStopLossRow | undefined {
+    return this.database
+      .prepare(
+        `SELECT token_id, event_id, market_id, condition_id,
+          multiplier_micros, entry_price_micros, threshold_price_micros,
+          state, below_since, last_below_at, last_below_book_version,
+          below_observation_count, triggered_at, completed_at,
+          created_at, updated_at
+        FROM paper_stop_losses WHERE token_id = ?`,
+      )
+      .get(tokenId) as PaperStopLossRow | undefined;
+  }
+
+  private getBlockingPaperStopLossForEvent(
+    eventId: string,
+  ): PaperStopLossRow | undefined {
+    return this.database
+      .prepare(
+        `SELECT token_id, event_id, market_id, condition_id,
+          multiplier_micros, entry_price_micros, threshold_price_micros,
+          state, below_since, last_below_at, last_below_book_version,
+          below_observation_count, triggered_at, completed_at,
+          created_at, updated_at
+        FROM paper_stop_losses
+        WHERE event_id = ? AND state IN ('ARMED', 'EXITING', 'STOPPED')
+        ORDER BY token_id LIMIT 1`,
+      )
+      .get(eventId) as PaperStopLossRow | undefined;
   }
 
   private getPaperSettlementRow(
@@ -4492,5 +5253,14 @@ function emptyTestFakSell(): TargetSellExecution {
     feeMicros: 0,
     filledOrderCount: 0,
     consumedBids: [],
+  };
+}
+
+function emptyTestStopLoss(state: StopLossState | null): StopLossExecution {
+  return {
+    ...emptyTestFakSell(),
+    state,
+    triggered: false,
+    cancelledTargetCount: 0,
   };
 }

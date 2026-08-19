@@ -129,6 +129,6 @@ git pull --ff-only origin main
 docker compose up -d --build
 ```
 
-更新后必须复核运行提交、网页、`/api/status?compact=true`、`/api/test/validation`、SQLite迁移/持久化和同库重启恢复；状态保持`TEST + LIVE_DISABLED + PAUSED`。失败时保留数据库、备份及日志现场，不得通过删除数据库或关闭验证绕过安全门槛。
+更新后必须复核运行提交、网页、`/api/status?compact=true`、`/api/test/validation`、SQLite Schema 17、`paper_stop_losses` 持久化和同库重启恢复；状态保持`TEST + LIVE_DISABLED + PAUSED`。旧普通 TEST 只有在停机备份通过 SHA-256、SQLite 完整性、Schema 和计数核验后才能使用正式双重确认接口重置。重置后继续保持 `PAUSED`，等待用户在页面重新设参并另行明确 START；不得把部署或重置当成启动授权。失败时保留数据库、备份及日志现场，不得通过删除数据库或关闭验证绕过安全门槛。
 
 正式长期验证不直接手工调用启动接口。累计 72 小时、4 小时节点、配置变化分段、用户计入决定和故障暂停流程统一按 [`FORMAL_TEST_CAMPAIGN.md`](FORMAL_TEST_CAMPAIGN.md) 执行。

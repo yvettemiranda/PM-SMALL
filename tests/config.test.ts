@@ -10,6 +10,8 @@ describe("loadConfig", () => {
     expect(config.maxBuyPriceMicros).toBe(990_000);
     expect(config.targetSellPriceIncreaseMicros).toBe(10_000);
     expect(config.targetSellPriceMultiplierMicros).toBe(1_500_000);
+    expect(config.stopLossEnabled).toBe(true);
+    expect(config.stopLossMultiplierMicros).toBe(400_000);
     expect(config.minBidAskRatioPercent).toBe(50);
     expect(config.minMarketDurationDays).toBe(1);
     expect(config.maxMarketDurationDays).toBe(30);
@@ -42,6 +44,20 @@ describe("loadConfig", () => {
       targetSellPriceIncreaseMicros: 5_125,
       targetSellPriceMultiplierMicros: 1_812_345,
     });
+  });
+
+  it("loads a configurable TEST stop loss and rejects unsafe multipliers", () => {
+    expect(
+      loadConfig({
+        STOP_LOSS_ENABLED: "false",
+        STOP_LOSS_MULTIPLIER: "0.375",
+      }),
+    ).toMatchObject({
+      stopLossEnabled: false,
+      stopLossMultiplierMicros: 375_000,
+    });
+    expect(() => loadConfig({ STOP_LOSS_MULTIPLIER: "0" })).toThrow();
+    expect(() => loadConfig({ STOP_LOSS_MULTIPLIER: "1" })).toThrow();
   });
 
   it("rejects a per-Event cycle budget above the total budget", () => {

@@ -271,15 +271,21 @@ export class PaperMarketProcessor {
     ) {
       return;
     }
-    const result = this.executor.executeTargetSells({
+    const intent = {
       tokenId,
       bookVersion: book.bidExternalVersion,
       bids: mapToLevels(book.bids),
       minOrderSizeMicros: metadata.minOrderSizeMicros,
       feeRateMicros: metadata.feeRateMicros,
       feeExponent: metadata.feeExponent,
+    };
+    const stopLoss = this.executor.executeStopLoss({
+      ...intent,
+      observedAt: new Date(),
     });
-    this.paperSellFillCount += result.filledOrderCount;
+    const targets = this.executor.executeTargetSells(intent);
+    this.paperSellFillCount +=
+      stopLoss.filledOrderCount + targets.filledOrderCount;
   }
 
   private isIncludedInSnapshot(event: MarketTrade, book: BookState): boolean {

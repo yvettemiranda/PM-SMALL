@@ -235,6 +235,29 @@
                 </label>
               </div>
               <p class="field-note">首次成交时冻结为该 Event 本轮的累计现金投入上限；买入费用从实际获得份额中扣除。</p>
+              <div class="stop-loss-settings">
+                <label class="stop-loss-toggle">
+                  <input id="stop-loss-enabled" type="checkbox" />
+                  <span>启用主动止损</span>
+                </label>
+                <label class="field stop-loss-multiplier-field">
+                  <span>买入均价倍数</span>
+                  <span class="unit-input multiplier-input">
+                    <input
+                      id="stop-loss-multiplier"
+                      type="number"
+                      min="0.000001"
+                      max="0.999999"
+                      step="any"
+                      inputmode="decimal"
+                      required
+                      aria-label="主动止损的买入均价倍数"
+                    />
+                    <span>×</span>
+                  </span>
+                </label>
+              </div>
+              <p class="field-note">默认 0.40×；新鲜可成交买盘连续约 30 秒低于止损线后主动退出。只影响后续新周期。</p>
               <button id="reset-test" class="button danger" type="button">重置TEST</button>
             </div>
           </div>
